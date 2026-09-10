@@ -16,6 +16,7 @@ class Settings:
     pump_threshold_percent: float
     poll_interval_seconds: int
     alert_cooldown_seconds: int
+    audit_db_path: str
 
 
 def _load_env_file(path: Path = Path(".env")) -> None:
@@ -53,6 +54,7 @@ def load_settings() -> Settings:
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
+        audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
     )
     missing = [
         name
@@ -71,6 +73,8 @@ def load_settings() -> Settings:
         raise ValueError("Рыночные данные разрешены только с публичного Binance Spot API")
     if not settings.watch_symbols:
         raise ValueError("WATCH_SYMBOLS не может быть пустым")
+    if not settings.audit_db_path:
+        raise ValueError("AUDIT_DB_PATH не может быть пустым")
     if min(
         settings.pump_window_seconds,
         settings.poll_interval_seconds,
