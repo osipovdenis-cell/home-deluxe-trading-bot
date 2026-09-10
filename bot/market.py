@@ -39,6 +39,36 @@ class MarketMonitor:
             if item.get("symbol") in self.symbols
         }
 
+    def fetch_minute_candles(
+        self, symbol: str, started_at: float, finished_at: float
+    ) -> list[tuple[float, float, float]]:
+        candles: list[tuple[float, float, float]] = []
+        cursor = int(started_at * 1000)
+        finished_ms = int(finished_at * 1000)
+        while cursor < finished_ms:
+            response = self.client.get(
+                "/api/v3/klines",
+                params={
+                    "symbol": symbol,
+                    "interval": "1m",
+                    "startTime": cursor,
+                    "endTime": finished_ms,
+                    "limit": 1000,
+                },
+            )
+            response.raise_for_status()
+            rows = response.json()
+            if not rows:
+                break
+            candles.extend(
+                (float(row[0]) / 1000, float(row[3]), float(row[2])) for row in rows
+            )
+            next_cursor = int(rows[-1][0]) + 60_000
+            if next_cursor <= cursor:
+                break
+            cursor = next_cursor
+        return candles
+
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
         signals: list[PumpSignal] = []
