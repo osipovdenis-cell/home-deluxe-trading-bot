@@ -1,0 +1,17 @@
+[Unit]
+Description=Home Deluxe Binance Spot Testnet Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bot
+ExecStart=/root/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
