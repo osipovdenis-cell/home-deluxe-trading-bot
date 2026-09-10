@@ -10,6 +10,12 @@ class Settings:
     binance_base_url: str
     telegram_bot_token: str
     telegram_chat_id: str | None
+    market_data_base_url: str
+    watch_symbols: tuple[str, ...]
+    pump_window_seconds: int
+    pump_threshold_percent: float
+    poll_interval_seconds: int
+    alert_cooldown_seconds: int
 
 
 def _load_env_file(path: Path = Path(".env")) -> None:
@@ -33,6 +39,20 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip() or None,
+        market_data_base_url=os.getenv(
+            "MARKET_DATA_BASE_URL", "https://api.binance.com"
+        ).rstrip("/"),
+        watch_symbols=tuple(
+            symbol.strip().upper()
+            for symbol in os.getenv(
+                "WATCH_SYMBOLS", "DOGEUSDT,SHIBUSDT,PEPEUSDT,BONKUSDT,FLOKIUSDT,WIFUSDT"
+            ).split(",")
+            if symbol.strip()
+        ),
+        pump_window_seconds=int(os.getenv("PUMP_WINDOW_SECONDS", "300")),
+        pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
+        poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
+        alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
     )
     missing = [
         name
@@ -47,4 +67,14 @@ def load_settings() -> Settings:
         raise ValueError(f"Не заполнены переменные: {', '.join(missing)}")
     if settings.binance_base_url != "https://testnet.binance.vision":
         raise ValueError("Первая версия разрешает подключение только к Binance Spot Testnet")
+    if settings.market_data_base_url != "https://api.binance.com":
+        raise ValueError("Рыночные данные разрешены только с публичного Binance Spot API")
+    if not settings.watch_symbols:
+        raise ValueError("WATCH_SYMBOLS не может быть пустым")
+    if min(
+        settings.pump_window_seconds,
+        settings.poll_interval_seconds,
+        settings.alert_cooldown_seconds,
+    ) <= 0 or settings.pump_threshold_percent <= 0:
+        raise ValueError("Параметры мониторинга должны быть больше нуля")
     return settings
