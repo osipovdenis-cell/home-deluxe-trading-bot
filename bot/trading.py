@@ -89,6 +89,7 @@ class TradingIntelligenceSummary:
     average_giveback_percent: float
     fast_exit_pnl_usdt: float
     target_3_pnl_usdt: float
+    target_5_pnl_usdt: float
 
     def as_dict(self) -> dict:
         return {
@@ -114,6 +115,9 @@ class TradingIntelligenceSummary:
                 "full_exit_at_3_percent_pnl_usdt": round(
                     self.target_3_pnl_usdt, 4
                 ),
+                "full_exit_at_5_percent_pnl_usdt": round(
+                    self.target_5_pnl_usdt, 4
+                ),
             },
         }
 
@@ -125,6 +129,7 @@ class TradingIntelligenceSummary:
             "наша 40/40/20": self.actual_pnl_usdt,
             "всё на +1,5%": self.fast_exit_pnl_usdt,
             "всё на +3%": self.target_3_pnl_usdt,
+            "всё на +5%": self.target_5_pnl_usdt,
         }
         winner = max(variants, key=variants.get)
         return (
@@ -140,7 +145,8 @@ class TradingIntelligenceSummary:
             "Параллельный пересчёт на тех же сигналах:\n"
             f"• наша 40/40/20: {self.actual_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +1,5%: {self.fast_exit_pnl_usdt:+.3f} USDT;\n"
-            f"• всё на +3%: {self.target_3_pnl_usdt:+.3f} USDT.\n"
+            f"• всё на +3%: {self.target_3_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +5%: {self.target_5_pnl_usdt:+.3f} USDT.\n"
             f"Лучший вариант за период: {winner}."
         )
 
@@ -601,7 +607,7 @@ class PaperTrader:
             (started_at, now),
         ).fetchall()
         if not positions:
-            return TradingIntelligenceSummary(0, 0, 0, None, 0, 0, 0, 0, 0)
+            return TradingIntelligenceSummary(0, 0, 0, None, 0, 0, 0, 0, 0, 0)
         samples_table = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'samples'"
         ).fetchone()
@@ -611,6 +617,7 @@ class PaperTrader:
         giveback_values: list[float] = []
         fast_pnl = 0.0
         target_3_pnl = 0.0
+        target_5_pnl = 0.0
         for row in positions:
             entry_price = float(row["entry_price"])
             position_usdt = float(row["position_usdt"])
@@ -646,6 +653,9 @@ class PaperTrader:
             target_3_pnl += self._control_strategy_pnl(
                 entry_price, position_usdt, observed_prices, 3.0
             )
+            target_5_pnl += self._control_strategy_pnl(
+                entry_price, position_usdt, observed_prices, 5.0
+            )
         gains = sum(value for value in actual_values if value > 0)
         losses = abs(sum(value for value in actual_values if value < 0))
         profit_factor = gains / losses if losses > 0 else None
@@ -659,6 +669,7 @@ class PaperTrader:
             sum(giveback_values) / len(giveback_values),
             fast_pnl,
             target_3_pnl,
+            target_5_pnl,
         )
 
     def finish_report(self, prices: dict[str, float], now: float) -> None:
