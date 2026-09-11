@@ -48,6 +48,20 @@ class PaperTraderTests(unittest.TestCase):
             finally:
                 trader.close()
 
+    def test_never_intentionally_gives_back_first_profit_level(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 63, 0)
+                first = trader.update_positions({"TESTUSDT": 101.5}, 60)
+                self.assertEqual(first[0].remaining_percent, 60)
+                final = trader.update_positions({"TESTUSDT": 101.49}, 120)
+                self.assertEqual(len(final), 1)
+                self.assertEqual(final[0].reason, "защита прибыли +1,5%")
+                self.assertEqual(final[0].remaining_percent, 0)
+            finally:
+                trader.close()
+
     def test_respects_total_budget(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = PaperTrader(
