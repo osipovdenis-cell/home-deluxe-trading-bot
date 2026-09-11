@@ -399,6 +399,20 @@ class PaperTrader:
                 ).fetchone()
             if row["status"] != "OPEN":
                 continue
+            if (
+                int(row["take_1_done"])
+                and change + 1e-9 < self.take_profit_1_percent
+            ):
+                notices.append(
+                    self._sell(
+                        row,
+                        float(row["remaining_quantity"]),
+                        price,
+                        now,
+                        "защита прибыли +1,5%",
+                    )
+                )
+                continue
             drawdown = (price / highest - 1) * 100
             if int(row["take_1_done"]) and drawdown <= -self.trailing_drawdown_percent:
                 notices.append(
