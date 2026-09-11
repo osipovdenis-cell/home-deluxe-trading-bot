@@ -34,6 +34,7 @@ def main() -> None:
     trader = (
         PaperTrader(
             settings.audit_db_path,
+            settings.paper_starting_balance_usdt,
             settings.paper_position_usdt,
             settings.paper_max_open_positions,
             settings.paper_min_ai_score,
@@ -83,8 +84,10 @@ def main() -> None:
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
             "Проверка сигналов: через 15, 30 и 60 мин.\n"
             + (
-                f"Тестовые сделки: включены, {settings.paper_position_usdt:g} USDT "
-                f"на позицию, вход от {settings.paper_min_ai_score}/100.\n"
+                f"Тестовые сделки: включены, банк "
+                f"{settings.paper_starting_balance_usdt:g} USDT, "
+                f"по {settings.paper_position_usdt:g} USDT на позицию, "
+                f"вход от {settings.paper_min_ai_score}/100.\n"
                 if trader is not None
                 else "Тестовые сделки: выключены.\n"
             )
@@ -216,7 +219,7 @@ def main() -> None:
                         + performance.telegram_text()
                         + performance_ai_text
                         + (
-                            "\n\n" + trader.summary_since(started, now).telegram_text()
+                            "\n\n" + trader.summary(prices).telegram_text()
                             if trader is not None
                             else ""
                         )
