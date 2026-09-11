@@ -6,7 +6,7 @@ from bot.trading import PaperTrader
 
 
 def make_trader(path: str) -> PaperTrader:
-    trader = PaperTrader(path, 150, 50, 3, 55, 1, 1.5, 3, 1, 0, 0.2)
+    trader = PaperTrader(path, 150, 50, 3, 55, 1, 1.5, 3, 5, 1, 0, 0.2)
     trader.connection.execute(
         "UPDATE paper_account SET report_started_at = 0 WHERE id = 1"
     )
@@ -24,7 +24,7 @@ class PaperTraderTests(unittest.TestCase):
             finally:
                 trader.close()
 
-    def test_takes_partial_profit_and_closes_on_trailing_drawdown(self) -> None:
+    def test_takes_three_staged_profits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
             try:
@@ -37,14 +37,30 @@ class PaperTraderTests(unittest.TestCase):
                 second = trader.update_positions({"TESTUSDT": 103}, 120)
                 self.assertEqual(len(second), 1)
                 self.assertAlmostEqual(second[0].remaining_percent, 20)
-                final = trader.update_positions({"TESTUSDT": 101.9}, 180)
+                final = trader.update_positions({"TESTUSDT": 105}, 180)
                 self.assertEqual(len(final), 1)
                 self.assertEqual(final[0].remaining_percent, 0)
+                self.assertEqual(final[0].reason, "фиксация +5%")
                 self.assertGreater(final[0].total_position_pnl_usdt, 0)
-                summary = trader.summary({"TESTUSDT": 101.9}, 200)
+                summary = trader.summary({"TESTUSDT": 105}, 200)
                 self.assertEqual(summary.closed_positions, 1)
                 self.assertEqual(summary.profitable_positions, 1)
                 self.assertGreater(summary.equity_usdt, 150)
+            finally:
+                trader.close()
+
+    def test_protects_last_twenty_percent_at_second_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 63, 0)
+                trader.update_positions({"TESTUSDT": 101.5}, 60)
+                second = trader.update_positions({"TESTUSDT": 103}, 120)
+                self.assertAlmostEqual(second[0].remaining_percent, 20)
+                final = trader.update_positions({"TESTUSDT": 102.99}, 180)
+                self.assertEqual(len(final), 1)
+                self.assertEqual(final[0].reason, "защита прибыли +3%")
+                self.assertEqual(final[0].remaining_percent, 0)
             finally:
                 trader.close()
 
@@ -73,6 +89,7 @@ class PaperTraderTests(unittest.TestCase):
                 1,
                 1.5,
                 3,
+                5,
                 1,
                 900,
                 0.2,
