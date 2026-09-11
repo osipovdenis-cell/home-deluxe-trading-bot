@@ -8,6 +8,7 @@ from bot.binance_testnet import BinanceTestnetClient
 from bot.config import load_settings
 from bot.market import MarketMonitor
 from bot.telegram import TelegramClient
+from bot.trading import PaperTrader
 
 
 def main() -> None:
@@ -30,6 +31,22 @@ def main() -> None:
         settings.max_signals_per_cycle,
     )
     audit = AuditLog(settings.audit_db_path)
+    trader = (
+        PaperTrader(
+            settings.audit_db_path,
+            settings.paper_position_usdt,
+            settings.paper_max_open_positions,
+            settings.paper_min_ai_score,
+            settings.paper_stop_loss_percent,
+            settings.paper_take_profit_1_percent,
+            settings.paper_take_profit_2_percent,
+            settings.paper_trailing_drawdown_percent,
+            settings.paper_max_hold_seconds,
+            settings.estimated_round_trip_cost_percent,
+        )
+        if settings.paper_trading_enabled
+        else None
+    )
     ai = (
         AIAnalyst(settings.openai_api_key, settings.openai_model)
         if settings.openai_api_key
@@ -55,8 +72,7 @@ def main() -> None:
             if settings.scan_all_usdt
             else f"Мониторинг: {', '.join(settings.watch_symbols)}.\n"
         )
-        telegram.send(
-            chat_id,
+        startup_message = (
             "✅ Home Deluxe Trading Bot запущен.\n"
             "Исполнение: Binance Spot Testnet.\n"
             f"Тестовая торговля разрешена: {can_trade}.\n"
@@ -66,9 +82,16 @@ def main() -> None:
             f"за {settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
             "Проверка сигналов: через 15, 30 и 60 мин.\n"
-            f"ИИ-аналитик: {ai_status}.\n"
-            "Суточный аудит: включён.",
+            + (
+                f"Тестовые сделки: включены, {settings.paper_position_usdt:g} USDT "
+                f"на позицию, вход от {settings.paper_min_ai_score}/100.\n"
+                if trader is not None
+                else "Тестовые сделки: выключены.\n"
+            )
+            + f"ИИ-аналитик: {ai_status}.\n"
+            "Суточный аудит: включён."
         )
+        telegram.send(chat_id, startup_message)
         print(f"Мониторинг запущен. TELEGRAM_CHAT_ID={chat_id}", flush=True)
         while True:
             try:
@@ -80,6 +103,9 @@ def main() -> None:
                     now,
                     settings.estimated_round_trip_cost_percent,
                 )
+                if trader is not None:
+                    for notice in trader.update_positions(prices, now):
+                        telegram.send(chat_id, notice.telegram_text())
                 for signal in market.update(prices, now=now):
                     analysis = None
                     if ai is not None:
@@ -115,6 +141,15 @@ def main() -> None:
                         analysis.score if analysis is not None else None,
                         analysis.verdict if analysis is not None else None,
                     )
+                    trade_notice = None
+                    if trader is not None:
+                        trade_notice = trader.open_on_signal(
+                            signal.symbol,
+                            signal.price,
+                            signal.kind,
+                            analysis.score if analysis is not None else None,
+                            now,
+                        )
                     try:
                         telegram.send(
                             chat_id,
@@ -129,6 +164,8 @@ def main() -> None:
                             "Это информационный сигнал, не команда на покупку.",
                         )
                         audit.record_alert(signal.symbol, True, now)
+                        if trade_notice is not None:
+                            telegram.send(chat_id, trade_notice.telegram_text())
                     except httpx.HTTPError as error:
                         audit.record_alert(signal.symbol, False, now, str(error))
                         print(f"Ошибка отправки сигнала: {error}", flush=True)
@@ -173,13 +210,18 @@ def main() -> None:
                         except (httpx.HTTPError, AIError) as error:
                             audit.record_error(f"OpenAI daily audit: {error}", now)
                             print(f"Ошибка суточного ИИ-аудита: {error}", flush=True)
-                    telegram.send(
-                        chat_id,
+                    daily_message = (
                         summary.telegram_text()
                         + "\n\n"
                         + performance.telegram_text()
-                        + performance_ai_text,
+                        + performance_ai_text
+                        + (
+                            "\n\n" + trader.summary_since(started, now).telegram_text()
+                            if trader is not None
+                            else ""
+                        )
                     )
+                    telegram.send(chat_id, daily_message)
                     audit.finish_period(now)
                     print("Суточный аудит отправлен в Telegram.", flush=True)
                 time.sleep(settings.poll_interval_seconds)
@@ -193,6 +235,8 @@ def main() -> None:
         if ai is not None:
             ai.close()
         audit.close()
+        if trader is not None:
+            trader.close()
         market.close()
         binance.close()
         telegram.close()
