@@ -27,6 +27,7 @@ class Settings:
     paper_stop_loss_percent: float
     paper_take_profit_1_percent: float
     paper_take_profit_2_percent: float
+    paper_take_profit_3_percent: float
     paper_trailing_drawdown_percent: float
     paper_max_hold_seconds: int
     poll_interval_seconds: int
@@ -97,6 +98,9 @@ def load_settings() -> Settings:
         paper_take_profit_2_percent=float(
             os.getenv("PAPER_TAKE_PROFIT_2_PERCENT", "3")
         ),
+        paper_take_profit_3_percent=float(
+            os.getenv("PAPER_TAKE_PROFIT_3_PERCENT", "5")
+        ),
         paper_trailing_drawdown_percent=float(
             os.getenv("PAPER_TRAILING_DRAWDOWN_PERCENT", "1")
         ),
@@ -143,6 +147,7 @@ def load_settings() -> Settings:
         settings.paper_stop_loss_percent,
         settings.paper_take_profit_1_percent,
         settings.paper_take_profit_2_percent,
+        settings.paper_take_profit_3_percent,
         settings.paper_trailing_drawdown_percent,
     ) <= 0:
         raise ValueError("Параметры мониторинга должны быть больше нуля")
@@ -154,8 +159,12 @@ def load_settings() -> Settings:
         raise ValueError("PAPER_MAX_HOLD_SECONDS не может быть отрицательным")
     if not 0 <= settings.paper_min_ai_score <= 100:
         raise ValueError("PAPER_MIN_AI_SCORE должен быть в диапазоне 0–100")
-    if settings.paper_take_profit_1_percent >= settings.paper_take_profit_2_percent:
-        raise ValueError("Первая цель прибыли должна быть меньше второй")
+    if not (
+        settings.paper_take_profit_1_percent
+        < settings.paper_take_profit_2_percent
+        < settings.paper_take_profit_3_percent
+    ):
+        raise ValueError("Цели прибыли должны последовательно увеличиваться")
     if (
         settings.paper_position_usdt * settings.paper_max_open_positions
         > settings.paper_starting_balance_usdt
