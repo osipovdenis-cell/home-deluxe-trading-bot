@@ -172,6 +172,10 @@ def main() -> None:
                     except httpx.HTTPError as error:
                         audit.record_alert(signal.symbol, False, now, str(error))
                         print(f"Ошибка отправки сигнала: {error}", flush=True)
+                if trader is not None and trader.report_due(now):
+                    telegram.send(chat_id, trader.summary(prices, now).telegram_text())
+                    trader.finish_report(prices, now)
+                    print("Суточный отчёт тестовой торговли отправлен.", flush=True)
                 if audit.report_due(now):
                     started = audit.period_started_at()
                     events = {}
@@ -218,11 +222,6 @@ def main() -> None:
                         + "\n\n"
                         + performance.telegram_text()
                         + performance_ai_text
-                        + (
-                            "\n\n" + trader.summary(prices).telegram_text()
-                            if trader is not None
-                            else ""
-                        )
                     )
                     telegram.send(chat_id, daily_message)
                     audit.finish_period(now)
