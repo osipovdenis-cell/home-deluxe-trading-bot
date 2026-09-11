@@ -111,6 +111,49 @@ class AIAnalyst:
         response.raise_for_status()
         return self._parse_analysis(self._extract_output_text(response.json()))
 
+    def analyze_performance(self, performance: dict) -> AIAnalysis:
+        response = self.client.post(
+            "/v1/responses",
+            json={
+                "model": self.model,
+                "store": False,
+                "reasoning": {"effort": "low"},
+                "max_output_tokens": 450,
+                "instructions": (
+                    "Ты аналитический модуль криптовалютного тестового бота. "
+                    "Проанализируй суточную статистику импульсных сигналов после "
+                    "указанных торговых издержек. Кратко оцени качество сигналов "
+                    "и главный риск. Не обещай прибыль. Если выборка мала, явно "
+                    "скажи, что вывод предварительный. Пиши по-русски."
+                ),
+                "input": json.dumps(performance, ensure_ascii=False),
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "signal_performance_analysis",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "score": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 100,
+                                },
+                                "verdict": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "risk": {"type": "string"},
+                            },
+                            "required": ["score", "verdict", "reason", "risk"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+            },
+        )
+        response.raise_for_status()
+        return self._parse_analysis(self._extract_output_text(response.json()))
+
     def check_connection(self) -> None:
         self.analyze_momentum("SYSTEM_CHECK", 1.0, 0.0, 5)
 
