@@ -100,7 +100,7 @@ def load_settings() -> Settings:
         paper_trailing_drawdown_percent=float(
             os.getenv("PAPER_TRAILING_DRAWDOWN_PERCENT", "1")
         ),
-        paper_max_hold_seconds=int(os.getenv("PAPER_MAX_HOLD_SECONDS", "900")),
+        paper_max_hold_seconds=int(os.getenv("PAPER_MAX_HOLD_SECONDS", "0")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
@@ -134,7 +134,6 @@ def load_settings() -> Settings:
         settings.alert_cooldown_seconds,
         settings.max_signals_per_cycle,
         settings.paper_max_open_positions,
-        settings.paper_max_hold_seconds,
     ) <= 0 or min(
         settings.early_threshold_percent,
         settings.pump_threshold_percent,
@@ -151,6 +150,8 @@ def load_settings() -> Settings:
         raise ValueError("EARLY_THRESHOLD_PERCENT не может превышать PUMP_THRESHOLD_PERCENT")
     if settings.estimated_round_trip_cost_percent < 0:
         raise ValueError("ESTIMATED_ROUND_TRIP_COST_PERCENT не может быть отрицательным")
+    if settings.paper_max_hold_seconds < 0:
+        raise ValueError("PAPER_MAX_HOLD_SECONDS не может быть отрицательным")
     if not 0 <= settings.paper_min_ai_score <= 100:
         raise ValueError("PAPER_MIN_AI_SCORE должен быть в диапазоне 0–100")
     if settings.paper_take_profit_1_percent >= settings.paper_take_profit_2_percent:
