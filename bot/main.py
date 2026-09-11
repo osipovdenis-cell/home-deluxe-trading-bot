@@ -88,6 +88,7 @@ def main() -> None:
                 f"{settings.paper_starting_balance_usdt:g} USDT, "
                 f"по {settings.paper_position_usdt:g} USDT на позицию, "
                 f"вход от {settings.paper_min_ai_score}/100.\n"
+                "Время удержания позиции не ограничено.\n"
                 if trader is not None
                 else "Тестовые сделки: выключены.\n"
             )
