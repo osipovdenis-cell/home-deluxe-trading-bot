@@ -24,6 +24,10 @@ def main() -> None:
         settings.pump_window_seconds,
         settings.pump_threshold_percent,
         settings.alert_cooldown_seconds,
+        settings.scan_all_usdt,
+        settings.min_quote_volume_usdt,
+        settings.early_threshold_percent,
+        settings.max_signals_per_cycle,
     )
     audit = AuditLog(settings.audit_db_path)
     ai = (
@@ -34,6 +38,7 @@ def main() -> None:
     try:
         account = binance.account()
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
+        market.fetch_prices()
         can_trade = "да" if account.get("canTrade") else "нет"
         ai_status = "не настроен"
         if ai is not None:
@@ -44,15 +49,22 @@ def main() -> None:
                 ai_status = "ошибка подключения"
                 audit.record_error(f"OpenAI: {error}")
                 print(f"Ошибка подключения OpenAI: {error}", flush=True)
+        monitoring_text = (
+            "Мониторинг: весь Binance Spot USDT "
+            f"({len(market.symbols)} активных, {market.eligible_count} прошли фильтр).\n"
+            if settings.scan_all_usdt
+            else f"Мониторинг: {', '.join(settings.watch_symbols)}.\n"
+        )
         telegram.send(
             chat_id,
             "✅ Home Deluxe Trading Bot запущен.\n"
             "Исполнение: Binance Spot Testnet.\n"
             f"Тестовая торговля разрешена: {can_trade}.\n"
             "Реальные деньги не используются.\n"
-            f"Мониторинг: {', '.join(settings.watch_symbols)}.\n"
-            f"Сигнал: рост от {settings.pump_threshold_percent:g}% "
+            f"{monitoring_text}"
+            f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% "
             f"за {settings.pump_window_seconds // 60} мин.\n"
+            f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
             f"ИИ-аналитик: {ai_status}.\n"
             "Суточный аудит: включён.",
         )
@@ -71,6 +83,9 @@ def main() -> None:
                                 signal.price,
                                 signal.change_percent,
                                 signal.window_seconds // 60,
+                                signal.quote_volume_usdt,
+                                signal.change_24h_percent,
+                                signal.kind,
                             )
                         except (httpx.HTTPError, AIError) as error:
                             audit.record_error(f"OpenAI: {error}", now)
@@ -86,9 +101,12 @@ def main() -> None:
                     try:
                         telegram.send(
                             chat_id,
-                            f"🚀 Резкий рост {signal.symbol}\n"
+                            f"{'🚀' if signal.kind == 'сильный' else '⚡️'} "
+                            f"{signal.kind.capitalize()} сигнал {signal.symbol}\n"
                             f"Изменение: +{signal.change_percent:.2f}% "
                             f"за {signal.window_seconds // 60} мин.\n"
+                            f"Изменение за 24 ч: {signal.change_24h_percent:+.2f}%.\n"
+                            f"Оборот за 24 ч: {signal.quote_volume_usdt:,.0f} USDT.\n"
                             f"Цена: {signal.price:.10g}\n"
                             f"{ai_text}"
                             "Это информационный сигнал, не команда на покупку.",
@@ -100,7 +118,8 @@ def main() -> None:
                 if audit.report_due(now):
                     started = audit.period_started_at()
                     events = {}
-                    for symbol in settings.watch_symbols:
+                    monitored_symbols = tuple(sorted(market.symbols))
+                    for symbol in monitored_symbols:
                         candles = market.fetch_minute_candles(
                             symbol,
                             started - settings.pump_window_seconds,
@@ -115,7 +134,7 @@ def main() -> None:
                         events[symbol] = [event for event in detected if event >= started]
                     summary = audit.build_summary(
                         now,
-                        settings.watch_symbols,
+                        monitored_symbols,
                         events,
                         settings.poll_interval_seconds,
                         settings.pump_threshold_percent,
