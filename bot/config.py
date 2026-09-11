@@ -19,6 +19,15 @@ class Settings:
     pump_threshold_percent: float
     max_signals_per_cycle: int
     estimated_round_trip_cost_percent: float
+    paper_trading_enabled: bool
+    paper_position_usdt: float
+    paper_max_open_positions: int
+    paper_min_ai_score: int
+    paper_stop_loss_percent: float
+    paper_take_profit_1_percent: float
+    paper_take_profit_2_percent: float
+    paper_trailing_drawdown_percent: float
+    paper_max_hold_seconds: int
     poll_interval_seconds: int
     alert_cooldown_seconds: int
     audit_db_path: str
@@ -73,6 +82,21 @@ def load_settings() -> Settings:
         estimated_round_trip_cost_percent=float(
             os.getenv("ESTIMATED_ROUND_TRIP_COST_PERCENT", "0.2")
         ),
+        paper_trading_enabled=_env_bool("PAPER_TRADING_ENABLED", True),
+        paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
+        paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "3")),
+        paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "55")),
+        paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "1")),
+        paper_take_profit_1_percent=float(
+            os.getenv("PAPER_TAKE_PROFIT_1_PERCENT", "1.5")
+        ),
+        paper_take_profit_2_percent=float(
+            os.getenv("PAPER_TAKE_PROFIT_2_PERCENT", "3")
+        ),
+        paper_trailing_drawdown_percent=float(
+            os.getenv("PAPER_TRAILING_DRAWDOWN_PERCENT", "1")
+        ),
+        paper_max_hold_seconds=int(os.getenv("PAPER_MAX_HOLD_SECONDS", "900")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
@@ -105,14 +129,25 @@ def load_settings() -> Settings:
         settings.poll_interval_seconds,
         settings.alert_cooldown_seconds,
         settings.max_signals_per_cycle,
+        settings.paper_max_open_positions,
+        settings.paper_max_hold_seconds,
     ) <= 0 or min(
         settings.early_threshold_percent,
         settings.pump_threshold_percent,
         settings.min_quote_volume_usdt,
+        settings.paper_position_usdt,
+        settings.paper_stop_loss_percent,
+        settings.paper_take_profit_1_percent,
+        settings.paper_take_profit_2_percent,
+        settings.paper_trailing_drawdown_percent,
     ) <= 0:
         raise ValueError("Параметры мониторинга должны быть больше нуля")
     if settings.early_threshold_percent > settings.pump_threshold_percent:
         raise ValueError("EARLY_THRESHOLD_PERCENT не может превышать PUMP_THRESHOLD_PERCENT")
     if settings.estimated_round_trip_cost_percent < 0:
         raise ValueError("ESTIMATED_ROUND_TRIP_COST_PERCENT не может быть отрицательным")
+    if not 0 <= settings.paper_min_ai_score <= 100:
+        raise ValueError("PAPER_MIN_AI_SCORE должен быть в диапазоне 0–100")
+    if settings.paper_take_profit_1_percent >= settings.paper_take_profit_2_percent:
+        raise ValueError("Первая цель прибыли должна быть меньше второй")
     return settings
