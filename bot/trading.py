@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
+import time
 
 
 @dataclass(frozen=True)
@@ -45,8 +46,10 @@ class TradeNotice:
 @dataclass(frozen=True)
 class PaperTradingSummary:
     starting_balance_usdt: float
+    period_start_equity_usdt: float
     cash_balance_usdt: float
     equity_usdt: float
+    period_hours: float
     open_positions: int
     closed_positions: int
     profitable_positions: int
@@ -54,6 +57,8 @@ class PaperTradingSummary:
     def telegram_text(self) -> str:
         result = self.equity_usdt - self.starting_balance_usdt
         result_percent = result / self.starting_balance_usdt * 100
+        period_result = self.equity_usdt - self.period_start_equity_usdt
+        period_percent = period_result / self.period_start_equity_usdt * 100
         win_rate = (
             self.profitable_positions / self.closed_positions * 100
             if self.closed_positions
@@ -63,7 +68,9 @@ class PaperTradingSummary:
             "🧪 Виртуальный торговый банк\n"
             f"Старт: {self.starting_balance_usdt:.2f} USDT.\n"
             f"Сейчас: {self.equity_usdt:.3f} USDT.\n"
-            f"Результат: {result:+.3f} USDT ({result_percent:+.2f}%).\n"
+            f"За {self.period_hours:.1f} ч: {period_result:+.3f} USDT "
+            f"({period_percent:+.2f}%).\n"
+            f"Всего от старта: {result:+.3f} USDT ({result_percent:+.2f}%).\n"
             f"Свободно: {self.cash_balance_usdt:.3f} USDT.\n"
             f"Открыто позиций: {self.open_positions}.\n"
             f"Закрыто позиций: {self.closed_positions}.\n"
@@ -136,15 +143,41 @@ class PaperTrader:
             CREATE TABLE IF NOT EXISTS paper_account (
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 starting_balance_usdt REAL NOT NULL,
-                cash_balance_usdt REAL NOT NULL
+                cash_balance_usdt REAL NOT NULL,
+                report_started_at REAL NOT NULL,
+                report_start_equity_usdt REAL NOT NULL
             );
             """
         )
+        account_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(paper_account)")
+        }
+        if "report_started_at" not in account_columns:
+            self.connection.execute(
+                "ALTER TABLE paper_account ADD COLUMN report_started_at REAL"
+            )
+        if "report_start_equity_usdt" not in account_columns:
+            self.connection.execute(
+                "ALTER TABLE paper_account ADD COLUMN report_start_equity_usdt REAL"
+            )
         self.connection.execute(
             "INSERT OR IGNORE INTO paper_account("
-            "id, starting_balance_usdt, cash_balance_usdt"
-            ") VALUES(1, ?, ?)",
-            (starting_balance_usdt, starting_balance_usdt),
+            "id, starting_balance_usdt, cash_balance_usdt, report_started_at, "
+            "report_start_equity_usdt) VALUES(1, ?, ?, ?, ?)",
+            (
+                starting_balance_usdt,
+                starting_balance_usdt,
+                time.time(),
+                starting_balance_usdt,
+            ),
+        )
+        self.connection.execute(
+            "UPDATE paper_account SET "
+            "report_started_at = COALESCE(report_started_at, ?), "
+            "report_start_equity_usdt = COALESCE("
+            "report_start_equity_usdt, starting_balance_usdt) WHERE id = 1",
+            (time.time(),),
         )
         self.connection.commit()
 
@@ -369,13 +402,24 @@ class PaperTrader:
                 )
         return notices
 
-    def summary(self, prices: dict[str, float]) -> PaperTradingSummary:
+    def report_due(self, now: float) -> bool:
+        started_at = float(
+            self.connection.execute(
+                "SELECT report_started_at FROM paper_account WHERE id = 1"
+            ).fetchone()[0]
+        )
+        return now - started_at >= 86400
+
+    def summary(self, prices: dict[str, float], now: float) -> PaperTradingSummary:
         account = self.connection.execute(
-            "SELECT starting_balance_usdt, cash_balance_usdt "
+            "SELECT starting_balance_usdt, cash_balance_usdt, "
+            "report_started_at, report_start_equity_usdt "
             "FROM paper_account WHERE id = 1"
         ).fetchone()
         rows = self.connection.execute(
-            "SELECT realized_pnl_usdt FROM paper_positions WHERE status = 'CLOSED'"
+            "SELECT realized_pnl_usdt FROM paper_positions "
+            "WHERE status = 'CLOSED' AND closed_at >= ? AND closed_at < ?",
+            (account["report_started_at"], now),
         ).fetchall()
         values = [float(row[0]) for row in rows]
         open_rows = self.connection.execute(
@@ -395,12 +439,23 @@ class PaperTrader:
             equity += entry_value * (1 + pnl_percent / 100)
         return PaperTradingSummary(
             float(account["starting_balance_usdt"]),
+            float(account["report_start_equity_usdt"]),
             float(account["cash_balance_usdt"]),
             equity,
+            (now - float(account["report_started_at"])) / 3600,
             len(open_rows),
             len(values),
             sum(value > 0 for value in values),
         )
+
+    def finish_report(self, prices: dict[str, float], now: float) -> None:
+        equity = self.summary(prices, now).equity_usdt
+        self.connection.execute(
+            "UPDATE paper_account SET report_started_at = ?, "
+            "report_start_equity_usdt = ? WHERE id = 1",
+            (now, equity),
+        )
+        self.connection.commit()
 
     def close(self) -> None:
         self.connection.close()
