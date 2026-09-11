@@ -45,6 +45,8 @@ def main() -> None:
             settings.paper_trailing_drawdown_percent,
             settings.paper_max_hold_seconds,
             settings.estimated_round_trip_cost_percent,
+            settings.paper_stagnation_after_seconds,
+            settings.paper_stagnation_window_seconds,
         )
         if settings.paper_trading_enabled
         else None
@@ -91,7 +93,8 @@ def main() -> None:
                 f"{settings.paper_max_open_positions} позициями, "
                 f"вход от {settings.paper_min_ai_score}/100.\n"
                 "Выход: 40% на +1,5%, 40% на +3%, остаток 20% на +5%.\n"
-                "Время удержания позиции не ограничено.\n"
+                "Застой: после 30 мин выход в плюс при затухании импульса.\n"
+                "Принудительного выхода в минус по времени нет.\n"
                 if trader is not None
                 else "Тестовые сделки: выключены.\n"
             )
@@ -111,7 +114,22 @@ def main() -> None:
                     settings.estimated_round_trip_cost_percent,
                 )
                 if trader is not None:
-                    for notice in trader.update_positions(prices, now):
+                    position_contexts = {}
+                    for symbol in trader.stagnation_candidates(now):
+                        try:
+                            context = market.fetch_signal_context(symbol)
+                            position_contexts[symbol] = (
+                                context.volume_ratio_5m,
+                                context.taker_buy_ratio_percent,
+                                context.order_book_imbalance_percent,
+                            )
+                        except (httpx.HTTPError, ValueError) as error:
+                            audit.record_error(
+                                f"Position context {symbol}: {error}", now
+                            )
+                    for notice in trader.update_positions(
+                        prices, now, position_contexts
+                    ):
                         telegram.send(
                             chat_id,
                             trader.notice_telegram_text(notice, prices, now),
