@@ -58,6 +58,10 @@ class AIAnalyst:
         quote_volume_usdt: float = 0.0,
         change_24h_percent: float = 0.0,
         signal_kind: str = "сильный",
+        quote_volume_5m_usdt: float | None = None,
+        volume_ratio_5m: float | None = None,
+        trades_5m: int | None = None,
+        taker_buy_ratio_percent: float | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -81,6 +85,10 @@ class AIAnalyst:
                         "change_24h_percent": round(change_24h_percent, 4),
                         "quote_volume_24h_usdt": round(quote_volume_usdt, 2),
                         "signal_kind": signal_kind,
+                        "quote_volume_5m_usdt": quote_volume_5m_usdt,
+                        "volume_ratio_5m_vs_previous_20m": volume_ratio_5m,
+                        "trades_5m": trades_5m,
+                        "taker_buy_ratio_5m_percent": taker_buy_ratio_percent,
                     },
                     ensure_ascii=False,
                 ),
