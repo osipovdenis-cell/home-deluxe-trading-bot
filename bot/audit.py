@@ -30,6 +30,48 @@ class AuditSummary:
         )
 
 
+@dataclass(frozen=True)
+class SignalPerformance:
+    signal_count: int
+    evaluated: dict[int, int]
+    positive_rate: dict[int, float]
+    average_net_return: dict[int, float]
+
+    def as_dict(self) -> dict:
+        return {
+            "signal_count": self.signal_count,
+            "horizons": {
+                str(minutes): {
+                    "evaluated": self.evaluated.get(minutes, 0),
+                    "positive_rate_percent": round(
+                        self.positive_rate.get(minutes, 0.0), 2
+                    ),
+                    "average_net_return_percent": round(
+                        self.average_net_return.get(minutes, 0.0), 4
+                    ),
+                }
+                for minutes in (15, 30, 60)
+            },
+        }
+
+    def telegram_text(self) -> str:
+        lines = [
+            "📈 Проверка качества сигналов",
+            f"Всего сигналов: {self.signal_count}.",
+        ]
+        for minutes in (15, 30, 60):
+            count = self.evaluated.get(minutes, 0)
+            if not count:
+                lines.append(f"Через {minutes} мин: данные накапливаются.")
+                continue
+            lines.append(
+                f"Через {minutes} мин: проверено {count}, "
+                f"в плюсе {self.positive_rate[minutes]:.1f}%, "
+                f"средний результат {self.average_net_return[minutes]:+.2f}%."
+            )
+        return "\n".join(lines)
+
+
 def detect_pumps(
     candles: list[tuple[float, float, float]],
     window_seconds: int,
@@ -87,6 +129,29 @@ class AuditLog:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                signal_kind TEXT NOT NULL,
+                change_percent REAL NOT NULL,
+                change_24h_percent REAL NOT NULL,
+                quote_volume_usdt REAL NOT NULL,
+                ai_score INTEGER,
+                ai_verdict TEXT
+            );
+            CREATE INDEX IF NOT EXISTS signal_events_time
+                ON signal_events(timestamp);
+            CREATE TABLE IF NOT EXISTS signal_outcomes (
+                signal_id INTEGER NOT NULL,
+                horizon_minutes INTEGER NOT NULL,
+                measured_at REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                gross_return_percent REAL NOT NULL,
+                net_return_percent REAL NOT NULL,
+                PRIMARY KEY(signal_id, horizon_minutes)
+            );
             """
         )
         if self._metadata("period_started_at") is None:
@@ -127,6 +192,122 @@ class AuditLog:
             (timestamp, symbol, int(delivered), error),
         )
         self.connection.commit()
+
+    def record_signal(
+        self,
+        timestamp: float,
+        symbol: str,
+        entry_price: float,
+        signal_kind: str,
+        change_percent: float,
+        change_24h_percent: float,
+        quote_volume_usdt: float,
+        ai_score: int | None,
+        ai_verdict: str | None,
+    ) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO signal_events("
+            "timestamp, symbol, entry_price, signal_kind, change_percent, "
+            "change_24h_percent, quote_volume_usdt, ai_score, ai_verdict"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                timestamp,
+                symbol,
+                entry_price,
+                signal_kind,
+                change_percent,
+                change_24h_percent,
+                quote_volume_usdt,
+                ai_score,
+                ai_verdict,
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def record_due_outcomes(
+        self,
+        prices: dict[str, float],
+        now: float,
+        estimated_round_trip_cost_percent: float,
+    ) -> int:
+        rows = self.connection.execute(
+            "SELECT id, timestamp, symbol, entry_price FROM signal_events "
+            "WHERE timestamp <= ?",
+            (now - 15 * 60,),
+        ).fetchall()
+        inserted = 0
+        for signal_id, timestamp, symbol, entry_price in rows:
+            current_price = prices.get(str(symbol))
+            if current_price is None:
+                continue
+            age = now - float(timestamp)
+            for minutes in (15, 30, 60):
+                if age < minutes * 60:
+                    continue
+                exists = self.connection.execute(
+                    "SELECT 1 FROM signal_outcomes "
+                    "WHERE signal_id = ? AND horizon_minutes = ?",
+                    (signal_id, minutes),
+                ).fetchone()
+                if exists is not None:
+                    continue
+                gross_return = (current_price / float(entry_price) - 1) * 100
+                net_return = gross_return - estimated_round_trip_cost_percent
+                self.connection.execute(
+                    "INSERT INTO signal_outcomes("
+                    "signal_id, horizon_minutes, measured_at, exit_price, "
+                    "gross_return_percent, net_return_percent"
+                    ") VALUES(?, ?, ?, ?, ?, ?)",
+                    (
+                        signal_id,
+                        minutes,
+                        now,
+                        current_price,
+                        gross_return,
+                        net_return,
+                    ),
+                )
+                inserted += 1
+        if inserted:
+            self.connection.commit()
+        return inserted
+
+    def build_signal_performance(self, now: float) -> SignalPerformance:
+        started = self.period_started_at()
+        signal_count = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM signal_events "
+                "WHERE timestamp >= ? AND timestamp < ?",
+                (started, now),
+            ).fetchone()[0]
+        )
+        evaluated: dict[int, int] = {}
+        positive_rate: dict[int, float] = {}
+        average_net_return: dict[int, float] = {}
+        for minutes in (15, 30, 60):
+            values = [
+                float(row[0])
+                for row in self.connection.execute(
+                    "SELECT o.net_return_percent FROM signal_outcomes o "
+                    "JOIN signal_events s ON s.id = o.signal_id "
+                    "WHERE s.timestamp >= ? AND s.timestamp < ? "
+                    "AND o.horizon_minutes = ?",
+                    (started, now, minutes),
+                ).fetchall()
+            ]
+            evaluated[minutes] = len(values)
+            if values:
+                positive_rate[minutes] = (
+                    sum(value > 0 for value in values) / len(values) * 100
+                )
+                average_net_return[minutes] = sum(values) / len(values)
+        return SignalPerformance(
+            signal_count,
+            evaluated,
+            positive_rate,
+            average_net_return,
+        )
 
     def record_error(self, message: str, timestamp: float | None = None) -> None:
         self.connection.execute(
@@ -189,6 +370,14 @@ class AuditLog:
         self.connection.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,))
         self.connection.execute("DELETE FROM alerts WHERE timestamp < ?", (cutoff,))
         self.connection.execute("DELETE FROM errors WHERE timestamp < ?", (cutoff,))
+        self.connection.execute(
+            "DELETE FROM signal_outcomes WHERE signal_id IN "
+            "(SELECT id FROM signal_events WHERE timestamp < ?)",
+            (cutoff,),
+        )
+        self.connection.execute(
+            "DELETE FROM signal_events WHERE timestamp < ?", (cutoff,)
+        )
         self.connection.commit()
 
     def close(self) -> None:
