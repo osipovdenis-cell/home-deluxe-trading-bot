@@ -209,9 +209,11 @@ class PaperTrader:
                 "SELECT cash_balance_usdt FROM paper_account WHERE id = 1"
             ).fetchone()[0]
         )
-        if cash_balance + 1e-9 < self.position_usdt:
+        remaining_slots = self.max_open_positions - active_count
+        if cash_balance <= 1e-9 or remaining_slots <= 0:
             return None
-        quantity = self.position_usdt / price
+        trade_usdt = cash_balance / remaining_slots
+        quantity = trade_usdt / price
         cursor = self.connection.execute(
             "INSERT INTO paper_positions("
             "opened_at, symbol, entry_price, highest_price, initial_quantity, "
@@ -224,7 +226,7 @@ class PaperTrader:
                 price,
                 quantity,
                 quantity,
-                self.position_usdt,
+                trade_usdt,
                 ai_score,
                 signal_kind,
             ),
@@ -238,7 +240,7 @@ class PaperTrader:
         self.connection.execute(
             "UPDATE paper_account SET cash_balance_usdt = "
             "cash_balance_usdt - ? WHERE id = 1",
-            (self.position_usdt,),
+            (trade_usdt,),
         )
         self.connection.commit()
         return TradeNotice(
@@ -246,9 +248,28 @@ class PaperTrader:
             symbol,
             price,
             quantity,
-            self.position_usdt,
+            trade_usdt,
             "сигнал",
             ai_score=ai_score,
+        )
+
+    def notice_telegram_text(
+        self,
+        notice: TradeNotice,
+        prices: dict[str, float],
+        now: float,
+    ) -> str:
+        summary = self.summary(prices, now)
+        result = summary.equity_usdt - summary.starting_balance_usdt
+        invested = max(0.0, summary.equity_usdt - summary.cash_balance_usdt)
+        return (
+            f"{notice.telegram_text()}\n\n"
+            "💰 Виртуальный банк\n"
+            f"Стартовый капитал: {summary.starting_balance_usdt:.2f} USDT.\n"
+            f"Текущий баланс: {summary.equity_usdt:.3f} USDT.\n"
+            f"Прибыль/убыток: {result:+.3f} USDT.\n"
+            f"Свободно: {summary.cash_balance_usdt:.3f} USDT.\n"
+            f"В открытых позициях: {invested:.3f} USDT."
         )
 
     def _sell(
