@@ -78,6 +78,73 @@ class PaperTradingSummary:
         )
 
 
+@dataclass(frozen=True)
+class TradingIntelligenceSummary:
+    closed_positions: int
+    actual_pnl_usdt: float
+    profitable_rate_percent: float
+    profit_factor: float | None
+    average_mfe_percent: float
+    average_mae_percent: float
+    average_giveback_percent: float
+    fast_exit_pnl_usdt: float
+    target_3_pnl_usdt: float
+
+    def as_dict(self) -> dict:
+        return {
+            "closed_positions": self.closed_positions,
+            "actual_strategy_pnl_usdt": round(self.actual_pnl_usdt, 4),
+            "profitable_rate_percent": round(self.profitable_rate_percent, 2),
+            "profit_factor": (
+                None if self.profit_factor is None else round(self.profit_factor, 3)
+            ),
+            "average_maximum_favorable_excursion_percent": round(
+                self.average_mfe_percent, 3
+            ),
+            "average_maximum_adverse_excursion_percent": round(
+                self.average_mae_percent, 3
+            ),
+            "average_profit_given_back_percent": round(
+                self.average_giveback_percent, 3
+            ),
+            "control_strategies": {
+                "full_exit_at_1_5_percent_pnl_usdt": round(
+                    self.fast_exit_pnl_usdt, 4
+                ),
+                "full_exit_at_3_percent_pnl_usdt": round(
+                    self.target_3_pnl_usdt, 4
+                ),
+            },
+        }
+
+    def telegram_text(self) -> str:
+        if not self.closed_positions:
+            return "🧠 Разбор сделок: закрытые позиции пока не накоплены."
+        factor = "нет убытков" if self.profit_factor is None else f"{self.profit_factor:.2f}"
+        variants = {
+            "наша 40/40/20": self.actual_pnl_usdt,
+            "всё на +1,5%": self.fast_exit_pnl_usdt,
+            "всё на +3%": self.target_3_pnl_usdt,
+        }
+        winner = max(variants, key=variants.get)
+        return (
+            "🧠 Расширенный разбор сделок\n"
+            f"Закрыто: {self.closed_positions}, прибыльных: "
+            f"{self.profitable_rate_percent:.1f}%.\n"
+            f"Фактический результат: {self.actual_pnl_usdt:+.3f} USDT.\n"
+            f"Profit factor: {factor}.\n"
+            f"Средний максимум после входа: {self.average_mfe_percent:+.2f}%.\n"
+            f"Средняя максимальная просадка: {self.average_mae_percent:+.2f}%.\n"
+            f"Средняя отданная часть движения: "
+            f"{self.average_giveback_percent:.2f} п.п.\n"
+            "Параллельный пересчёт на тех же сигналах:\n"
+            f"• наша 40/40/20: {self.actual_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +1,5%: {self.fast_exit_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +3%: {self.target_3_pnl_usdt:+.3f} USDT.\n"
+            f"Лучший вариант за период: {winner}."
+        )
+
+
 class PaperTrader:
     def __init__(
         self,
@@ -502,6 +569,96 @@ class PaperTrader:
             len(open_rows),
             len(values),
             sum(value > 0 for value in values),
+        )
+
+    def _control_strategy_pnl(
+        self,
+        entry_price: float,
+        position_usdt: float,
+        observed_prices: list[float],
+        target_percent: float,
+    ) -> float:
+        exit_change = (observed_prices[-1] / entry_price - 1) * 100
+        for price in observed_prices:
+            change = (price / entry_price - 1) * 100
+            if change <= -self.stop_loss_percent or change >= target_percent:
+                exit_change = change
+                break
+        net_change = exit_change - self.round_trip_cost_percent
+        return position_usdt * net_change / 100
+
+    def build_intelligence(self, now: float) -> TradingIntelligenceSummary:
+        started_at = float(
+            self.connection.execute(
+                "SELECT report_started_at FROM paper_account WHERE id = 1"
+            ).fetchone()[0]
+        )
+        positions = self.connection.execute(
+            "SELECT id, opened_at, closed_at, symbol, entry_price, position_usdt, "
+            "realized_pnl_usdt FROM paper_positions "
+            "WHERE status = 'CLOSED' AND closed_at >= ? AND closed_at < ? "
+            "ORDER BY closed_at",
+            (started_at, now),
+        ).fetchall()
+        if not positions:
+            return TradingIntelligenceSummary(0, 0, 0, None, 0, 0, 0, 0, 0)
+        samples_table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'samples'"
+        ).fetchone()
+        actual_values: list[float] = []
+        mfe_values: list[float] = []
+        mae_values: list[float] = []
+        giveback_values: list[float] = []
+        fast_pnl = 0.0
+        target_3_pnl = 0.0
+        for row in positions:
+            entry_price = float(row["entry_price"])
+            position_usdt = float(row["position_usdt"])
+            close_fill = self.connection.execute(
+                "SELECT price FROM paper_fills WHERE position_id = ? "
+                "AND side = 'SELL' ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            close_price = entry_price if close_fill is None else float(close_fill[0])
+            observed_prices = [entry_price]
+            if samples_table is not None:
+                observed_prices.extend(
+                    float(sample[0])
+                    for sample in self.connection.execute(
+                        "SELECT price FROM samples WHERE symbol = ? "
+                        "AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+                        (row["symbol"], row["opened_at"], row["closed_at"]),
+                    ).fetchall()
+                )
+            observed_prices.append(close_price)
+            changes = [(price / entry_price - 1) * 100 for price in observed_prices]
+            mfe = max(changes)
+            mae = min(changes)
+            actual_pnl = float(row["realized_pnl_usdt"])
+            actual_return = actual_pnl / position_usdt * 100
+            actual_values.append(actual_pnl)
+            mfe_values.append(mfe)
+            mae_values.append(mae)
+            giveback_values.append(max(0.0, mfe - actual_return))
+            fast_pnl += self._control_strategy_pnl(
+                entry_price, position_usdt, observed_prices, 1.5
+            )
+            target_3_pnl += self._control_strategy_pnl(
+                entry_price, position_usdt, observed_prices, 3.0
+            )
+        gains = sum(value for value in actual_values if value > 0)
+        losses = abs(sum(value for value in actual_values if value < 0))
+        profit_factor = gains / losses if losses > 0 else None
+        return TradingIntelligenceSummary(
+            len(positions),
+            sum(actual_values),
+            sum(value > 0 for value in actual_values) / len(actual_values) * 100,
+            profit_factor,
+            sum(mfe_values) / len(mfe_values),
+            sum(mae_values) / len(mae_values),
+            sum(giveback_values) / len(giveback_values),
+            fast_pnl,
+            target_3_pnl,
         )
 
     def finish_report(self, prices: dict[str, float], now: float) -> None:
