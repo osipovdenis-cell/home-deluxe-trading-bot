@@ -30,6 +30,8 @@ class Settings:
     paper_take_profit_3_percent: float
     paper_trailing_drawdown_percent: float
     paper_max_hold_seconds: int
+    paper_stagnation_after_seconds: int
+    paper_stagnation_window_seconds: int
     poll_interval_seconds: int
     alert_cooldown_seconds: int
     audit_db_path: str
@@ -105,6 +107,12 @@ def load_settings() -> Settings:
             os.getenv("PAPER_TRAILING_DRAWDOWN_PERCENT", "1")
         ),
         paper_max_hold_seconds=int(os.getenv("PAPER_MAX_HOLD_SECONDS", "0")),
+        paper_stagnation_after_seconds=int(
+            os.getenv("PAPER_STAGNATION_AFTER_SECONDS", "1800")
+        ),
+        paper_stagnation_window_seconds=int(
+            os.getenv("PAPER_STAGNATION_WINDOW_SECONDS", "900")
+        ),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
@@ -157,6 +165,16 @@ def load_settings() -> Settings:
         raise ValueError("ESTIMATED_ROUND_TRIP_COST_PERCENT не может быть отрицательным")
     if settings.paper_max_hold_seconds < 0:
         raise ValueError("PAPER_MAX_HOLD_SECONDS не может быть отрицательным")
+    if min(
+        settings.paper_stagnation_after_seconds,
+        settings.paper_stagnation_window_seconds,
+    ) <= 0:
+        raise ValueError("Параметры выхода из застоя должны быть больше нуля")
+    if (
+        settings.paper_stagnation_window_seconds
+        >= settings.paper_stagnation_after_seconds
+    ):
+        raise ValueError("Окно застоя должно быть короче времени до проверки")
     if not 0 <= settings.paper_min_ai_score <= 100:
         raise ValueError("PAPER_MIN_AI_SCORE должен быть в диапазоне 0–100")
     if not (
