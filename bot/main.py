@@ -65,6 +65,7 @@ def main() -> None:
             f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% "
             f"за {settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
+            "Проверка сигналов: через 15, 30 и 60 мин.\n"
             f"ИИ-аналитик: {ai_status}.\n"
             "Суточный аудит: включён.",
         )
@@ -74,6 +75,11 @@ def main() -> None:
                 now = time.time()
                 prices = market.fetch_prices()
                 audit.record_prices(prices, now)
+                audit.record_due_outcomes(
+                    prices,
+                    now,
+                    settings.estimated_round_trip_cost_percent,
+                )
                 for signal in market.update(prices, now=now):
                     analysis = None
                     if ai is not None:
@@ -97,6 +103,17 @@ def main() -> None:
                         f"Риск: {analysis.risk}\n"
                         if analysis is not None
                         else "\nИИ-анализ временно недоступен.\n"
+                    )
+                    audit.record_signal(
+                        now,
+                        signal.symbol,
+                        signal.price,
+                        signal.kind,
+                        signal.change_percent,
+                        signal.change_24h_percent,
+                        signal.quote_volume_usdt,
+                        analysis.score if analysis is not None else None,
+                        analysis.verdict if analysis is not None else None,
                     )
                     try:
                         telegram.send(
@@ -139,7 +156,30 @@ def main() -> None:
                         settings.poll_interval_seconds,
                         settings.pump_threshold_percent,
                     )
-                    telegram.send(chat_id, summary.telegram_text())
+                    performance = audit.build_signal_performance(now)
+                    performance_ai_text = ""
+                    if ai is not None and performance.signal_count:
+                        try:
+                            performance_analysis = ai.analyze_performance(
+                                performance.as_dict()
+                            )
+                            performance_ai_text = (
+                                "\n\n🤖 ИИ-вывод по статистике\n"
+                                f"Оценка: {performance_analysis.score}/100 "
+                                f"({performance_analysis.verdict}).\n"
+                                f"Вывод: {performance_analysis.reason}\n"
+                                f"Риск: {performance_analysis.risk}"
+                            )
+                        except (httpx.HTTPError, AIError) as error:
+                            audit.record_error(f"OpenAI daily audit: {error}", now)
+                            print(f"Ошибка суточного ИИ-аудита: {error}", flush=True)
+                    telegram.send(
+                        chat_id,
+                        summary.telegram_text()
+                        + "\n\n"
+                        + performance.telegram_text()
+                        + performance_ai_text,
+                    )
                     audit.finish_period(now)
                     print("Суточный аудит отправлен в Telegram.", flush=True)
                 time.sleep(settings.poll_interval_seconds)
