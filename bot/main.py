@@ -148,6 +148,18 @@ def main() -> None:
                                 signal_context.taker_buy_ratio_percent
                                 if signal_context is not None
                                 else None,
+                                signal_context.spread_bps
+                                if signal_context is not None
+                                else None,
+                                signal_context.bid_depth_usdt
+                                if signal_context is not None
+                                else None,
+                                signal_context.ask_depth_usdt
+                                if signal_context is not None
+                                else None,
+                                signal_context.order_book_imbalance_percent
+                                if signal_context is not None
+                                else None,
                             )
                         except (httpx.HTTPError, AIError) as error:
                             audit.record_error(f"OpenAI: {error}", now)
@@ -167,6 +179,19 @@ def main() -> None:
                         f"Сделок за 5 мин: {signal_context.trades_5m:,}.\n"
                         f"Доля покупок: "
                         f"{signal_context.taker_buy_ratio_percent:.1f}%.\n"
+                        + (
+                            f"Спред: {signal_context.spread_bps:.2f} б.п.\n"
+                            f"Глубина стакана (20 уровней): покупки "
+                            f"{signal_context.bid_depth_usdt:,.0f} / продажи "
+                            f"{signal_context.ask_depth_usdt:,.0f} USDT.\n"
+                            f"Перевес стакана: "
+                            f"{signal_context.order_book_imbalance_percent:+.1f}%.\n"
+                            if signal_context.spread_bps is not None
+                            and signal_context.bid_depth_usdt is not None
+                            and signal_context.ask_depth_usdt is not None
+                            and signal_context.order_book_imbalance_percent is not None
+                            else "Стакан временно недоступен.\n"
+                        )
                         if signal_context is not None
                         else "Данные объёма за 5 мин временно недоступны.\n"
                     )
@@ -190,6 +215,18 @@ def main() -> None:
                         if signal_context is not None
                         else None,
                         signal_context.taker_buy_ratio_percent
+                        if signal_context is not None
+                        else None,
+                        signal_context.spread_bps
+                        if signal_context is not None
+                        else None,
+                        signal_context.bid_depth_usdt
+                        if signal_context is not None
+                        else None,
+                        signal_context.ask_depth_usdt
+                        if signal_context is not None
+                        else None,
+                        signal_context.order_book_imbalance_percent
                         if signal_context is not None
                         else None,
                     )
@@ -228,7 +265,42 @@ def main() -> None:
                         audit.record_alert(signal.symbol, False, now, str(error))
                         print(f"Ошибка отправки сигнала: {error}", flush=True)
                 if trader is not None and trader.report_due(now):
-                    telegram.send(chat_id, trader.summary(prices, now).telegram_text())
+                    bank_summary = trader.summary(prices, now)
+                    intelligence = trader.build_intelligence(now)
+                    trading_ai_text = ""
+                    if ai is not None and intelligence.closed_positions:
+                        try:
+                            trading_analysis = ai.analyze_performance(
+                                {
+                                    "report_type": "paper_trading",
+                                    "bank": {
+                                        "starting_balance_usdt": (
+                                            bank_summary.starting_balance_usdt
+                                        ),
+                                        "current_equity_usdt": bank_summary.equity_usdt,
+                                    },
+                                    "trade_intelligence": intelligence.as_dict(),
+                                }
+                            )
+                            trading_ai_text = (
+                                "\n\n🤖 ИИ-вывод по сделкам\n"
+                                f"Оценка: {trading_analysis.score}/100 "
+                                f"({trading_analysis.verdict}).\n"
+                                f"Вывод: {trading_analysis.reason}\n"
+                                f"Риск: {trading_analysis.risk}"
+                            )
+                        except (httpx.HTTPError, AIError) as error:
+                            audit.record_error(f"OpenAI trading audit: {error}", now)
+                            print(
+                                f"Ошибка ИИ-разбора сделок: {error}", flush=True
+                            )
+                    telegram.send(
+                        chat_id,
+                        bank_summary.telegram_text()
+                        + "\n\n"
+                        + intelligence.telegram_text()
+                        + trading_ai_text,
+                    )
                     trader.finish_report(prices, now)
                     print("Суточный отчёт тестовой торговли отправлен.", flush=True)
                 if audit.report_due(now):
