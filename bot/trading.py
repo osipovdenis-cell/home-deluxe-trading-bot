@@ -417,6 +417,12 @@ class PaperTrader:
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
+    def open_symbols(self) -> tuple[str, ...]:
+        rows = self.connection.execute(
+            "SELECT symbol FROM paper_positions WHERE status = 'OPEN' ORDER BY id"
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def _price_has_stagnated(self, row: sqlite3.Row, now: float) -> bool:
         samples_table = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'samples'"
@@ -453,15 +459,16 @@ class PaperTrader:
             price = prices.get(symbol)
             if price is None:
                 continue
-            highest = max(float(initial_row["highest_price"]), price)
-            self.connection.execute(
-                "UPDATE paper_positions SET highest_price = ? WHERE id = ?",
-                (highest, initial_row["id"]),
-            )
-            self.connection.commit()
-            row = self.connection.execute(
-                "SELECT * FROM paper_positions WHERE id = ?", (initial_row["id"],)
-            ).fetchone()
+            row = initial_row
+            if price > float(initial_row["highest_price"]):
+                self.connection.execute(
+                    "UPDATE paper_positions SET highest_price = ? WHERE id = ?",
+                    (price, initial_row["id"]),
+                )
+                self.connection.commit()
+                row = self.connection.execute(
+                    "SELECT * FROM paper_positions WHERE id = ?", (initial_row["id"],)
+                ).fetchone()
             change = (price / float(row["entry_price"]) - 1) * 100
             if change <= -self.stop_loss_percent:
                 notices.append(
