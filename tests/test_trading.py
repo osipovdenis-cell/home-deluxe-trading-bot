@@ -15,6 +15,16 @@ def make_trader(path: str) -> PaperTrader:
 
 
 class PaperTraderTests(unittest.TestCase):
+    def test_lists_open_symbols_for_realtime_subscription(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.open_on_signal("AAAUSDT", 1, "ранний", 60, 0)
+                trader.open_on_signal("BBBUSDT", 1, "ранний", 60, 1)
+                self.assertEqual(trader.open_symbols(), ("AAAUSDT", "BBBUSDT"))
+            finally:
+                trader.close()
+
     def test_rejects_signal_below_minimum_score(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
