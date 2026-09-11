@@ -62,6 +62,41 @@ class AuditTests(unittest.TestCase):
             finally:
                 log.close()
 
+    def test_stores_order_book_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                signal_id = log.record_signal(
+                    1,
+                    "TESTUSDT",
+                    100,
+                    "ранний",
+                    1.2,
+                    4.5,
+                    1_000_000,
+                    63,
+                    "умеренный импульс",
+                    50_000,
+                    2.5,
+                    120,
+                    61,
+                    8,
+                    20_000,
+                    15_000,
+                    14.2857,
+                )
+                row = log.connection.execute(
+                    "SELECT spread_bps, bid_depth_usdt, ask_depth_usdt, "
+                    "order_book_imbalance_percent FROM signal_events WHERE id = ?",
+                    (signal_id,),
+                ).fetchone()
+                self.assertEqual(row[0], 8)
+                self.assertEqual(row[1], 20_000)
+                self.assertEqual(row[2], 15_000)
+                self.assertAlmostEqual(row[3], 14.2857)
+            finally:
+                log.close()
+
 
 if __name__ == "__main__":
     unittest.main()
