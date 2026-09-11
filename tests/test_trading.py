@@ -148,6 +148,32 @@ class PaperTraderTests(unittest.TestCase):
             finally:
                 trader.close()
 
+    def test_builds_trade_intelligence_and_control_strategies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL, symbol TEXT, price REAL)"
+                )
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 63, 0)
+                for timestamp, price in ((60, 101.5), (120, 103), (180, 105)):
+                    trader.connection.execute(
+                        "INSERT INTO samples(timestamp, symbol, price) VALUES(?, ?, ?)",
+                        (timestamp, "TESTUSDT", price),
+                    )
+                    trader.connection.commit()
+                    trader.update_positions({"TESTUSDT": price}, timestamp)
+                intelligence = trader.build_intelligence(200)
+                self.assertEqual(intelligence.closed_positions, 1)
+                self.assertGreater(intelligence.actual_pnl_usdt, 0)
+                self.assertAlmostEqual(intelligence.average_mfe_percent, 5)
+                self.assertAlmostEqual(intelligence.average_mae_percent, 0)
+                self.assertGreater(intelligence.fast_exit_pnl_usdt, 0)
+                self.assertGreater(intelligence.target_3_pnl_usdt, 0)
+                self.assertIn("Параллельный пересчёт", intelligence.telegram_text())
+            finally:
+                trader.close()
+
     def test_reports_after_full_day(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
