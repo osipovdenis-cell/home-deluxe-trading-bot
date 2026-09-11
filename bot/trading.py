@@ -390,7 +390,10 @@ class PaperTrader:
                     )
                 )
                 continue
-            if now - float(row["opened_at"]) >= self.max_hold_seconds:
+            if (
+                self.max_hold_seconds > 0
+                and now - float(row["opened_at"]) >= self.max_hold_seconds
+            ):
                 notices.append(
                     self._sell(
                         row,
