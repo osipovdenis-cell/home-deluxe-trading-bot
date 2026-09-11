@@ -16,6 +16,14 @@ class PumpSignal:
     change_24h_percent: float = 0.0
 
 
+@dataclass(frozen=True)
+class SignalMarketContext:
+    quote_volume_5m_usdt: float
+    volume_ratio_5m: float
+    trades_5m: int
+    taker_buy_ratio_percent: float
+
+
 class MarketMonitor:
     def __init__(
         self,
@@ -126,6 +134,42 @@ class MarketMonitor:
                 break
             cursor = next_cursor
         return candles
+
+    def fetch_signal_context(self, symbol: str) -> SignalMarketContext:
+        response = self.client.get(
+            "/api/v3/klines",
+            params={"symbol": symbol, "interval": "1m", "limit": 25},
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if len(rows) < 10:
+            raise ValueError("Недостаточно минутных свечей для анализа объёма")
+        recent = rows[-5:]
+        previous = rows[:-5]
+        recent_quote_volume = sum(float(row[7]) for row in recent)
+        previous_quote_volume = sum(float(row[7]) for row in previous)
+        comparable_blocks = len(previous) / 5
+        previous_average_5m = (
+            previous_quote_volume / comparable_blocks if comparable_blocks else 0.0
+        )
+        volume_ratio = (
+            recent_quote_volume / previous_average_5m
+            if previous_average_5m > 0
+            else 0.0
+        )
+        trades = sum(int(row[8]) for row in recent)
+        taker_buy_quote_volume = sum(float(row[10]) for row in recent)
+        taker_buy_ratio = (
+            taker_buy_quote_volume / recent_quote_volume * 100
+            if recent_quote_volume > 0
+            else 0.0
+        )
+        return SignalMarketContext(
+            recent_quote_volume,
+            volume_ratio,
+            trades,
+            taker_buy_ratio,
+        )
 
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
