@@ -18,6 +18,7 @@ class Settings:
     early_threshold_percent: float
     pump_threshold_percent: float
     max_signals_per_cycle: int
+    estimated_round_trip_cost_percent: float
     poll_interval_seconds: int
     alert_cooldown_seconds: int
     audit_db_path: str
@@ -69,6 +70,9 @@ def load_settings() -> Settings:
         early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "1")),
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
         max_signals_per_cycle=int(os.getenv("MAX_SIGNALS_PER_CYCLE", "5")),
+        estimated_round_trip_cost_percent=float(
+            os.getenv("ESTIMATED_ROUND_TRIP_COST_PERCENT", "0.2")
+        ),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
@@ -109,4 +113,6 @@ def load_settings() -> Settings:
         raise ValueError("Параметры мониторинга должны быть больше нуля")
     if settings.early_threshold_percent > settings.pump_threshold_percent:
         raise ValueError("EARLY_THRESHOLD_PERCENT не может превышать PUMP_THRESHOLD_PERCENT")
+    if settings.estimated_round_trip_cost_percent < 0:
+        raise ValueError("ESTIMATED_ROUND_TRIP_COST_PERCENT не может быть отрицательным")
     return settings
