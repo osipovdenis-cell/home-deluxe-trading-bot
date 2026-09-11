@@ -68,16 +68,52 @@ class PaperTraderTests(unittest.TestCase):
                     "UPDATE paper_account SET report_started_at = 0 WHERE id = 1"
                 )
                 trader.connection.commit()
-                for index in range(3):
-                    self.assertIsNotNone(
-                        trader.open_on_signal(f"COIN{index}USDT", 1, "ранний", 60, 0)
+                for index in range(5):
+                    notice = trader.open_on_signal(
+                        f"COIN{index}USDT", 1, "ранний", 60, 0
                     )
+                    self.assertIsNotNone(notice)
+                    self.assertAlmostEqual(notice.position_usdt, 30)
                 self.assertIsNone(
-                    trader.open_on_signal("COIN3USDT", 1, "ранний", 60, 0)
+                    trader.open_on_signal("COIN5USDT", 1, "ранний", 60, 0)
                 )
                 summary = trader.summary({}, 100)
                 self.assertEqual(summary.cash_balance_usdt, 0)
                 self.assertAlmostEqual(summary.equity_usdt, 149.7)
+            finally:
+                trader.close()
+
+    def test_distributes_entire_available_bank_between_free_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "UPDATE paper_account SET cash_balance_usdt = 130 WHERE id = 1"
+                )
+                trader.connection.commit()
+                notices = [
+                    trader.open_on_signal(f"COIN{index}USDT", 1, "ранний", 60, 0)
+                    for index in range(3)
+                ]
+                self.assertTrue(all(notice is not None for notice in notices))
+                for notice in notices:
+                    self.assertAlmostEqual(notice.position_usdt, 130 / 3)
+                summary = trader.summary({}, 100)
+                self.assertAlmostEqual(summary.cash_balance_usdt, 0)
+            finally:
+                trader.close()
+
+    def test_trade_notice_includes_bank_balance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                notice = trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
+                text = trader.notice_telegram_text(notice, {"TESTUSDT": 100}, 0)
+                self.assertIn("Стартовый капитал: 150.00 USDT", text)
+                self.assertIn("Текущий баланс:", text)
+                self.assertIn("Прибыль/убыток:", text)
+                self.assertIn("Свободно:", text)
+                self.assertIn("В открытых позициях:", text)
             finally:
                 trader.close()
 
