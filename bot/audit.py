@@ -143,7 +143,11 @@ class AuditLog:
                 quote_volume_5m_usdt REAL,
                 volume_ratio_5m REAL,
                 trades_5m INTEGER,
-                taker_buy_ratio_percent REAL
+                taker_buy_ratio_percent REAL,
+                spread_bps REAL,
+                bid_depth_usdt REAL,
+                ask_depth_usdt REAL,
+                order_book_imbalance_percent REAL
             );
             CREATE INDEX IF NOT EXISTS signal_events_time
                 ON signal_events(timestamp);
@@ -167,6 +171,10 @@ class AuditLog:
             ("volume_ratio_5m", "REAL"),
             ("trades_5m", "INTEGER"),
             ("taker_buy_ratio_percent", "REAL"),
+            ("spread_bps", "REAL"),
+            ("bid_depth_usdt", "REAL"),
+            ("ask_depth_usdt", "REAL"),
+            ("order_book_imbalance_percent", "REAL"),
         ):
             if column not in signal_columns:
                 self.connection.execute(
@@ -226,13 +234,19 @@ class AuditLog:
         volume_ratio_5m: float | None = None,
         trades_5m: int | None = None,
         taker_buy_ratio_percent: float | None = None,
+        spread_bps: float | None = None,
+        bid_depth_usdt: float | None = None,
+        ask_depth_usdt: float | None = None,
+        order_book_imbalance_percent: float | None = None,
     ) -> int:
         cursor = self.connection.execute(
             "INSERT INTO signal_events("
             "timestamp, symbol, entry_price, signal_kind, change_percent, "
             "change_24h_percent, quote_volume_usdt, ai_score, ai_verdict, "
             "quote_volume_5m_usdt, volume_ratio_5m, trades_5m, "
-            "taker_buy_ratio_percent) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "taker_buy_ratio_percent, spread_bps, bid_depth_usdt, ask_depth_usdt, "
+            "order_book_imbalance_percent) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 timestamp,
                 symbol,
@@ -247,6 +261,10 @@ class AuditLog:
                 volume_ratio_5m,
                 trades_5m,
                 taker_buy_ratio_percent,
+                spread_bps,
+                bid_depth_usdt,
+                ask_depth_usdt,
+                order_book_imbalance_percent,
             ),
         )
         self.connection.commit()
