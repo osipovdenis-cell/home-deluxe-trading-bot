@@ -170,7 +170,9 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertAlmostEqual(intelligence.average_mae_percent, 0)
                 self.assertGreater(intelligence.fast_exit_pnl_usdt, 0)
                 self.assertGreater(intelligence.target_3_pnl_usdt, 0)
+                self.assertGreater(intelligence.target_5_pnl_usdt, 0)
                 self.assertIn("Параллельный пересчёт", intelligence.telegram_text())
+                self.assertIn("всё на +5%", intelligence.telegram_text())
             finally:
                 trader.close()
 
