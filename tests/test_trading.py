@@ -6,7 +6,7 @@ from bot.trading import PaperTrader
 
 
 def make_trader(path: str) -> PaperTrader:
-    return PaperTrader(path, 50, 3, 55, 1, 1.5, 3, 1, 900, 0.2)
+    return PaperTrader(path, 150, 50, 3, 55, 1, 1.5, 3, 1, 900, 0.2)
 
 
 class PaperTraderTests(unittest.TestCase):
@@ -36,9 +36,39 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertEqual(len(final), 1)
                 self.assertEqual(final[0].remaining_percent, 0)
                 self.assertGreater(final[0].total_position_pnl_usdt, 0)
-                summary = trader.summary_since(0, 200)
+                summary = trader.summary({"TESTUSDT": 101.9})
                 self.assertEqual(summary.closed_positions, 1)
                 self.assertEqual(summary.profitable_positions, 1)
+                self.assertGreater(summary.equity_usdt, 150)
+            finally:
+                trader.close()
+
+    def test_respects_total_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = PaperTrader(
+                str(Path(directory) / "trades.db"),
+                150,
+                50,
+                5,
+                55,
+                1,
+                1.5,
+                3,
+                1,
+                900,
+                0.2,
+            )
+            try:
+                for index in range(3):
+                    self.assertIsNotNone(
+                        trader.open_on_signal(f"COIN{index}USDT", 1, "ранний", 60, 0)
+                    )
+                self.assertIsNone(
+                    trader.open_on_signal("COIN3USDT", 1, "ранний", 60, 0)
+                )
+                summary = trader.summary({})
+                self.assertEqual(summary.cash_balance_usdt, 0)
+                self.assertAlmostEqual(summary.equity_usdt, 149.7)
             finally:
                 trader.close()
 
