@@ -110,6 +110,14 @@ def main() -> None:
                     for notice in trader.update_positions(prices, now):
                         telegram.send(chat_id, notice.telegram_text())
                 for signal in market.update(prices, now=now):
+                    signal_context = None
+                    try:
+                        signal_context = market.fetch_signal_context(signal.symbol)
+                    except (httpx.HTTPError, ValueError) as error:
+                        audit.record_error(f"Signal context {signal.symbol}: {error}", now)
+                        print(
+                            f"Ошибка данных объёма {signal.symbol}: {error}", flush=True
+                        )
                     analysis = None
                     if ai is not None:
                         try:
@@ -121,6 +129,18 @@ def main() -> None:
                                 signal.quote_volume_usdt,
                                 signal.change_24h_percent,
                                 signal.kind,
+                                signal_context.quote_volume_5m_usdt
+                                if signal_context is not None
+                                else None,
+                                signal_context.volume_ratio_5m
+                                if signal_context is not None
+                                else None,
+                                signal_context.trades_5m
+                                if signal_context is not None
+                                else None,
+                                signal_context.taker_buy_ratio_percent
+                                if signal_context is not None
+                                else None,
                             )
                         except (httpx.HTTPError, AIError) as error:
                             audit.record_error(f"OpenAI: {error}", now)
@@ -133,6 +153,16 @@ def main() -> None:
                         if analysis is not None
                         else "\nИИ-анализ временно недоступен.\n"
                     )
+                    context_text = (
+                        f"Объём за 5 мин: "
+                        f"{signal_context.quote_volume_5m_usdt:,.0f} USDT "
+                        f"(x{signal_context.volume_ratio_5m:.2f} к среднему).\n"
+                        f"Сделок за 5 мин: {signal_context.trades_5m:,}.\n"
+                        f"Доля покупок: "
+                        f"{signal_context.taker_buy_ratio_percent:.1f}%.\n"
+                        if signal_context is not None
+                        else "Данные объёма за 5 мин временно недоступны.\n"
+                    )
                     audit.record_signal(
                         now,
                         signal.symbol,
@@ -143,6 +173,18 @@ def main() -> None:
                         signal.quote_volume_usdt,
                         analysis.score if analysis is not None else None,
                         analysis.verdict if analysis is not None else None,
+                        signal_context.quote_volume_5m_usdt
+                        if signal_context is not None
+                        else None,
+                        signal_context.volume_ratio_5m
+                        if signal_context is not None
+                        else None,
+                        signal_context.trades_5m
+                        if signal_context is not None
+                        else None,
+                        signal_context.taker_buy_ratio_percent
+                        if signal_context is not None
+                        else None,
                     )
                     trade_notice = None
                     if trader is not None:
@@ -163,6 +205,7 @@ def main() -> None:
                             f"Изменение за 24 ч: {signal.change_24h_percent:+.2f}%.\n"
                             f"Оборот за 24 ч: {signal.quote_volume_usdt:,.0f} USDT.\n"
                             f"Цена: {signal.price:.10g}\n"
+                            f"{context_text}"
                             f"{ai_text}"
                             "Это информационный сигнал, не команда на покупку.",
                         )
