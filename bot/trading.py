@@ -166,6 +166,8 @@ class PaperTrader:
         trailing_drawdown_percent: float,
         max_hold_seconds: int,
         round_trip_cost_percent: float,
+        stagnation_after_seconds: int = 1800,
+        stagnation_window_seconds: int = 900,
     ) -> None:
         database = Path(database_path)
         database.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +185,8 @@ class PaperTrader:
         self.trailing_drawdown_percent = trailing_drawdown_percent
         self.max_hold_seconds = max_hold_seconds
         self.round_trip_cost_percent = round_trip_cost_percent
+        self.stagnation_after_seconds = stagnation_after_seconds
+        self.stagnation_window_seconds = stagnation_window_seconds
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS paper_positions (
@@ -405,8 +409,40 @@ class PaperTrader:
             total_position_pnl_usdt=realized if closed else None,
         )
 
+    def stagnation_candidates(self, now: float) -> tuple[str, ...]:
+        rows = self.connection.execute(
+            "SELECT symbol FROM paper_positions WHERE status = 'OPEN' "
+            "AND take_1_done = 0 AND ? - opened_at >= ? ORDER BY id",
+            (now, self.stagnation_after_seconds),
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def _price_has_stagnated(self, row: sqlite3.Row, now: float) -> bool:
+        samples_table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'samples'"
+        ).fetchone()
+        if samples_table is None:
+            return False
+        cutoff = now - self.stagnation_window_seconds
+        earlier_high = self.connection.execute(
+            "SELECT MAX(price) FROM samples WHERE symbol = ? "
+            "AND timestamp >= ? AND timestamp < ?",
+            (row["symbol"], row["opened_at"], cutoff),
+        ).fetchone()[0]
+        recent_high = self.connection.execute(
+            "SELECT MAX(price) FROM samples WHERE symbol = ? "
+            "AND timestamp >= ? AND timestamp <= ?",
+            (row["symbol"], cutoff, now),
+        ).fetchone()[0]
+        if earlier_high is None or recent_high is None:
+            return False
+        return float(recent_high) <= float(earlier_high) * (1 + 1e-9)
+
     def update_positions(
-        self, prices: dict[str, float], now: float
+        self,
+        prices: dict[str, float],
+        now: float,
+        market_contexts: dict[str, tuple[float, float, float | None]] | None = None,
     ) -> list[TradeNotice]:
         notices: list[TradeNotice] = []
         rows = self.connection.execute(
@@ -516,9 +552,16 @@ class PaperTrader:
                     )
                 )
                 continue
+            context = (market_contexts or {}).get(symbol)
+            net_change = change - self.round_trip_cost_percent
             if (
-                self.max_hold_seconds > 0
-                and now - float(row["opened_at"]) >= self.max_hold_seconds
+                not int(row["take_1_done"])
+                and now - float(row["opened_at"]) >= self.stagnation_after_seconds
+                and net_change > 0
+                and context is not None
+                and context[0] < 1.0
+                and context[1] < 50.0
+                and self._price_has_stagnated(row, now)
             ):
                 notices.append(
                     self._sell(
@@ -526,9 +569,10 @@ class PaperTrader:
                         float(row["remaining_quantity"]),
                         price,
                         now,
-                        "лимит времени",
+                        "затухание импульса (выход в плюс)",
                     )
                 )
+                continue
         return notices
 
     def report_due(self, now: float) -> bool:
