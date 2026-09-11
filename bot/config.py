@@ -20,6 +20,7 @@ class Settings:
     max_signals_per_cycle: int
     estimated_round_trip_cost_percent: float
     paper_trading_enabled: bool
+    paper_starting_balance_usdt: float
     paper_position_usdt: float
     paper_max_open_positions: int
     paper_min_ai_score: int
@@ -83,6 +84,9 @@ def load_settings() -> Settings:
             os.getenv("ESTIMATED_ROUND_TRIP_COST_PERCENT", "0.2")
         ),
         paper_trading_enabled=_env_bool("PAPER_TRADING_ENABLED", True),
+        paper_starting_balance_usdt=float(
+            os.getenv("PAPER_STARTING_BALANCE_USDT", "150")
+        ),
         paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
         paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "3")),
         paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "55")),
@@ -136,6 +140,7 @@ def load_settings() -> Settings:
         settings.pump_threshold_percent,
         settings.min_quote_volume_usdt,
         settings.paper_position_usdt,
+        settings.paper_starting_balance_usdt,
         settings.paper_stop_loss_percent,
         settings.paper_take_profit_1_percent,
         settings.paper_take_profit_2_percent,
@@ -150,4 +155,9 @@ def load_settings() -> Settings:
         raise ValueError("PAPER_MIN_AI_SCORE должен быть в диапазоне 0–100")
     if settings.paper_take_profit_1_percent >= settings.paper_take_profit_2_percent:
         raise ValueError("Первая цель прибыли должна быть меньше второй")
+    if (
+        settings.paper_position_usdt * settings.paper_max_open_positions
+        > settings.paper_starting_balance_usdt
+    ):
+        raise ValueError("Общий размер тестовых позиций превышает виртуальный бюджет")
     return settings
