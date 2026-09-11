@@ -62,6 +62,10 @@ class AIAnalyst:
         volume_ratio_5m: float | None = None,
         trades_5m: int | None = None,
         taker_buy_ratio_percent: float | None = None,
+        spread_bps: float | None = None,
+        bid_depth_usdt: float | None = None,
+        ask_depth_usdt: float | None = None,
+        order_book_imbalance_percent: float | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -89,6 +93,10 @@ class AIAnalyst:
                         "volume_ratio_5m_vs_previous_20m": volume_ratio_5m,
                         "trades_5m": trades_5m,
                         "taker_buy_ratio_5m_percent": taker_buy_ratio_percent,
+                        "spread_bps": spread_bps,
+                        "top_20_bid_depth_usdt": bid_depth_usdt,
+                        "top_20_ask_depth_usdt": ask_depth_usdt,
+                        "order_book_imbalance_percent": order_book_imbalance_percent,
                     },
                     ensure_ascii=False,
                 ),
@@ -129,10 +137,11 @@ class AIAnalyst:
                 "max_output_tokens": 450,
                 "instructions": (
                     "Ты аналитический модуль криптовалютного тестового бота. "
-                    "Проанализируй суточную статистику импульсных сигналов после "
-                    "указанных торговых издержек. Кратко оцени качество сигналов "
-                    "и главный риск. Не обещай прибыль. Если выборка мала, явно "
-                    "скажи, что вывод предварительный. Пиши по-русски."
+                    "Проанализируй переданную суточную статистику импульсных "
+                    "сигналов или виртуальных сделок после торговых издержек. "
+                    "Сравни контрольные стратегии, но не делай уверенных выводов "
+                    "по малой выборке. Назови одно конкретное наблюдение и главный "
+                    "риск. Не обещай прибыль. Пиши по-русски."
                 ),
                 "input": json.dumps(performance, ensure_ascii=False),
                 "text": {
