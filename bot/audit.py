@@ -139,7 +139,11 @@ class AuditLog:
                 change_24h_percent REAL NOT NULL,
                 quote_volume_usdt REAL NOT NULL,
                 ai_score INTEGER,
-                ai_verdict TEXT
+                ai_verdict TEXT,
+                quote_volume_5m_usdt REAL,
+                volume_ratio_5m REAL,
+                trades_5m INTEGER,
+                taker_buy_ratio_percent REAL
             );
             CREATE INDEX IF NOT EXISTS signal_events_time
                 ON signal_events(timestamp);
@@ -154,6 +158,20 @@ class AuditLog:
             );
             """
         )
+        signal_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(signal_events)")
+        }
+        for column, definition in (
+            ("quote_volume_5m_usdt", "REAL"),
+            ("volume_ratio_5m", "REAL"),
+            ("trades_5m", "INTEGER"),
+            ("taker_buy_ratio_percent", "REAL"),
+        ):
+            if column not in signal_columns:
+                self.connection.execute(
+                    f"ALTER TABLE signal_events ADD COLUMN {column} {definition}"
+                )
         if self._metadata("period_started_at") is None:
             self._set_metadata("period_started_at", str(time.time()))
         self.connection.commit()
@@ -204,12 +222,17 @@ class AuditLog:
         quote_volume_usdt: float,
         ai_score: int | None,
         ai_verdict: str | None,
+        quote_volume_5m_usdt: float | None = None,
+        volume_ratio_5m: float | None = None,
+        trades_5m: int | None = None,
+        taker_buy_ratio_percent: float | None = None,
     ) -> int:
         cursor = self.connection.execute(
             "INSERT INTO signal_events("
             "timestamp, symbol, entry_price, signal_kind, change_percent, "
-            "change_24h_percent, quote_volume_usdt, ai_score, ai_verdict"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "change_24h_percent, quote_volume_usdt, ai_score, ai_verdict, "
+            "quote_volume_5m_usdt, volume_ratio_5m, trades_5m, "
+            "taker_buy_ratio_percent) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 timestamp,
                 symbol,
@@ -220,6 +243,10 @@ class AuditLog:
                 quote_volume_usdt,
                 ai_score,
                 ai_verdict,
+                quote_volume_5m_usdt,
+                volume_ratio_5m,
+                trades_5m,
+                taker_buy_ratio_percent,
             ),
         )
         self.connection.commit()
