@@ -86,7 +86,8 @@ def main() -> None:
             + (
                 f"Тестовые сделки: включены, банк "
                 f"{settings.paper_starting_balance_usdt:g} USDT, "
-                f"по {settings.paper_position_usdt:g} USDT на позицию, "
+                f"динамическое распределение между "
+                f"{settings.paper_max_open_positions} позициями, "
                 f"вход от {settings.paper_min_ai_score}/100.\n"
                 "Время удержания позиции не ограничено.\n"
                 if trader is not None
@@ -109,7 +110,10 @@ def main() -> None:
                 )
                 if trader is not None:
                     for notice in trader.update_positions(prices, now):
-                        telegram.send(chat_id, notice.telegram_text())
+                        telegram.send(
+                            chat_id,
+                            trader.notice_telegram_text(notice, prices, now),
+                        )
                 for signal in market.update(prices, now=now):
                     signal_context = None
                     try:
@@ -212,7 +216,12 @@ def main() -> None:
                         )
                         audit.record_alert(signal.symbol, True, now)
                         if trade_notice is not None:
-                            telegram.send(chat_id, trade_notice.telegram_text())
+                            telegram.send(
+                                chat_id,
+                                trader.notice_telegram_text(
+                                    trade_notice, prices, now
+                                ),
+                            )
                     except httpx.HTTPError as error:
                         audit.record_alert(signal.symbol, False, now, str(error))
                         print(f"Ошибка отправки сигнала: {error}", flush=True)
