@@ -22,6 +22,10 @@ class SignalMarketContext:
     volume_ratio_5m: float
     trades_5m: int
     taker_buy_ratio_percent: float
+    spread_bps: float | None = None
+    bid_depth_usdt: float | None = None
+    ask_depth_usdt: float | None = None
+    order_book_imbalance_percent: float | None = None
 
 
 class MarketMonitor:
@@ -164,11 +168,43 @@ class MarketMonitor:
             if recent_quote_volume > 0
             else 0.0
         )
+        spread_bps = None
+        bid_depth = None
+        ask_depth = None
+        imbalance = None
+        try:
+            depth_response = self.client.get(
+                "/api/v3/depth", params={"symbol": symbol, "limit": 20}
+            )
+            depth_response.raise_for_status()
+            depth = depth_response.json()
+            bids = [(float(price), float(quantity)) for price, quantity in depth["bids"]]
+            asks = [(float(price), float(quantity)) for price, quantity in depth["asks"]]
+            if bids and asks:
+                best_bid = bids[0][0]
+                best_ask = asks[0][0]
+                spread_bps = (best_ask / best_bid - 1) * 10_000
+                bid_depth = sum(price * quantity for price, quantity in bids)
+                ask_depth = sum(price * quantity for price, quantity in asks)
+                total_depth = bid_depth + ask_depth
+                imbalance = (
+                    (bid_depth - ask_depth) / total_depth * 100
+                    if total_depth > 0
+                    else 0.0
+                )
+        except Exception:
+            # Стакан — дополнительный контекст: его сбой не должен скрывать
+            # уже полученные свечи и объём сигнала.
+            pass
         return SignalMarketContext(
             recent_quote_volume,
             volume_ratio,
             trades,
             taker_buy_ratio,
+            spread_bps,
+            bid_depth,
+            ask_depth,
+            imbalance,
         )
 
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
