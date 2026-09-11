@@ -133,6 +133,26 @@ class MarketMonitorTests(unittest.TestCase):
         self.assertEqual(prices, {"AAAUSDT": 2.0})
         self.assertEqual(monitor.eligible_count, 1)
 
+    def test_builds_realtime_volume_context(self) -> None:
+        rows = []
+        for index in range(25):
+            quote_volume = 100 if index < 20 else 300
+            taker_buy_quote = quote_volume * 0.6
+            rows.append(
+                [index, "1", "1", "1", "1", "1", index, quote_volume, 10, "0", taker_buy_quote]
+            )
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = rows
+        monitor = MarketMonitor("https://api.binance.com", ("AAAUSDT",), 300, 3, 1800)
+        monitor.client = Mock()
+        monitor.client.get.return_value = response
+        context = monitor.fetch_signal_context("AAAUSDT")
+        self.assertEqual(context.quote_volume_5m_usdt, 1500)
+        self.assertEqual(context.volume_ratio_5m, 3)
+        self.assertEqual(context.trades_5m, 50)
+        self.assertEqual(context.taker_buy_ratio_percent, 60)
+
 
 if __name__ == "__main__":
     unittest.main()
