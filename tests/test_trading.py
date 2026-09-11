@@ -6,7 +6,7 @@ from bot.trading import PaperTrader
 
 
 def make_trader(path: str) -> PaperTrader:
-    trader = PaperTrader(path, 150, 50, 3, 55, 1, 1.5, 3, 1, 900, 0.2)
+    trader = PaperTrader(path, 150, 50, 3, 55, 1, 1.5, 3, 1, 0, 0.2)
     trader.connection.execute(
         "UPDATE paper_account SET report_started_at = 0 WHERE id = 1"
     )
@@ -105,6 +105,18 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertEqual(len(notices), 1)
                 self.assertEqual(notices[0].reason, "стоп-лосс")
                 self.assertLess(notices[0].total_position_pnl_usdt, 0)
+            finally:
+                trader.close()
+
+    def test_does_not_close_only_because_time_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
+                notices = trader.update_positions({"TESTUSDT": 100.2}, 86400)
+                self.assertEqual(notices, [])
+                summary = trader.summary({"TESTUSDT": 100.2}, 86400)
+                self.assertEqual(summary.open_positions, 1)
             finally:
                 trader.close()
 
