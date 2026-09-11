@@ -12,8 +12,12 @@ class Settings:
     telegram_chat_id: str | None
     market_data_base_url: str
     watch_symbols: tuple[str, ...]
+    scan_all_usdt: bool
+    min_quote_volume_usdt: float
     pump_window_seconds: int
+    early_threshold_percent: float
     pump_threshold_percent: float
+    max_signals_per_cycle: int
     poll_interval_seconds: int
     alert_cooldown_seconds: int
     audit_db_path: str
@@ -30,6 +34,13 @@ def _load_env_file(path: Path = Path(".env")) -> None:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
 def load_settings() -> Settings:
@@ -52,8 +63,12 @@ def load_settings() -> Settings:
             ).split(",")
             if symbol.strip()
         ),
+        scan_all_usdt=_env_bool("SCAN_ALL_USDT", True),
+        min_quote_volume_usdt=float(os.getenv("MIN_QUOTE_VOLUME_USDT", "500000")),
         pump_window_seconds=int(os.getenv("PUMP_WINDOW_SECONDS", "300")),
+        early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "1")),
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
+        max_signals_per_cycle=int(os.getenv("MAX_SIGNALS_PER_CYCLE", "5")),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
@@ -75,7 +90,7 @@ def load_settings() -> Settings:
         raise ValueError("Первая версия разрешает подключение только к Binance Spot Testnet")
     if settings.market_data_base_url != "https://api.binance.com":
         raise ValueError("Рыночные данные разрешены только с публичного Binance Spot API")
-    if not settings.watch_symbols:
+    if not settings.scan_all_usdt and not settings.watch_symbols:
         raise ValueError("WATCH_SYMBOLS не может быть пустым")
     if not settings.audit_db_path:
         raise ValueError("AUDIT_DB_PATH не может быть пустым")
@@ -85,6 +100,13 @@ def load_settings() -> Settings:
         settings.pump_window_seconds,
         settings.poll_interval_seconds,
         settings.alert_cooldown_seconds,
-    ) <= 0 or settings.pump_threshold_percent <= 0:
+        settings.max_signals_per_cycle,
+    ) <= 0 or min(
+        settings.early_threshold_percent,
+        settings.pump_threshold_percent,
+        settings.min_quote_volume_usdt,
+    ) <= 0:
         raise ValueError("Параметры мониторинга должны быть больше нуля")
+    if settings.early_threshold_percent > settings.pump_threshold_percent:
+        raise ValueError("EARLY_THRESHOLD_PERCENT не может превышать PUMP_THRESHOLD_PERCENT")
     return settings
