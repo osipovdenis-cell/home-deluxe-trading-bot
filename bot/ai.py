@@ -55,6 +55,9 @@ class AIAnalyst:
         price: float,
         change_percent: float,
         window_minutes: int,
+        quote_volume_usdt: float = 0.0,
+        change_24h_percent: float = 0.0,
+        signal_kind: str = "сильный",
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -75,6 +78,9 @@ class AIAnalyst:
                         "price": price,
                         "change_percent": round(change_percent, 4),
                         "window_minutes": window_minutes,
+                        "change_24h_percent": round(change_24h_percent, 4),
+                        "quote_volume_24h_usdt": round(quote_volume_usdt, 2),
+                        "signal_kind": signal_kind,
                     },
                     ensure_ascii=False,
                 ),
