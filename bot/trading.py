@@ -44,19 +44,30 @@ class TradeNotice:
 
 @dataclass(frozen=True)
 class PaperTradingSummary:
+    starting_balance_usdt: float
+    cash_balance_usdt: float
+    equity_usdt: float
+    open_positions: int
     closed_positions: int
     profitable_positions: int
-    realized_pnl_usdt: float
 
     def telegram_text(self) -> str:
-        if not self.closed_positions:
-            return "🧪 Тестовые сделки: закрытых позиций пока нет."
-        win_rate = self.profitable_positions / self.closed_positions * 100
+        result = self.equity_usdt - self.starting_balance_usdt
+        result_percent = result / self.starting_balance_usdt * 100
+        win_rate = (
+            self.profitable_positions / self.closed_positions * 100
+            if self.closed_positions
+            else 0.0
+        )
         return (
-            "🧪 Результат тестовой стратегии\n"
+            "🧪 Виртуальный торговый банк\n"
+            f"Старт: {self.starting_balance_usdt:.2f} USDT.\n"
+            f"Сейчас: {self.equity_usdt:.3f} USDT.\n"
+            f"Результат: {result:+.3f} USDT ({result_percent:+.2f}%).\n"
+            f"Свободно: {self.cash_balance_usdt:.3f} USDT.\n"
+            f"Открыто позиций: {self.open_positions}.\n"
             f"Закрыто позиций: {self.closed_positions}.\n"
-            f"Прибыльных: {win_rate:.1f}%.\n"
-            f"Общий результат: {self.realized_pnl_usdt:+.3f} USDT."
+            f"Прибыльных среди закрытых: {win_rate:.1f}%."
         )
 
 
@@ -64,6 +75,7 @@ class PaperTrader:
     def __init__(
         self,
         database_path: str,
+        starting_balance_usdt: float,
         position_usdt: float,
         max_open_positions: int,
         min_ai_score: int,
@@ -79,6 +91,7 @@ class PaperTrader:
         self.connection = sqlite3.connect(database)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self.starting_balance_usdt = starting_balance_usdt
         self.position_usdt = position_usdt
         self.max_open_positions = max_open_positions
         self.min_ai_score = min_ai_score
@@ -120,7 +133,18 @@ class PaperTrader:
                 pnl_usdt REAL NOT NULL,
                 reason TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS paper_account (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                starting_balance_usdt REAL NOT NULL,
+                cash_balance_usdt REAL NOT NULL
+            );
             """
+        )
+        self.connection.execute(
+            "INSERT OR IGNORE INTO paper_account("
+            "id, starting_balance_usdt, cash_balance_usdt"
+            ") VALUES(1, ?, ?)",
+            (starting_balance_usdt, starting_balance_usdt),
         )
         self.connection.commit()
 
@@ -147,6 +171,13 @@ class PaperTrader:
         )
         if active_count >= self.max_open_positions:
             return None
+        cash_balance = float(
+            self.connection.execute(
+                "SELECT cash_balance_usdt FROM paper_account WHERE id = 1"
+            ).fetchone()[0]
+        )
+        if cash_balance + 1e-9 < self.position_usdt:
+            return None
         quantity = self.position_usdt / price
         cursor = self.connection.execute(
             "INSERT INTO paper_positions("
@@ -170,6 +201,11 @@ class PaperTrader:
             "position_id, timestamp, side, price, quantity, pnl_usdt, reason"
             ") VALUES(?, ?, 'BUY', ?, ?, 0, 'сигнал')",
             (cursor.lastrowid, now, price, quantity),
+        )
+        self.connection.execute(
+            "UPDATE paper_account SET cash_balance_usdt = "
+            "cash_balance_usdt - ? WHERE id = 1",
+            (self.position_usdt,),
         )
         self.connection.commit()
         return TradeNotice(
@@ -220,6 +256,11 @@ class PaperTrader:
             "position_id, timestamp, side, price, quantity, pnl_usdt, reason"
             ") VALUES(?, ?, 'SELL', ?, ?, ?, ?)",
             (row["id"], now, price, quantity, pnl_usdt, reason),
+        )
+        self.connection.execute(
+            "UPDATE paper_account SET cash_balance_usdt = "
+            "cash_balance_usdt + ? WHERE id = 1",
+            (entry_price * quantity + pnl_usdt,),
         )
         self.connection.commit()
         return TradeNotice(
@@ -328,17 +369,37 @@ class PaperTrader:
                 )
         return notices
 
-    def summary_since(self, started_at: float, now: float) -> PaperTradingSummary:
+    def summary(self, prices: dict[str, float]) -> PaperTradingSummary:
+        account = self.connection.execute(
+            "SELECT starting_balance_usdt, cash_balance_usdt "
+            "FROM paper_account WHERE id = 1"
+        ).fetchone()
         rows = self.connection.execute(
-            "SELECT realized_pnl_usdt FROM paper_positions "
-            "WHERE status = 'CLOSED' AND closed_at >= ? AND closed_at < ?",
-            (started_at, now),
+            "SELECT realized_pnl_usdt FROM paper_positions WHERE status = 'CLOSED'"
         ).fetchall()
         values = [float(row[0]) for row in rows]
+        open_rows = self.connection.execute(
+            "SELECT symbol, entry_price, remaining_quantity "
+            "FROM paper_positions WHERE status = 'OPEN'"
+        ).fetchall()
+        equity = float(account["cash_balance_usdt"])
+        for row in open_rows:
+            entry_price = float(row["entry_price"])
+            quantity = float(row["remaining_quantity"])
+            current_price = prices.get(str(row["symbol"]), entry_price)
+            pnl_percent = (
+                (current_price / entry_price - 1) * 100
+                - self.round_trip_cost_percent
+            )
+            entry_value = entry_price * quantity
+            equity += entry_value * (1 + pnl_percent / 100)
         return PaperTradingSummary(
+            float(account["starting_balance_usdt"]),
+            float(account["cash_balance_usdt"]),
+            equity,
+            len(open_rows),
             len(values),
             sum(value > 0 for value in values),
-            sum(values),
         )
 
     def close(self) -> None:
