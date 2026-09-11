@@ -41,6 +41,7 @@ def main() -> None:
             settings.paper_stop_loss_percent,
             settings.paper_take_profit_1_percent,
             settings.paper_take_profit_2_percent,
+            settings.paper_take_profit_3_percent,
             settings.paper_trailing_drawdown_percent,
             settings.paper_max_hold_seconds,
             settings.estimated_round_trip_cost_percent,
@@ -89,6 +90,7 @@ def main() -> None:
                 f"динамическое распределение между "
                 f"{settings.paper_max_open_positions} позициями, "
                 f"вход от {settings.paper_min_ai_score}/100.\n"
+                "Выход: 40% на +1,5%, 40% на +3%, остаток 20% на +5%.\n"
                 "Время удержания позиции не ограничено.\n"
                 if trader is not None
                 else "Тестовые сделки: выключены.\n"
