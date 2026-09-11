@@ -89,6 +89,7 @@ class PaperTrader:
         stop_loss_percent: float,
         take_profit_1_percent: float,
         take_profit_2_percent: float,
+        take_profit_3_percent: float,
         trailing_drawdown_percent: float,
         max_hold_seconds: int,
         round_trip_cost_percent: float,
@@ -105,6 +106,7 @@ class PaperTrader:
         self.stop_loss_percent = stop_loss_percent
         self.take_profit_1_percent = take_profit_1_percent
         self.take_profit_2_percent = take_profit_2_percent
+        self.take_profit_3_percent = take_profit_3_percent
         self.trailing_drawdown_percent = trailing_drawdown_percent
         self.max_hold_seconds = max_hold_seconds
         self.round_trip_cost_percent = round_trip_cost_percent
@@ -400,6 +402,34 @@ class PaperTrader:
             if row["status"] != "OPEN":
                 continue
             if (
+                int(row["take_2_done"])
+                and change + 1e-9 >= self.take_profit_3_percent
+            ):
+                notices.append(
+                    self._sell(
+                        row,
+                        float(row["remaining_quantity"]),
+                        price,
+                        now,
+                        "фиксация +5%",
+                    )
+                )
+                continue
+            if (
+                int(row["take_2_done"])
+                and change + 1e-9 < self.take_profit_2_percent
+            ):
+                notices.append(
+                    self._sell(
+                        row,
+                        float(row["remaining_quantity"]),
+                        price,
+                        now,
+                        "защита прибыли +3%",
+                    )
+                )
+                continue
+            if (
                 int(row["take_1_done"])
                 and change + 1e-9 < self.take_profit_1_percent
             ):
@@ -410,18 +440,6 @@ class PaperTrader:
                         price,
                         now,
                         "защита прибыли +1,5%",
-                    )
-                )
-                continue
-            drawdown = (price / highest - 1) * 100
-            if int(row["take_1_done"]) and drawdown <= -self.trailing_drawdown_percent:
-                notices.append(
-                    self._sell(
-                        row,
-                        float(row["remaining_quantity"]),
-                        price,
-                        now,
-                        "откат от максимума",
                     )
                 )
                 continue
