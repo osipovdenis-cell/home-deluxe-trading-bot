@@ -6,6 +6,9 @@ from unittest.mock import Mock
 try:
     import httpx  # noqa: F401
 except ModuleNotFoundError:
+    class DummyHTTPError(Exception):
+        pass
+
     class DummyClient:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -13,7 +16,10 @@ except ModuleNotFoundError:
         def close(self) -> None:
             pass
 
-    sys.modules["httpx"] = SimpleNamespace(Client=DummyClient)
+    sys.modules["httpx"] = SimpleNamespace(
+        Client=DummyClient,
+        HTTPError=DummyHTTPError,
+    )
 
 from bot.market import MarketMonitor
 
@@ -152,6 +158,30 @@ class MarketMonitorTests(unittest.TestCase):
         self.assertEqual(context.volume_ratio_5m, 3)
         self.assertEqual(context.trades_5m, 50)
         self.assertEqual(context.taker_buy_ratio_percent, 60)
+
+    def test_builds_order_book_context(self) -> None:
+        rows = []
+        for index in range(25):
+            rows.append([index, "1", "1", "1", "1", "1", index, 100, 10, "0", 55])
+        candles = Mock()
+        candles.raise_for_status.return_value = None
+        candles.json.return_value = rows
+        depth = Mock()
+        depth.raise_for_status.return_value = None
+        depth.json.return_value = {
+            "bids": [["100", "2"], ["99", "1"]],
+            "asks": [["100.1", "1"], ["101", "1"]],
+        }
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800
+        )
+        monitor.client = Mock()
+        monitor.client.get.side_effect = [candles, depth]
+        context = monitor.fetch_signal_context("AAAUSDT")
+        self.assertAlmostEqual(context.spread_bps, 10)
+        self.assertAlmostEqual(context.bid_depth_usdt, 299)
+        self.assertAlmostEqual(context.ask_depth_usdt, 201.1)
+        self.assertGreater(context.order_book_imbalance_percent, 0)
 
 
 if __name__ == "__main__":
