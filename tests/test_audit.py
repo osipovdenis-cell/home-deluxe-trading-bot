@@ -34,6 +34,34 @@ class AuditTests(unittest.TestCase):
             finally:
                 log.close()
 
+    def test_tracks_signal_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                started = log.period_started_at()
+                log.record_signal(
+                    started,
+                    "TESTUSDT",
+                    100.0,
+                    "ранний",
+                    1.2,
+                    4.5,
+                    1_000_000.0,
+                    63,
+                    "умеренный импульс",
+                )
+                inserted = log.record_due_outcomes(
+                    {"TESTUSDT": 102.0}, started + 3600, 0.2
+                )
+                self.assertEqual(inserted, 3)
+                performance = log.build_signal_performance(started + 3601)
+                self.assertEqual(performance.signal_count, 1)
+                self.assertEqual(performance.evaluated[15], 1)
+                self.assertEqual(performance.positive_rate[30], 100.0)
+                self.assertAlmostEqual(performance.average_net_return[60], 1.8)
+            finally:
+                log.close()
+
 
 if __name__ == "__main__":
     unittest.main()
