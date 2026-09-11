@@ -205,13 +205,78 @@ class PaperTraderTests(unittest.TestCase):
 
     def test_does_not_close_only_because_time_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            trader = make_trader(str(Path(directory) / "trades.db"))
+            trader = PaperTrader(
+                str(Path(directory) / "trades.db"),
+                150,
+                50,
+                3,
+                55,
+                1,
+                1.5,
+                3,
+                5,
+                1,
+                1,
+                0.2,
+            )
             try:
                 trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
                 notices = trader.update_positions({"TESTUSDT": 100.2}, 86400)
                 self.assertEqual(notices, [])
                 summary = trader.summary({"TESTUSDT": 100.2}, 86400)
                 self.assertEqual(summary.open_positions, 1)
+            finally:
+                trader.close()
+
+    def test_exits_stagnant_impulse_only_with_net_profit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL, symbol TEXT, price REAL)"
+                )
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
+                trader.connection.executemany(
+                    "INSERT INTO samples(timestamp, symbol, price) VALUES(?, ?, ?)",
+                    (
+                        (600, "TESTUSDT", 100.6),
+                        (1000, "TESTUSDT", 100.4),
+                        (1800, "TESTUSDT", 100.3),
+                    ),
+                )
+                trader.connection.commit()
+                notices = trader.update_positions(
+                    {"TESTUSDT": 100.3}, 1800, {"TESTUSDT": (0.7, 45, -10)}
+                )
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(
+                    notices[0].reason, "затухание импульса (выход в плюс)"
+                )
+                self.assertGreater(notices[0].pnl_usdt, 0)
+            finally:
+                trader.close()
+
+    def test_keeps_stagnant_position_when_exit_would_be_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL, symbol TEXT, price REAL)"
+                )
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
+                trader.connection.executemany(
+                    "INSERT INTO samples(timestamp, symbol, price) VALUES(?, ?, ?)",
+                    (
+                        (600, "TESTUSDT", 100.4),
+                        (1000, "TESTUSDT", 99.9),
+                        (1800, "TESTUSDT", 99.8),
+                    ),
+                )
+                trader.connection.commit()
+                notices = trader.update_positions(
+                    {"TESTUSDT": 99.8}, 1800, {"TESTUSDT": (0.7, 45, -10)}
+                )
+                self.assertEqual(notices, [])
             finally:
                 trader.close()
 
