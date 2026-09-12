@@ -64,38 +64,48 @@ def process_signal(
     execution_safe, rejection_reason, tick_percent = market.execution_safety(
         signal.symbol, signal.price, context
     )
-    if not execution_safe:
-        audit.record_signal(
-            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
-            signal.change_24h_percent, signal.quote_volume_usdt,
-            None, "вход отклонён фильтром исполнения", *context_values,
-        )
-        audit.record_entry_rejection(
-            now,
-            signal.symbol,
-            rejection_reason or "небезопасное исполнение",
-            context.spread_bps if context else None,
-            tick_percent,
-        )
-        print(
-            f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
-        )
-        return False
     dynamics = market.entry_dynamics(signal.symbol, now)
-    quality_safe, quality_reason = market.entry_quality(context, dynamics)
-    if not quality_safe:
-        audit.record_signal(
-            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
-            signal.change_24h_percent, signal.quote_volume_usdt,
-            None, "вход отклонён качеством импульса", *context_values,
-            entry_dynamics=dynamics.as_dict(),
-        )
-        audit.record_entry_rejection(
-            now, signal.symbol, quality_reason or "слабое качество импульса",
-            context.spread_bps, tick_percent,
-        )
-        print(f"Вход {signal.symbol} отклонён: {quality_reason}", flush=True)
-        return False
+    shadow_prefilter_reason = None
+    if not execution_safe:
+        if signal.is_rescue:
+            shadow_prefilter_reason = rejection_reason or "небезопасное исполнение"
+        else:
+            audit.record_signal(
+                now, signal.symbol, signal.price, signal.kind, signal.change_percent,
+                signal.change_24h_percent, signal.quote_volume_usdt,
+                None, "вход отклонён фильтром исполнения", *context_values,
+            )
+            audit.record_entry_rejection(
+                now,
+                signal.symbol,
+                rejection_reason or "небезопасное исполнение",
+                context.spread_bps if context else None,
+                tick_percent,
+            )
+            print(
+                f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
+            )
+            return False
+    if execution_safe:
+        quality_safe, quality_reason = market.entry_quality(context, dynamics)
+    else:
+        quality_safe, quality_reason = False, shadow_prefilter_reason
+    if not quality_safe and shadow_prefilter_reason is None:
+        if signal.is_rescue:
+            shadow_prefilter_reason = quality_reason or "слабое качество импульса"
+        else:
+            audit.record_signal(
+                now, signal.symbol, signal.price, signal.kind, signal.change_percent,
+                signal.change_24h_percent, signal.quote_volume_usdt,
+                None, "вход отклонён качеством импульса", *context_values,
+                entry_dynamics=dynamics.as_dict(),
+            )
+            audit.record_entry_rejection(
+                now, signal.symbol, quality_reason or "слабое качество импульса",
+                context.spread_bps, tick_percent,
+            )
+            print(f"Вход {signal.symbol} отклонён: {quality_reason}", flush=True)
+            return False
     behavior = audit.build_symbol_behavior(
         signal.symbol,
         now,
@@ -108,15 +118,19 @@ def process_signal(
         "confirmation_progress_percent": signal.confirmation_progress_percent,
         "confirmation_change_5s_percent": signal.confirmation_change_5s_percent,
         "confirmation_change_10s_percent": signal.confirmation_change_10s_percent,
-        "volume_ratio_5m": context.volume_ratio_5m,
-        "taker_buy_ratio_percent": context.taker_buy_ratio_percent,
-        "order_book_imbalance_percent": context.order_book_imbalance_percent,
+        "volume_ratio_5m": context.volume_ratio_5m if context else None,
+        "taker_buy_ratio_percent": context.taker_buy_ratio_percent if context else None,
+        "order_book_imbalance_percent": (
+            context.order_book_imbalance_percent if context else None
+        ),
         "change_60s_percent": dynamics.change_60s_percent,
         "pullback_from_high_percent": dynamics.pullback_from_5m_high_percent,
     }
     learned = audit.build_learning_profile(
         signal.symbol, now, learned_features
     )
+    dynamics_payload = dynamics.as_dict()
+    dynamics_payload["second_chance_90s"] = bool(signal.is_rescue)
     analysis = None
     if ai is not None:
         try:
@@ -133,7 +147,7 @@ def process_signal(
                 context.ask_depth_usdt if context else None,
                 context.order_book_imbalance_percent if context else None,
                 behavior.as_dict(),
-                dynamics.as_dict(),
+                dynamics_payload,
                 learned.as_dict(),
             )
         except (httpx.HTTPError, AIError) as error:
@@ -148,13 +162,26 @@ def process_signal(
         ai_reason=analysis.reason if analysis else None,
         ai_risk=analysis.risk if analysis else None,
         analysis_version=2 if analysis else 1,
-        entry_dynamics=dynamics.as_dict(),
+        entry_dynamics=dynamics_payload,
     )
     if analysis is None:
         audit.record_entry_rejection(
-            now, signal.symbol, "нет полного решения AI", context.spread_bps,
+            now, signal.symbol, "нет полного решения AI",
+            context.spread_bps if context else None,
             tick_percent,
         )
+        return False
+    if shadow_prefilter_reason is not None:
+        reason = (
+            "теневая AI-оценка второго шанса: "
+            f"{analysis.decision} {analysis.score}/100; сделка не открыта — "
+            f"{shadow_prefilter_reason}"
+        )
+        audit.record_entry_rejection(
+            now, signal.symbol, reason,
+            context.spread_bps if context else None, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
     history_unfavorable = len(behavior.impulses) >= 3 and not behavior.favorable
     exceptional = exceptional_new_entry(analysis, context, dynamics)
