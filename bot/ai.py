@@ -14,6 +14,7 @@ class AIAnalysis:
     verdict: str
     reason: str
     risk: str
+    decision: str = "SKIP"
 
 
 class AIAnalyst:
@@ -43,11 +44,14 @@ class AIAnalyst:
             verdict = str(data["verdict"])
             reason = str(data["reason"])
             risk = str(data["risk"])
+            decision = str(data.get("decision", "SKIP")).upper()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise AIError("Некорректный формат ответа OpenAI") from error
         if not 0 <= score <= 100:
             raise AIError("Оценка OpenAI вне диапазона 0–100")
-        return AIAnalysis(score, verdict, reason, risk)
+        if decision not in {"BUY", "WAIT", "SKIP"}:
+            raise AIError("Неизвестное решение OpenAI")
+        return AIAnalysis(score, verdict, reason, risk, decision)
 
     def analyze_momentum(
         self,
@@ -67,19 +71,26 @@ class AIAnalyst:
         ask_depth_usdt: float | None = None,
         order_book_imbalance_percent: float | None = None,
         historical_behavior: dict | None = None,
+        entry_dynamics: dict | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
             json={
                 "model": self.model,
                 "store": False,
-                "reasoning": {"effort": "low"},
-                "max_output_tokens": 350,
+                "reasoning": {"effort": "high"},
+                "max_output_tokens": 450,
                 "instructions": (
-                    "Ты аналитический модуль криптовалютного тестового бота. "
-                    "Оцени вероятность продолжения импульса в ближайшие 15 минут "
-                    "по текущим данным и фактическим предыдущим импульсам именно "
-                    "этой монеты. Учитывай, достигали ли они целей раньше стопа. "
+                    "Ты последний защитный фильтр входа криптовалютного тестового "
+                    "бота. Цель сделки: сначала +0,7%, затем +1%, стоп −0,5%, "
+                    "поэтому ложноположительный BUY особенно опасен. Сравни "
+                    "текущую форму движения, ускорение, откат от максимума, объём, "
+                    "агрессивные покупки, стакан, BTC, ширину рынка и 3–4 "
+                    "полноценных прошлых импульса именно этой монеты. BUY разрешай "
+                    "только при согласованном подтверждении факторов и достаточной "
+                    "вероятности достижения +0,7% раньше −0,5%. При противоречии, "
+                    "нехватке данных, затухании или входе возле вершины выбирай "
+                    "WAIT либо SKIP. "
                     "Не обещай прибыль, не выдумывай "
                     "новости или социальные сигналы. Пиши по-русски и кратко."
                 ),
@@ -101,6 +112,7 @@ class AIAnalyst:
                         "top_20_ask_depth_usdt": ask_depth_usdt,
                         "order_book_imbalance_percent": order_book_imbalance_percent,
                         "historical_behavior": historical_behavior,
+                        "entry_dynamics": entry_dynamics,
                     },
                     ensure_ascii=False,
                 ),
@@ -117,11 +129,17 @@ class AIAnalyst:
                                     "minimum": 0,
                                     "maximum": 100,
                                 },
+                                "decision": {
+                                    "type": "string",
+                                    "enum": ["BUY", "WAIT", "SKIP"],
+                                },
                                 "verdict": {"type": "string"},
                                 "reason": {"type": "string"},
                                 "risk": {"type": "string"},
                             },
-                            "required": ["score", "verdict", "reason", "risk"],
+                            "required": [
+                                "score", "decision", "verdict", "reason", "risk"
+                            ],
                             "additionalProperties": False,
                         },
                     }
