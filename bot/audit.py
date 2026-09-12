@@ -1083,7 +1083,7 @@ class AuditLog:
             "order_book_imbalance_percent, spread_bps, change_60s_percent, "
             "pullback_from_high_percent, market_breadth_60s_percent "
             "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
-            "AND started_at>=?",
+            "AND started_at>=? AND confirmation_progress_percent IS NOT NULL",
             (now - lookback_seconds,),
         ).fetchall()
         winners = [row for row in rows if int(row[0])]
@@ -1091,9 +1091,9 @@ class AuditLog:
         if not winners or not losers:
             return "🔬 Сравнение сценариев: полноценные снимки накапливаются."
 
-        def average(group: list[tuple], index: int) -> float | None:
+        def average(group: list[tuple], index: int) -> tuple[float | None, int]:
             values = [float(row[index]) for row in group if row[index] is not None]
-            return sum(values) / len(values) if values else None
+            return (sum(values) / len(values), len(values)) if values else (None, 0)
 
         features = (
             ("ход за 20 с", 1, "%"),
@@ -1109,22 +1109,70 @@ class AuditLog:
         )
         lines = [
             "🔬 Победители против остальных",
-            f"Полных снимков: {len(rows)}; цель достигли {len(winners)} "
+            f"Расширенных снимков: {len(rows)}; цель достигли {len(winners)} "
             f"({len(winners) / len(rows) * 100:.1f}%).",
         ]
         for label, index, suffix in features:
-            winner_average = average(winners, index)
-            loser_average = average(losers, index)
+            (winner_average, winner_count) = average(winners, index)
+            (loser_average, loser_count) = average(losers, index)
             if winner_average is None or loser_average is None:
                 continue
             prefix = "×" if suffix == "×" else ""
             suffix_text = "" if suffix == "×" else suffix
             lines.append(
-                f"• {label}: успешно {prefix}{winner_average:.2f}{suffix_text}, "
-                f"неуспешно {prefix}{loser_average:.2f}{suffix_text}."
+                f"• {label}: успешно {prefix}{winner_average:.2f}{suffix_text} "
+                f"(n={winner_count}), неуспешно "
+                f"{prefix}{loser_average:.2f}{suffix_text} (n={loser_count})."
             )
         if len(lines) == 2:
             lines.append("Новые расширенные снимки ещё не созрели 15 минут.")
+        rescue_rows = self.connection.execute(
+            "SELECT resolved_at,symbol,accepted,delayed_success,"
+            "delayed_stopped_first FROM confirmation_events "
+            "WHERE evaluated_at IS NOT NULL AND started_at>=? "
+            "AND reason LIKE 'повторное ускорение%'",
+            (now - lookback_seconds,),
+        ).fetchall()
+        if rescue_rows:
+            recovered = [row for row in rescue_rows if int(row[2])]
+            ai_checked = 0
+            ai_buy = 0
+            purchased = 0
+            has_positions = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='paper_positions'"
+            ).fetchone() is not None
+            for resolved_at, symbol, accepted, _success, _stopped in recovered:
+                decision = self.connection.execute(
+                    "SELECT ai_decision FROM signal_events WHERE symbol=? "
+                    "AND ABS(timestamp-?)<=15 AND ai_score IS NOT NULL "
+                    "ORDER BY ABS(timestamp-?) LIMIT 1",
+                    (symbol, resolved_at, resolved_at),
+                ).fetchone()
+                if decision is not None:
+                    ai_checked += 1
+                    ai_buy += str(decision[0]) == "BUY"
+                if has_positions:
+                    purchased += self.connection.execute(
+                        "SELECT COUNT(*) FROM paper_positions WHERE symbol=? "
+                        "AND ABS(opened_at-?)<=15",
+                        (symbol, resolved_at),
+                    ).fetchone()[0] > 0
+            rescue_successes = sum(int(row[3] or 0) for row in recovered)
+            rescue_stops = sum(int(row[4] or 0) for row in recovered)
+            lines.extend((
+                "",
+                "🔁 Второй шанс — 90 секунд",
+                f"Наблюдение завершено: {len(rescue_rows)}.",
+                f"Повторно ускорились: {len(recovered)}.",
+                f"Дошли до AI: {ai_checked}; AI BUY: {ai_buy}; "
+                f"тестовых покупок: {purchased}.",
+                f"После повторного ускорения: цель +0,7% — "
+                f"{rescue_successes}, стоп раньше цели — {rescue_stops}, "
+                f"нейтрально — {len(recovered) - rescue_successes - rescue_stops}.",
+            ))
+        else:
+            lines.extend(("", "🔁 Второй шанс: результаты накапливаются."))
         return "\n".join(lines)
 
     def recent_ai_decisions_text(self, limit: int = 8) -> str:
