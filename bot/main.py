@@ -231,7 +231,7 @@ def main() -> None:
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций, вход от "
                f"{settings.paper_min_ai_score}/100.\n"
-               "Выход: 40% на +1,5%, 40% на +3%, остаток 20% на +5%.\n"
+               "Выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%.\n"
                if trader else "Тестовые сделки: выключены.\n")
             + f"ИИ-аналитик: {ai_status}.\nСуточный аудит: включён.",
         )
