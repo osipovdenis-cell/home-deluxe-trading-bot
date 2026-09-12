@@ -140,6 +140,28 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
+    if learned.consecutive_trade_losses >= 2:
+        stronger_checks = (
+            context.volume_ratio_5m >= 1.5,
+            context.taker_buy_ratio_percent >= 55,
+            context.order_book_imbalance_percent is not None
+            and context.order_book_imbalance_percent >= 0,
+            dynamics.change_60s_percent is not None
+            and dynamics.change_60s_percent >= 0.1,
+            dynamics.pullback_from_5m_high_percent is not None
+            and dynamics.pullback_from_5m_high_percent >= -0.08,
+        )
+        if not all(stronger_checks):
+            reason = (
+                f"после {learned.consecutive_trade_losses} убытков подряд "
+                "не пройдены усиленные проверки объёма, покупателей, "
+                "стакана и продолжения импульса"
+            )
+            audit.record_entry_rejection(
+                now, signal.symbol, reason, context.spread_bps, tick_percent,
+            )
+            print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
+            return False
     if learned.blocked:
         reason = f"обучаемый фильтр BLOCK: {learned.explanation}"
         audit.record_entry_rejection(
