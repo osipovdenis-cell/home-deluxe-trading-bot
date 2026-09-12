@@ -84,7 +84,7 @@ def load_settings() -> Settings:
         scan_all_usdt=_env_bool("SCAN_ALL_USDT", True),
         min_quote_volume_usdt=float(os.getenv("MIN_QUOTE_VOLUME_USDT", "500000")),
         pump_window_seconds=int(os.getenv("PUMP_WINDOW_SECONDS", "300")),
-        early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "1")),
+        early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "0.5")),
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
         max_signals_per_cycle=int(os.getenv("MAX_SIGNALS_PER_CYCLE", "5")),
         estimated_round_trip_cost_percent=float(
