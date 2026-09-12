@@ -130,6 +130,8 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
             except (httpx.HTTPError, AIError) as error:
                 audit.record_error(f"OpenAI trading audit: {error}", now)
         telegram.send(chat_id, bank.telegram_text() + "\n\n" + intelligence.telegram_text() + ai_text)
+        for details_text in intelligence.trade_breakdown_texts():
+            telegram.send(chat_id, details_text)
         trader.finish_report(prices, now)
     if not audit.report_due(now):
         return
