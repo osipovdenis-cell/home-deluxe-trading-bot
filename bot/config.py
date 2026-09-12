@@ -36,6 +36,7 @@ class Settings:
     paper_stagnation_window_seconds: int
     poll_interval_seconds: int
     alert_cooldown_seconds: int
+    observer_report_interval_seconds: int
     audit_db_path: str
     openai_api_key: str | None
     openai_model: str
@@ -123,6 +124,9 @@ def load_settings() -> Settings:
         ),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
+        observer_report_interval_seconds=int(
+            os.getenv("OBSERVER_REPORT_INTERVAL_SECONDS", "7200")
+        ),
         audit_db_path=os.getenv("AUDIT_DB_PATH", "data/monitor.db").strip(),
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip(),
@@ -155,6 +159,7 @@ def load_settings() -> Settings:
         settings.max_signals_per_cycle,
         settings.entry_confirmation_seconds,
         settings.paper_max_open_positions,
+        settings.observer_report_interval_seconds,
     ) <= 0 or min(
         settings.early_threshold_percent,
         settings.pump_threshold_percent,
