@@ -6,6 +6,23 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_old_price_only_history_cannot_authorize_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                for timestamp in range(0, 7501, 60):
+                    log.record_prices(
+                        {"TESTUSDT": 101 if timestamp % 2400 == 300 else 100},
+                        timestamp,
+                    )
+                behavior = log.build_symbol_behavior(
+                    "TESTUSDT", 7500, 0.5, 0.7, 1, 0.5
+                )
+                self.assertEqual(behavior.impulses, ())
+                self.assertFalse(behavior.favorable)
+            finally:
+                log.close()
+
     def test_symbol_behavior_requires_repeated_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
@@ -19,6 +36,17 @@ class AuditTests(unittest.TestCase):
                 for timestamp in range(0, 7501, 60):
                     price = points.get(timestamp, 100)
                     log.record_prices({"TESTUSDT": price}, timestamp)
+                for base in (0, 2400, 4800):
+                    log.record_signal(
+                        base + 300, "TESTUSDT", 100.6, "ранний", 0.6, 2,
+                        1_000_000, 75, "подтверждён", 100_000, 2, 500, 60,
+                        2, 50_000, 40_000, 11, ai_decision="BUY",
+                        analysis_version=2,
+                        entry_dynamics={
+                            "change_60s_percent": 0.2,
+                            "pullback_from_5m_high_percent": 0,
+                        },
+                    )
                 behavior = log.build_symbol_behavior(
                     "TESTUSDT", 7500, 0.5, 0.7, 1, 0.5
                 )
