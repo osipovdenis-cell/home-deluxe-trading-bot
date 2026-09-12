@@ -220,16 +220,29 @@ class MarketMonitorTests(unittest.TestCase):
             "bids": [["100", "2"], ["99", "1"]],
             "asks": [["100.1", "1"], ["101", "1"]],
         }
+        aggregate = Mock()
+        aggregate.raise_for_status.return_value = None
+        aggregate.json.return_value = [
+            {"p": "1", "q": "100", "T": index * 1000, "m": False}
+            for index in range(18)
+        ] + [
+            {"p": "1", "q": "2000", "T": 18_000, "m": False},
+            {"p": "1", "q": "2000", "T": 19_000, "m": True},
+        ]
         monitor = MarketMonitor(
             "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800
         )
         monitor.client = Mock()
-        monitor.client.get.side_effect = [candles, depth]
+        monitor.client.get.side_effect = [candles, depth, aggregate]
         context = monitor.fetch_signal_context("AAAUSDT")
         self.assertAlmostEqual(context.spread_bps, 10)
         self.assertAlmostEqual(context.bid_depth_usdt, 299)
         self.assertAlmostEqual(context.ask_depth_usdt, 201.1)
         self.assertGreater(context.order_book_imbalance_percent, 0)
+        self.assertEqual(context.large_trade_threshold_usdt, 2000)
+        self.assertEqual(context.large_trade_count_60s, 2)
+        self.assertEqual(context.large_trade_imbalance_60s_percent, 0)
+        self.assertIsNotNone(context.bid_wall_share_percent)
 
     def test_entry_quality_rejects_weak_buy_pressure(self) -> None:
         monitor = MarketMonitor(
