@@ -77,6 +77,16 @@ def process_signal(
         settings.paper_take_profit_2_percent,
         settings.paper_stop_loss_percent,
     )
+    learned_features = {
+        "volume_ratio_5m": context.volume_ratio_5m,
+        "taker_buy_ratio_percent": context.taker_buy_ratio_percent,
+        "order_book_imbalance_percent": context.order_book_imbalance_percent,
+        "change_60s_percent": dynamics.change_60s_percent,
+        "pullback_from_high_percent": dynamics.pullback_from_5m_high_percent,
+    }
+    learned = audit.build_learning_profile(
+        signal.symbol, now, learned_features
+    )
     analysis = None
     if ai is not None:
         try:
@@ -94,6 +104,7 @@ def process_signal(
                 context.order_book_imbalance_percent if context else None,
                 behavior.as_dict(),
                 dynamics.as_dict(),
+                learned.as_dict(),
             )
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI: {error}", now)
@@ -129,10 +140,19 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
-    if analysis.decision != "BUY" or analysis.score < settings.paper_min_ai_score:
+    if learned.blocked:
+        reason = f"обучаемый фильтр BLOCK: {learned.explanation}"
+        audit.record_entry_rejection(
+            now, signal.symbol, reason, context.spread_bps, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
+        return False
+    required_ai_score = learned.required_ai_score(settings.paper_min_ai_score)
+    if analysis.decision != "BUY" or analysis.score < required_ai_score:
         reason = (
             f"AI решил {analysis.decision}, оценка {analysis.score}/100; "
-            f"нужно BUY и минимум {settings.paper_min_ai_score}/100"
+            f"нужно BUY и минимум {required_ai_score}/100 "
+            f"(обучаемый профиль: {learned.status})"
         )
         audit.record_entry_rejection(
             now, signal.symbol, reason, context.spread_bps, tick_percent,
@@ -158,7 +178,8 @@ def process_signal(
     ai_text = (
         f"\nИИ-решение: {analysis.decision}. Оценка: "
         f"{analysis.score}/100 ({analysis.verdict}).\n"
-        f"Причина: {analysis.reason}\nРиск: {analysis.risk}\n"
+            f"Причина: {analysis.reason}\nРиск: {analysis.risk}\n"
+            f"Обучаемый профиль: {learned.status}. {learned.explanation}\n"
         if analysis else "\nИИ-анализ временно недоступен.\n"
     )
     notice = (
@@ -233,6 +254,7 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
         settings.pump_threshold_percent,
     )
     performance = audit.build_signal_performance(now)
+    learning = audit.build_learning_report(now)
     ai_text = ""
     if ai is not None and performance.signal_count:
         try:
@@ -241,7 +263,11 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
                        f"({result.verdict}).\nВывод: {result.reason}\nРиск: {result.risk}")
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI daily audit: {error}", now)
-    telegram.send(chat_id, summary.telegram_text() + "\n\n" + performance.telegram_text() + ai_text)
+    telegram.send(
+        chat_id,
+        summary.telegram_text() + "\n\n" + performance.telegram_text()
+        + "\n\n" + learning.telegram_text() + ai_text,
+    )
     audit.finish_period(now)
 
 
@@ -313,6 +339,8 @@ def main() -> None:
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
             f"Подтверждение входа: {settings.entry_confirmation_seconds} сек; "
             "объём, покупки, стакан, рынок и полная история монеты.\n"
+            "Обучение: включено; результат каждого импульса через 15 минут "
+            "влияет на следующие входы.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций, вход от "
                f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
@@ -371,6 +399,12 @@ def main() -> None:
                 if now - last_audit >= settings.poll_interval_seconds:
                     audit.record_prices(prices, now)
                     audit.record_due_outcomes(prices, now, settings.estimated_round_trip_cost_percent)
+                    audit.refresh_learning_examples(
+                        now,
+                        settings.paper_take_profit_1_percent,
+                        settings.paper_take_profit_2_percent,
+                        settings.paper_stop_loss_percent,
+                    )
                     if trader:
                         notices = trader.update_positions(prices, now)
                         send_trade_notices(trader, telegram, chat_id, notices, prices, now)
