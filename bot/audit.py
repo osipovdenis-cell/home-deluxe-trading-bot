@@ -1088,9 +1088,6 @@ class AuditLog:
         ).fetchall()
         winners = [row for row in rows if int(row[0])]
         losers = [row for row in rows if not int(row[0])]
-        if not winners or not losers:
-            return "🔬 Сравнение сценариев: полноценные снимки накапливаются."
-
         def average(group: list[tuple], index: int) -> tuple[float | None, int]:
             values = [float(row[index]) for row in group if row[index] is not None]
             return (sum(values) / len(values), len(values)) if values else (None, 0)
@@ -1107,25 +1104,30 @@ class AuditLog:
             ("откат от максимума", 9, "%"),
             ("ширина рынка", 10, "%"),
         )
-        lines = [
-            "🔬 Победители против остальных",
-            f"Расширенных снимков: {len(rows)}; цель достигли {len(winners)} "
-            f"({len(winners) / len(rows) * 100:.1f}%).",
-        ]
-        for label, index, suffix in features:
-            (winner_average, winner_count) = average(winners, index)
-            (loser_average, loser_count) = average(losers, index)
-            if winner_average is None or loser_average is None:
-                continue
-            prefix = "×" if suffix == "×" else ""
-            suffix_text = "" if suffix == "×" else suffix
+        lines = ["🔬 Победители против остальных"]
+        if rows:
             lines.append(
-                f"• {label}: успешно {prefix}{winner_average:.2f}{suffix_text} "
-                f"(n={winner_count}), неуспешно "
-                f"{prefix}{loser_average:.2f}{suffix_text} (n={loser_count})."
+                f"Расширенных снимков: {len(rows)}; цель достигли {len(winners)} "
+                f"({len(winners) / len(rows) * 100:.1f}%)."
             )
-        if len(lines) == 2:
-            lines.append("Новые расширенные снимки ещё не созрели 15 минут.")
+        if winners and losers:
+            for label, index, suffix in features:
+                (winner_average, winner_count) = average(winners, index)
+                (loser_average, loser_count) = average(losers, index)
+                if winner_average is None or loser_average is None:
+                    continue
+                prefix = "×" if suffix == "×" else ""
+                suffix_text = "" if suffix == "×" else suffix
+                lines.append(
+                    f"• {label}: успешно {prefix}{winner_average:.2f}{suffix_text} "
+                    f"(n={winner_count}), неуспешно "
+                    f"{prefix}{loser_average:.2f}{suffix_text} (n={loser_count})."
+                )
+        else:
+            lines.append(
+                "Для сравнения нужны созревшие снимки и успешной, "
+                "и неуспешной группы."
+            )
         rescue_rows = self.connection.execute(
             "SELECT resolved_at,symbol,accepted,delayed_success,"
             "delayed_stopped_first FROM confirmation_events "
