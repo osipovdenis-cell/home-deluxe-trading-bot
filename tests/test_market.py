@@ -57,20 +57,28 @@ class MarketMonitorTests(unittest.TestCase):
             monitor.close()
 
     def test_emits_pump_signal_after_full_window(self) -> None:
-        monitor = MarketMonitor("https://api.binance.com", ("DOGEUSDT",), 300, 3, 1800)
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("DOGEUSDT",), 300, 3, 1800,
+            entry_confirmation_seconds=0,
+        )
         try:
             self.assertEqual(monitor.update({"DOGEUSDT": 100}, now=0), [])
-            signals = monitor.update({"DOGEUSDT": 104}, now=300)
+            self.assertEqual(monitor.update({"DOGEUSDT": 104}, now=300), [])
+            signals = monitor.update({"DOGEUSDT": 104.1}, now=300)
             self.assertEqual(len(signals), 1)
-            self.assertAlmostEqual(signals[0].change_percent, 4)
+            self.assertAlmostEqual(signals[0].change_percent, 4.1)
         finally:
             monitor.close()
 
     def test_respects_alert_cooldown(self) -> None:
-        monitor = MarketMonitor("https://api.binance.com", ("DOGEUSDT",), 300, 3, 1800)
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("DOGEUSDT",), 300, 3, 1800,
+            entry_confirmation_seconds=0,
+        )
         try:
             monitor.update({"DOGEUSDT": 100}, now=0)
-            self.assertEqual(len(monitor.update({"DOGEUSDT": 104}, now=300)), 1)
+            self.assertEqual(monitor.update({"DOGEUSDT": 104}, now=300), [])
+            self.assertEqual(len(monitor.update({"DOGEUSDT": 104.1}, now=300)), 1)
             self.assertEqual(monitor.update({"DOGEUSDT": 105}, now=600), [])
         finally:
             monitor.close()
@@ -83,10 +91,14 @@ class MarketMonitorTests(unittest.TestCase):
             3,
             1800,
             early_threshold_percent=1,
+            entry_confirmation_seconds=0,
         )
         try:
             monitor.update({"DOGEUSDT": 100, "PEPEUSDT": 100}, now=0)
-            signals = monitor.update({"DOGEUSDT": 101.5, "PEPEUSDT": 104}, now=300)
+            monitor.update({"DOGEUSDT": 101.5, "PEPEUSDT": 104}, now=300)
+            signals = monitor.update(
+                {"DOGEUSDT": 101.6, "PEPEUSDT": 104.1}, now=300
+            )
             kinds = {signal.symbol: signal.kind for signal in signals}
             self.assertEqual(kinds["DOGEUSDT"], "ранний")
             self.assertEqual(kinds["PEPEUSDT"], "сильный")
@@ -103,11 +115,16 @@ class MarketMonitorTests(unittest.TestCase):
             1800,
             early_threshold_percent=1,
             max_signals_per_cycle=3,
+            entry_confirmation_seconds=0,
         )
         try:
             monitor.update({symbol: 100 for symbol in symbols}, now=0)
-            signals = monitor.update(
+            monitor.update(
                 {symbol: 102 + index for index, symbol in enumerate(symbols)},
+                now=300,
+            )
+            signals = monitor.update(
+                {symbol: 102.1 + index for index, symbol in enumerate(symbols)},
                 now=300,
             )
             self.assertEqual(len(signals), 3)
@@ -213,6 +230,46 @@ class MarketMonitorTests(unittest.TestCase):
         self.assertAlmostEqual(context.bid_depth_usdt, 299)
         self.assertAlmostEqual(context.ask_depth_usdt, 201.1)
         self.assertGreater(context.order_book_imbalance_percent, 0)
+
+    def test_entry_quality_rejects_weak_buy_pressure(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800
+        )
+        try:
+            for timestamp in range(0, 301, 15):
+                monitor.history["AAAUSDT"].append(
+                    (timestamp, 100 + timestamp / 300)
+                )
+            dynamics = monitor.entry_dynamics("AAAUSDT", 300)
+            context = SignalMarketContext(
+                100_000, 2, 500, 49, 2, 50_000, 40_000, 11
+            )
+            safe, reason = monitor.entry_quality(context, dynamics)
+            self.assertFalse(safe)
+            self.assertIn("покупатели", reason)
+        finally:
+            monitor.close()
+
+    def test_confirmation_rejects_fading_impulse(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=20,
+        )
+        try:
+            for timestamp in range(0, 301, 15):
+                price = 100 if timestamp < 300 else 100.6
+                monitor.update({"AAAUSDT": price}, now=timestamp)
+            self.assertEqual(
+                monitor.update({"AAAUSDT": 100.5}, now=321), []
+            )
+            rejected = monitor.drain_confirmation_rejections()
+            self.assertEqual(rejected[0][1], "AAAUSDT")
+            self.assertTrue(
+                "нет продолжения" in rejected[0][2]
+                or "импульс исчез" in rejected[0][2]
+            )
+        finally:
+            monitor.close()
 
 
 if __name__ == "__main__":
