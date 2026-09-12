@@ -156,6 +156,92 @@ class SymbolBehavior:
         }
 
 
+@dataclass(frozen=True)
+class LearningProfile:
+    symbol: str
+    symbol_examples: int
+    symbol_successes: int
+    similar_examples: int
+    similar_successes: int
+    consecutive_failures: int
+    status: str
+    score_adjustment: int
+    explanation: str
+
+    @property
+    def symbol_success_rate_percent(self) -> float | None:
+        if not self.symbol_examples:
+            return None
+        return self.symbol_successes / self.symbol_examples * 100
+
+    @property
+    def similar_success_rate_percent(self) -> float | None:
+        if not self.similar_examples:
+            return None
+        return self.similar_successes / self.similar_examples * 100
+
+    @property
+    def blocked(self) -> bool:
+        return self.status == "BLOCK"
+
+    def required_ai_score(self, base_score: int) -> int:
+        return max(65, min(90, base_score + self.score_adjustment))
+
+    def as_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "status": self.status,
+            "symbol_examples": self.symbol_examples,
+            "symbol_successes": self.symbol_successes,
+            "symbol_success_rate_percent": self.symbol_success_rate_percent,
+            "similar_market_examples": self.similar_examples,
+            "similar_market_successes": self.similar_successes,
+            "similar_market_success_rate_percent": self.similar_success_rate_percent,
+            "consecutive_failures": self.consecutive_failures,
+            "ai_score_adjustment": self.score_adjustment,
+            "explanation": self.explanation,
+        }
+
+
+@dataclass(frozen=True)
+class LearningReport:
+    examples: int
+    successes: int
+    learned_symbols: int
+    best_symbols: tuple[tuple[str, int, float], ...]
+    blocked_symbols: tuple[tuple[str, int, float], ...]
+
+    def telegram_text(self) -> str:
+        rate = self.successes / self.examples * 100 if self.examples else 0.0
+        lines = [
+            "🧠 Чему научился бот",
+            f"Размеченных импульсов: {self.examples}.",
+            f"Цель +0,7% раньше стопа: {rate:.1f}%.",
+            f"Монет с накопленной историей: {self.learned_symbols}.",
+        ]
+        if self.best_symbols:
+            lines.append(
+                "Лучшее поведение: "
+                + ", ".join(
+                    f"{symbol} — {rate:.0f}% ({count})"
+                    for symbol, count, rate in self.best_symbols
+                )
+                + "."
+            )
+        if self.blocked_symbols:
+            lines.append(
+                "Повторные входы ограничены: "
+                + ", ".join(
+                    f"{symbol} — {rate:.0f}% ({count})"
+                    for symbol, count, rate in self.blocked_symbols
+                )
+                + "."
+            )
+        if not self.examples:
+            lines.append("Обучающие примеры пока накапливаются.")
+        return "\n".join(lines)
+
+
 def detect_pumps(
     candles: list[tuple[float, float, float]],
     window_seconds: int,
@@ -266,6 +352,26 @@ class AuditLog:
                 net_return_percent REAL NOT NULL,
                 PRIMARY KEY(signal_id, horizon_minutes)
             );
+            CREATE TABLE IF NOT EXISTS learning_examples (
+                signal_id INTEGER PRIMARY KEY,
+                matured_at REAL NOT NULL,
+                signal_timestamp REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                success_before_stop INTEGER NOT NULL,
+                reached_second_target INTEGER NOT NULL,
+                maximum_return_percent REAL NOT NULL,
+                minimum_return_percent REAL NOT NULL,
+                setup_change_percent REAL NOT NULL,
+                volume_ratio_5m REAL,
+                taker_buy_ratio_percent REAL,
+                order_book_imbalance_percent REAL,
+                change_60s_percent REAL,
+                pullback_from_high_percent REAL,
+                ai_score INTEGER,
+                ai_decision TEXT
+            );
+            CREATE INDEX IF NOT EXISTS learning_examples_symbol_time
+                ON learning_examples(symbol, signal_timestamp);
             """
         )
         signal_columns = {
@@ -477,6 +583,188 @@ class AuditLog:
         if inserted:
             self.connection.commit()
         return inserted
+
+    def refresh_learning_examples(
+        self,
+        now: float,
+        first_target_percent: float,
+        second_target_percent: float,
+        stop_loss_percent: float,
+        horizon_seconds: int = 900,
+    ) -> int:
+        """Turn matured full-AI signals into persistent supervised examples."""
+        rows = self.connection.execute(
+            "SELECT s.id, s.timestamp, s.symbol, s.entry_price, "
+            "s.change_percent, s.volume_ratio_5m, s.taker_buy_ratio_percent, "
+            "s.order_book_imbalance_percent, s.change_60s_percent, "
+            "s.pullback_from_high_percent, s.ai_score, s.ai_decision "
+            "FROM signal_events s "
+            "LEFT JOIN learning_examples l ON l.signal_id = s.id "
+            "WHERE l.signal_id IS NULL AND s.analysis_version >= 2 "
+            "AND s.ai_score IS NOT NULL AND s.ai_decision IS NOT NULL "
+            "AND s.timestamp <= ? ORDER BY s.timestamp",
+            (now - horizon_seconds,),
+        ).fetchall()
+        inserted = 0
+        for row in rows:
+            signal_id = int(row[0])
+            event_at = float(row[1])
+            symbol = str(row[2])
+            entry_price = float(row[3])
+            points = self.connection.execute(
+                "SELECT timestamp, price FROM samples WHERE symbol = ? "
+                "AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+                (symbol, event_at, event_at + horizon_seconds),
+            ).fetchall()
+            if not points or float(points[-1][0]) < event_at + horizon_seconds * 0.8:
+                continue
+            changes = [
+                (float(price) / entry_price - 1) * 100
+                for _timestamp, price in points
+            ]
+            first_hit = False
+            second_hit = False
+            for change in changes:
+                if not first_hit and change <= -stop_loss_percent:
+                    break
+                if change >= first_target_percent:
+                    first_hit = True
+                if first_hit and change >= second_target_percent:
+                    second_hit = True
+                    break
+            self.connection.execute(
+                "INSERT OR IGNORE INTO learning_examples("
+                "signal_id, matured_at, signal_timestamp, symbol, "
+                "success_before_stop, reached_second_target, "
+                "maximum_return_percent, minimum_return_percent, "
+                "setup_change_percent, volume_ratio_5m, "
+                "taker_buy_ratio_percent, order_book_imbalance_percent, "
+                "change_60s_percent, pullback_from_high_percent, ai_score, "
+                "ai_decision) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    signal_id, now, event_at, symbol, int(first_hit),
+                    int(second_hit), max(changes), min(changes), float(row[4]),
+                    row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+                ),
+            )
+            inserted += 1
+        if inserted:
+            self.connection.commit()
+        return inserted
+
+    @staticmethod
+    def _similar_learning_example(row: tuple, current: dict) -> bool:
+        comparisons = (
+            (row[4], current.get("volume_ratio_5m"), 0.8),
+            (row[5], current.get("taker_buy_ratio_percent"), 8.0),
+            (row[6], current.get("order_book_imbalance_percent"), 30.0),
+            (row[7], current.get("change_60s_percent"), 0.35),
+            (row[8], current.get("pullback_from_high_percent"), 0.25),
+        )
+        available = 0
+        matches = 0
+        for historical, present, tolerance in comparisons:
+            if historical is None or present is None:
+                continue
+            available += 1
+            matches += abs(float(historical) - float(present)) <= tolerance
+        return available >= 3 and matches / available >= 0.6
+
+    def build_learning_profile(
+        self,
+        symbol: str,
+        now: float,
+        current_features: dict,
+        lookback_seconds: int = 30 * 86400,
+    ) -> LearningProfile:
+        rows = self.connection.execute(
+            "SELECT symbol, success_before_stop, signal_timestamp, "
+            "setup_change_percent, volume_ratio_5m, taker_buy_ratio_percent, "
+            "order_book_imbalance_percent, change_60s_percent, "
+            "pullback_from_high_percent FROM learning_examples "
+            "WHERE signal_timestamp >= ? ORDER BY signal_timestamp DESC LIMIT 2000",
+            (now - lookback_seconds,),
+        ).fetchall()
+        symbol_rows = [row for row in rows if str(row[0]) == symbol]
+        similar_rows = [
+            row for row in rows
+            if str(row[0]) != symbol
+            and self._similar_learning_example(row, current_features)
+        ][:200]
+        symbol_successes = sum(int(row[1]) for row in symbol_rows)
+        similar_successes = sum(int(row[1]) for row in similar_rows)
+        consecutive_failures = 0
+        for row in symbol_rows:
+            if int(row[1]):
+                break
+            consecutive_failures += 1
+        symbol_rate = (
+            symbol_successes / len(symbol_rows) if symbol_rows else None
+        )
+        similar_rate = (
+            similar_successes / len(similar_rows) if similar_rows else None
+        )
+        status = "LEARNING"
+        adjustment = 0
+        explanation = "Недостаточно размеченных примеров; действует базовый фильтр."
+        if len(symbol_rows) >= 4 and (
+            symbol_rate is not None and symbol_rate < 0.35
+            or consecutive_failures >= 3
+        ):
+            status = "BLOCK"
+            adjustment = 15
+            explanation = (
+                "Монета повторяет неудачные импульсы: цель +0,7% редко "
+                "достигается раньше стопа."
+            )
+        elif len(similar_rows) >= 12 and similar_rate is not None and similar_rate < 0.35:
+            status = "BLOCK"
+            adjustment = 12
+            explanation = (
+                "Похожие рыночные ситуации чаще заканчиваются стопом, чем целью."
+            )
+        elif len(symbol_rows) >= 4 and symbol_rate is not None and symbol_rate >= 0.65:
+            status = "FAVORABLE"
+            adjustment = -3
+            explanation = "Монета стабильно достигала первой цели в похожих импульсах."
+        elif len(similar_rows) >= 12 and similar_rate is not None and similar_rate >= 0.60:
+            status = "FAVORABLE"
+            adjustment = -2
+            explanation = "Похожие рыночные ситуации имеют положительную историю."
+        elif len(symbol_rows) >= 3 or len(similar_rows) >= 8:
+            status = "CAUTION"
+            adjustment = 5
+            explanation = "История смешанная; для входа требуется более сильное решение AI."
+        return LearningProfile(
+            symbol, len(symbol_rows), symbol_successes, len(similar_rows),
+            similar_successes, consecutive_failures, status, adjustment,
+            explanation,
+        )
+
+    def build_learning_report(self, now: float) -> LearningReport:
+        rows = self.connection.execute(
+            "SELECT symbol, COUNT(*), SUM(success_before_stop) "
+            "FROM learning_examples WHERE signal_timestamp >= ? "
+            "GROUP BY symbol",
+            (now - 30 * 86400,),
+        ).fetchall()
+        ranked = [
+            (str(symbol), int(count), float(successes or 0) / int(count) * 100)
+            for symbol, count, successes in rows
+        ]
+        eligible = [item for item in ranked if item[1] >= 4]
+        best = tuple(sorted(eligible, key=lambda item: (-item[2], -item[1]))[:5])
+        blocked = tuple(
+            sorted(
+                (item for item in eligible if item[2] < 35),
+                key=lambda item: (item[2], -item[1]),
+            )[:5]
+        )
+        return LearningReport(
+            sum(item[1] for item in ranked),
+            sum(round(item[1] * item[2] / 100) for item in ranked),
+            len(eligible), best, blocked,
+        )
 
     def build_symbol_behavior(
         self,
