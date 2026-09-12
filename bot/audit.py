@@ -792,6 +792,77 @@ class AuditLog:
             len(eligible), best, blocked,
         )
 
+    def recent_ai_decisions_text(self, limit: int = 8) -> str:
+        rows = self.connection.execute(
+            "SELECT timestamp, symbol, ai_score, ai_decision, ai_reason "
+            "FROM signal_events WHERE analysis_version >= 2 "
+            "AND ai_score IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return "🤖 Решения AI пока не накоплены."
+        lines = ["🤖 Последние решения AI"]
+        for timestamp, symbol, score, decision, reason in rows:
+            clock = time.strftime("%H:%M", time.localtime(float(timestamp)))
+            compact_reason = " ".join(str(reason or "").split())[:220]
+            lines.append(
+                f"• {clock} {symbol}: {decision}, {score}/100. {compact_reason}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _rejection_category(reason: str) -> str:
+        lowered = reason.lower()
+        if "20 сек" in lowered or "подтвержден" in lowered or "импульс исчез" in lowered:
+            return "не подтверждён импульс"
+        if "история" in lowered:
+            return "история монеты"
+        if "ai решил" in lowered or "решения ai" in lowered:
+            return "решение AI"
+        if "спред" in lowered or "исполн" in lowered or "шаг цены" in lowered:
+            return "исполнение/спред"
+        if "объём" in lowered or "покупател" in lowered or "стакан" in lowered:
+            return "рыночное качество"
+        return "другие фильтры"
+
+    def observer_report_text(self, now: float, since: float) -> str | None:
+        decisions = self.connection.execute(
+            "SELECT ai_decision, COUNT(*) FROM signal_events "
+            "WHERE timestamp >= ? AND analysis_version >= 2 "
+            "AND ai_score IS NOT NULL GROUP BY ai_decision",
+            (since,),
+        ).fetchall()
+        rejection_rows = self.connection.execute(
+            "SELECT reason FROM paper_entry_rejections WHERE timestamp >= ?",
+            (since,),
+        ).fetchall()
+        error_count = int(self.connection.execute(
+            "SELECT COUNT(*) FROM errors WHERE timestamp >= ?", (since,)
+        ).fetchone()[0])
+        if not decisions and not rejection_rows and not error_count:
+            return None
+        decision_counts = {str(name or "ERROR"): int(count) for name, count in decisions}
+        categories: dict[str, int] = {}
+        for row in rejection_rows:
+            category = self._rejection_category(str(row[0]))
+            categories[category] = categories.get(category, 0) + 1
+        hours = max(0.0, (now - since) / 3600)
+        decisions_text = ", ".join(
+            f"{name} {count}" for name, count in sorted(decision_counts.items())
+        ) or "полных решений не было"
+        filters_text = ", ".join(
+            f"{name} {count}"
+            for name, count in sorted(categories.items(), key=lambda item: -item[1])[:5]
+        ) or "нет"
+        return (
+            "👁 Наблюдатель AI-бота\n"
+            f"Период: {hours:.1f} ч.\n"
+            f"Решения AI: {decisions_text}.\n"
+            f"Отклонено до покупки: {len(rejection_rows)}.\n"
+            f"Основные причины: {filters_text}.\n"
+            f"Технические ошибки: {error_count}."
+        )
+
     def build_symbol_behavior(
         self,
         symbol: str,
