@@ -10,6 +10,7 @@ class Settings:
     binance_base_url: str
     telegram_bot_token: str
     telegram_chat_id: str | None
+    telegram_signal_alerts_enabled: bool
     market_data_base_url: str
     watch_symbols: tuple[str, ...]
     scan_all_usdt: bool
@@ -67,6 +68,9 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip() or None,
+        telegram_signal_alerts_enabled=_env_bool(
+            "TELEGRAM_SIGNAL_ALERTS_ENABLED", False
+        ),
         market_data_base_url=os.getenv(
             "MARKET_DATA_BASE_URL", "https://api.binance.com"
         ).rstrip("/"),
