@@ -37,6 +37,12 @@ def exceptional_new_entry(analysis, context, dynamics) -> bool:
     )
 
 
+def history_entry_policy(behavior, exceptional: bool, base_score: int) -> tuple[bool, int]:
+    """Return whether history permits a test entry and its minimum AI score."""
+    history_unfavorable = len(behavior.impulses) >= 3 and not behavior.favorable
+    return (not history_unfavorable or exceptional, max(base_score, 85 if history_unfavorable else 0))
+
+
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings,
@@ -146,17 +152,18 @@ def process_signal(
             tick_percent,
         )
         return False
-    history_ready = len(behavior.impulses) >= 3 and behavior.favorable
+    history_unfavorable = len(behavior.impulses) >= 3 and not behavior.favorable
     exceptional = exceptional_new_entry(analysis, context, dynamics)
-    if not history_ready and not exceptional:
+    history_allowed, required_ai_score = history_entry_policy(
+        behavior,
+        exceptional,
+        learned.required_ai_score(settings.paper_min_ai_score),
+    )
+    if not history_allowed:
         reason = (
-            f"полная AI-история накапливается: {len(behavior.impulses)}/3; "
+            f"история неблагоприятна: цель +0,7% достигалась "
+            f"{behavior.first_target_hits}/{len(behavior.impulses)} раз; "
             "исключительно сильный вход 85/100 не подтверждён"
-            if len(behavior.impulses) < 3
-            else (
-                f"история неблагоприятна: цель +0,7% достигалась "
-                f"{behavior.first_target_hits}/{len(behavior.impulses)} раз"
-            )
         )
         audit.record_entry_rejection(
             now, signal.symbol, reason, context.spread_bps, tick_percent,
@@ -192,10 +199,6 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
-    required_ai_score = max(
-        learned.required_ai_score(settings.paper_min_ai_score),
-        85 if exceptional and not history_ready else 0,
-    )
     if analysis.decision != "BUY" or analysis.score < required_ai_score:
         reason = (
             f"AI решил {analysis.decision}, оценка {analysis.score}/100; "
@@ -415,11 +418,12 @@ def main() -> None:
             f"{settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
             f"Подтверждение входа: {settings.entry_confirmation_seconds} сек; "
-            "объём, покупки, стакан, рынок и полная история монеты.\n"
+            "объём, покупки, стакан, рынок и история монеты.\n"
             "Обучение: включено; результат каждого импульса через 15 минут "
             "влияет на следующие входы.\n"
-            "Холодный старт: исключительно сильный BUY от 85/100 может войти "
-            "без истории 3/3.\n"
+            f"Холодный старт: без истории тестовый BUY от "
+            f"{settings.paper_min_ai_score}/100 после всех фильтров; "
+            "при плохой истории — только исключительный BUY от 85/100.\n"
             "Ожидание 20 секунд: ведётся теневой контроль пропущенной прибыли.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
