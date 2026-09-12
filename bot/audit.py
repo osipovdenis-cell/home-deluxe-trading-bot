@@ -875,9 +875,22 @@ class AuditLog:
             "setup_change_percent, volume_ratio_5m, taker_buy_ratio_percent, "
             "order_book_imbalance_percent, change_60s_percent, "
             "pullback_from_high_percent FROM learning_examples "
-            "WHERE signal_timestamp >= ? ORDER BY signal_timestamp DESC LIMIT 2000",
+            "WHERE signal_timestamp >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
+            "WHERE c.symbol=learning_examples.symbol "
+            "AND c.evaluated_at IS NOT NULL "
+            "AND ABS(c.started_at-learning_examples.signal_timestamp)<=60) "
+            "ORDER BY signal_timestamp DESC LIMIT 2000",
             (now - lookback_seconds,),
         ).fetchall()
+        shadow_rows = self.connection.execute(
+            "SELECT symbol, immediate_success, started_at, 0, NULL, NULL, NULL, "
+            "NULL, NULL FROM confirmation_events "
+            "WHERE evaluated_at IS NOT NULL AND started_at >= ? "
+            "ORDER BY started_at DESC LIMIT 4000",
+            (now - lookback_seconds,),
+        ).fetchall()
+        rows = list(rows) + list(shadow_rows)
         symbol_rows = [row for row in rows if str(row[0]) == symbol]
         similar_rows = [
             row for row in rows
@@ -959,12 +972,27 @@ class AuditLog:
         )
 
     def build_learning_report(self, now: float) -> LearningReport:
-        rows = self.connection.execute(
-            "SELECT symbol, COUNT(*), SUM(success_before_stop) "
-            "FROM learning_examples WHERE signal_timestamp >= ? "
-            "GROUP BY symbol",
+        detailed = self.connection.execute(
+            "SELECT symbol, success_before_stop FROM learning_examples "
+            "WHERE signal_timestamp >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
+            "WHERE c.symbol=learning_examples.symbol "
+            "AND c.evaluated_at IS NOT NULL "
+            "AND ABS(c.started_at-learning_examples.signal_timestamp)<=60)",
             (now - 30 * 86400,),
         ).fetchall()
+        shadow = self.connection.execute(
+            "SELECT symbol, immediate_success FROM confirmation_events "
+            "WHERE evaluated_at IS NOT NULL AND started_at >= ?",
+            (now - 30 * 86400,),
+        ).fetchall()
+        grouped: dict[str, list[int]] = {}
+        for symbol, success in list(detailed) + list(shadow):
+            grouped.setdefault(str(symbol), []).append(int(success))
+        rows = [
+            (symbol, len(values), sum(values))
+            for symbol, values in grouped.items()
+        ]
         ranked = [
             (str(symbol), int(count), float(successes or 0) / int(count) * 100)
             for symbol, count, successes in rows
@@ -1068,6 +1096,26 @@ class AuditLog:
         event_cooldown_seconds: int = 1800,
         limit: int = 4,
     ) -> SymbolBehavior:
+        shadow_rows = self.connection.execute(
+            "SELECT started_at, trigger_price, immediate_success, "
+            "immediate_stopped_first, immediate_max_return_percent, "
+            "immediate_min_return_percent FROM confirmation_events "
+            "WHERE symbol=? AND evaluated_at IS NOT NULL "
+            "AND started_at>=? AND started_at<=? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (symbol, now - lookback_seconds, now - horizon_seconds, limit),
+        ).fetchall()
+        if shadow_rows:
+            impulses = []
+            for row in reversed(shadow_rows):
+                maximum = float(row[4])
+                impulses.append(HistoricalImpulse(
+                    float(row[0]), setup_threshold_percent, maximum,
+                    float(row[5]), bool(row[2]),
+                    bool(row[2]) and maximum >= second_target_percent,
+                    bool(row[3]),
+                ))
+            return SymbolBehavior(symbol, tuple(impulses))
         points = [
             (float(row[0]), float(row[1]))
             for row in self.connection.execute(
