@@ -290,6 +290,7 @@ class MarketMonitorTests(unittest.TestCase):
             signals = monitor.update({"AAAUSDT": 100.62}, now=331)
             self.assertEqual(len(signals), 1)
             self.assertEqual(signals[0].symbol, "AAAUSDT")
+            self.assertTrue(signals[0].is_rescue)
             events = monitor.drain_confirmation_events()
             self.assertTrue(any(event.accepted for event in events))
             self.assertIn("повторное ускорение", events[-1].reason)
