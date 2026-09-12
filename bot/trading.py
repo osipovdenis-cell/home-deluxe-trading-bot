@@ -79,6 +79,29 @@ class PaperTradingSummary:
 
 
 @dataclass(frozen=True)
+class EntryBucketSummary:
+    label: str
+    trades: int
+    profitable: int
+    pnl_usdt: float
+    first_target_hits: int
+    second_target_hits: int
+
+
+@dataclass(frozen=True)
+class TradeBreakdown:
+    symbol: str
+    entry_change_percent: float | None
+    ai_score: int
+    maximum_percent: float
+    pnl_usdt: float
+    return_percent: float
+    first_target_hit: bool
+    second_target_hit: bool
+    close_reason: str
+
+
+@dataclass(frozen=True)
 class TradingIntelligenceSummary:
     closed_positions: int
     actual_pnl_usdt: float
@@ -90,6 +113,8 @@ class TradingIntelligenceSummary:
     target_0_7_pnl_usdt: float
     target_1_pnl_usdt: float
     target_1_5_pnl_usdt: float
+    entry_buckets: tuple[EntryBucketSummary, ...] = ()
+    trade_breakdown: tuple[TradeBreakdown, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -119,6 +144,19 @@ class TradingIntelligenceSummary:
                     self.target_1_5_pnl_usdt, 4
                 ),
             },
+            "entry_buckets": [
+                {
+                    "entry_change_range": bucket.label,
+                    "trades": bucket.trades,
+                    "profitable_rate_percent": round(
+                        bucket.profitable / bucket.trades * 100, 2
+                    ) if bucket.trades else 0.0,
+                    "pnl_usdt": round(bucket.pnl_usdt, 4),
+                    "first_target_hits": bucket.first_target_hits,
+                    "second_target_hits": bucket.second_target_hits,
+                }
+                for bucket in self.entry_buckets
+            ],
         }
 
     def telegram_text(self) -> str:
@@ -132,6 +170,16 @@ class TradingIntelligenceSummary:
             "всё на +1,5%": self.target_1_5_pnl_usdt,
         }
         winner = max(variants, key=variants.get)
+        bucket_lines = []
+        for bucket in self.entry_buckets:
+            win_rate = (
+                bucket.profitable / bucket.trades * 100 if bucket.trades else 0.0
+            )
+            bucket_lines.append(
+                f"• {bucket.label}: {bucket.trades} сделок, в плюсе "
+                f"{win_rate:.1f}%, PnL {bucket.pnl_usdt:+.3f}; "
+                f"цели 0,7/1%: {bucket.first_target_hits}/{bucket.second_target_hits}."
+            )
         return (
             "🧠 Расширенный разбор сделок\n"
             f"Закрыто: {self.closed_positions}, прибыльных: "
@@ -147,8 +195,42 @@ class TradingIntelligenceSummary:
             f"• всё на +0,7%: {self.target_0_7_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +1%: {self.target_1_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +1,5%: {self.target_1_5_pnl_usdt:+.3f} USDT.\n"
-            f"Лучший вариант за период: {winner}."
+            f"Лучший вариант за период: {winner}.\n"
+            "\nВходы по росту за 5 минут:\n"
+            + "\n".join(bucket_lines)
         )
+
+    def trade_breakdown_texts(self, max_length: int = 3500) -> list[str]:
+        if not self.trade_breakdown:
+            return []
+        lines = ["📋 Сделки по точке входа"]
+        for trade in self.trade_breakdown:
+            entry = (
+                "нет данных"
+                if trade.entry_change_percent is None
+                else f"{trade.entry_change_percent:+.2f}%"
+            )
+            levels = (
+                f"0,7% {'✅' if trade.first_target_hit else '—'} / "
+                f"1% {'✅' if trade.second_target_hit else '—'}"
+            )
+            lines.append(
+                f"{trade.symbol}: вход {entry}, ИИ {trade.ai_score}, "
+                f"макс {trade.maximum_percent:+.2f}%, итог "
+                f"{trade.return_percent:+.2f}% ({trade.pnl_usdt:+.3f}), "
+                f"{levels}, {trade.close_reason}."
+            )
+        chunks: list[str] = []
+        current = lines[0]
+        for line in lines[1:]:
+            candidate = current + "\n" + line
+            if len(candidate) > max_length:
+                chunks.append(current)
+                current = lines[0] + " (продолжение)\n" + line
+            else:
+                current = candidate
+        chunks.append(current)
+        return chunks
 
 
 class PaperTrader:
@@ -622,9 +704,22 @@ class PaperTrader:
                 "SELECT report_started_at FROM paper_account WHERE id = 1"
             ).fetchone()[0]
         )
+        signal_events_table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'signal_events'"
+        ).fetchone()
+        entry_change_sql = (
+            "(SELECT change_percent FROM signal_events "
+            "WHERE signal_events.symbol = paper_positions.symbol "
+            "AND signal_events.timestamp = paper_positions.opened_at "
+            "ORDER BY signal_events.id DESC LIMIT 1) AS entry_change_percent "
+            if signal_events_table is not None
+            else "NULL AS entry_change_percent "
+        )
         positions = self.connection.execute(
-            "SELECT id, opened_at, closed_at, symbol, entry_price, position_usdt, "
-            "realized_pnl_usdt FROM paper_positions "
+            "SELECT id, opened_at, closed_at, symbol, entry_price, highest_price, "
+            "position_usdt, realized_pnl_usdt, ai_score, take_1_done, take_2_done, "
+            "close_reason, " + entry_change_sql + "FROM paper_positions "
             "WHERE status = 'CLOSED' AND closed_at >= ? AND closed_at < ? "
             "ORDER BY closed_at",
             (started_at, now),
@@ -641,6 +736,7 @@ class PaperTrader:
         target_0_7_pnl = 0.0
         target_1_pnl = 0.0
         target_1_5_pnl = 0.0
+        breakdown: list[TradeBreakdown] = []
         for row in positions:
             entry_price = float(row["entry_price"])
             position_usdt = float(row["position_usdt"])
@@ -662,7 +758,10 @@ class PaperTrader:
                 )
             observed_prices.append(close_price)
             changes = [(price / entry_price - 1) * 100 for price in observed_prices]
-            mfe = max(changes)
+            recorded_high_change = (
+                float(row["highest_price"]) / entry_price - 1
+            ) * 100
+            mfe = max(max(changes), recorded_high_change)
             mae = min(changes)
             actual_pnl = float(row["realized_pnl_usdt"])
             actual_return = actual_pnl / position_usdt * 100
@@ -670,6 +769,21 @@ class PaperTrader:
             mfe_values.append(mfe)
             mae_values.append(mae)
             giveback_values.append(max(0.0, mfe - actual_return))
+            breakdown.append(
+                TradeBreakdown(
+                    str(row["symbol"]),
+                    None if row["entry_change_percent"] is None else float(
+                        row["entry_change_percent"]
+                    ),
+                    int(row["ai_score"]),
+                    mfe,
+                    actual_pnl,
+                    actual_return,
+                    bool(row["take_1_done"]),
+                    bool(row["take_2_done"]),
+                    str(row["close_reason"] or "закрыта"),
+                )
+            )
             target_0_7_pnl += self._control_strategy_pnl(
                 entry_price, position_usdt, observed_prices, 0.7
             )
@@ -682,6 +796,39 @@ class PaperTrader:
         gains = sum(value for value in actual_values if value > 0)
         losses = abs(sum(value for value in actual_values if value < 0))
         profit_factor = gains / losses if losses > 0 else None
+        bucket_specs = (
+            ("1–1,49%", 1.0, 1.5),
+            ("1,5–1,99%", 1.5, 2.0),
+            ("2–2,99%", 2.0, 3.0),
+            ("от 3%", 3.0, float("inf")),
+            ("прочие/нет данных", float("-inf"), float("inf")),
+        )
+        buckets: list[EntryBucketSummary] = []
+        assigned: set[int] = set()
+        for label, lower, upper in bucket_specs:
+            selected: list[TradeBreakdown] = []
+            for index, trade in enumerate(breakdown):
+                if index in assigned:
+                    continue
+                change = trade.entry_change_percent
+                matches = (
+                    label == "прочие/нет данных"
+                    or (change is not None and lower <= change < upper)
+                )
+                if matches:
+                    assigned.add(index)
+                    selected.append(trade)
+            if selected:
+                buckets.append(
+                    EntryBucketSummary(
+                        label,
+                        len(selected),
+                        sum(trade.pnl_usdt > 0 for trade in selected),
+                        sum(trade.pnl_usdt for trade in selected),
+                        sum(trade.first_target_hit for trade in selected),
+                        sum(trade.second_target_hit for trade in selected),
+                    )
+                )
         return TradingIntelligenceSummary(
             len(positions),
             sum(actual_values),
@@ -693,6 +840,8 @@ class PaperTrader:
             target_0_7_pnl,
             target_1_pnl,
             target_1_5_pnl,
+            tuple(buckets),
+            tuple(breakdown),
         )
 
     def finish_report(self, prices: dict[str, float], now: float) -> None:
