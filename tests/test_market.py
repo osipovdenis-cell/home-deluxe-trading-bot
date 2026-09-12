@@ -21,10 +21,41 @@ except ModuleNotFoundError:
         HTTPError=DummyHTTPError,
     )
 
-from bot.market import MarketMonitor
+from bot.market import MarketMonitor, SignalMarketContext
 
 
 class MarketMonitorTests(unittest.TestCase):
+    def test_rejects_wide_spread_before_entry(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("BTTUSDT",), 300, 3, 1800
+        )
+        try:
+            monitor.tick_sizes["BTTUSDT"] = 0.00000001
+            context = SignalMarketContext(1_000_000, 2, 100, 60, 312.5)
+            safe, reason, _tick = monitor.execution_safety(
+                "BTTUSDT", 0.00000033, context
+            )
+            self.assertFalse(safe)
+            self.assertIn("спред", reason)
+        finally:
+            monitor.close()
+
+    def test_rejects_large_price_tick_before_entry(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("COARSEUSDT",), 300, 3, 1800
+        )
+        try:
+            monitor.tick_sizes["COARSEUSDT"] = 0.01
+            context = SignalMarketContext(1_000_000, 2, 100, 60, 5)
+            safe, reason, tick = monitor.execution_safety(
+                "COARSEUSDT", 1, context
+            )
+            self.assertFalse(safe)
+            self.assertAlmostEqual(tick, 1)
+            self.assertIn("шаг цены", reason)
+        finally:
+            monitor.close()
+
     def test_emits_pump_signal_after_full_window(self) -> None:
         monitor = MarketMonitor("https://api.binance.com", ("DOGEUSDT",), 300, 3, 1800)
         try:
