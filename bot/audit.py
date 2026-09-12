@@ -83,6 +83,16 @@ class HistoricalImpulse:
     first_target_hit: bool
     second_target_hit: bool
     stopped_before_first_target: bool
+    ai_score: int | None = None
+    ai_decision: str | None = None
+    ai_verdict: str | None = None
+    ai_reason: str | None = None
+    ai_risk: str | None = None
+    volume_ratio_5m: float | None = None
+    taker_buy_ratio_percent: float | None = None
+    order_book_imbalance_percent: float | None = None
+    change_60s_percent: float | None = None
+    pullback_from_high_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,16 @@ class SymbolBehavior:
                     "reached_0_7_percent": item.first_target_hit,
                     "reached_1_percent": item.second_target_hit,
                     "stopped_before_first_target": item.stopped_before_first_target,
+                    "ai_score_at_signal": item.ai_score,
+                    "ai_decision_at_signal": item.ai_decision,
+                    "ai_verdict_at_signal": item.ai_verdict,
+                    "ai_reason_at_signal": item.ai_reason,
+                    "ai_risk_at_signal": item.ai_risk,
+                    "volume_ratio_5m": item.volume_ratio_5m,
+                    "taker_buy_ratio_percent": item.taker_buy_ratio_percent,
+                    "order_book_imbalance_percent": item.order_book_imbalance_percent,
+                    "change_60s_percent": item.change_60s_percent,
+                    "pullback_from_high_percent": item.pullback_from_high_percent,
                 }
                 for item in self.impulses
             ],
@@ -221,6 +241,19 @@ class AuditLog:
                 bid_depth_usdt REAL,
                 ask_depth_usdt REAL,
                 order_book_imbalance_percent REAL
+                ,ai_decision TEXT
+                ,ai_reason TEXT
+                ,ai_risk TEXT
+                ,analysis_version INTEGER NOT NULL DEFAULT 1
+                ,change_15s_percent REAL
+                ,change_30s_percent REAL
+                ,change_60s_percent REAL
+                ,change_180s_percent REAL
+                ,change_300s_percent REAL
+                ,pullback_from_high_percent REAL
+                ,btc_change_60s_percent REAL
+                ,btc_change_300s_percent REAL
+                ,market_breadth_60s_percent REAL
             );
             CREATE INDEX IF NOT EXISTS signal_events_time
                 ON signal_events(timestamp);
@@ -248,6 +281,19 @@ class AuditLog:
             ("bid_depth_usdt", "REAL"),
             ("ask_depth_usdt", "REAL"),
             ("order_book_imbalance_percent", "REAL"),
+            ("ai_decision", "TEXT"),
+            ("ai_reason", "TEXT"),
+            ("ai_risk", "TEXT"),
+            ("analysis_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("change_15s_percent", "REAL"),
+            ("change_30s_percent", "REAL"),
+            ("change_60s_percent", "REAL"),
+            ("change_180s_percent", "REAL"),
+            ("change_300s_percent", "REAL"),
+            ("pullback_from_high_percent", "REAL"),
+            ("btc_change_60s_percent", "REAL"),
+            ("btc_change_300s_percent", "REAL"),
+            ("market_breadth_60s_percent", "REAL"),
         ):
             if column not in signal_columns:
                 self.connection.execute(
@@ -327,15 +373,27 @@ class AuditLog:
         bid_depth_usdt: float | None = None,
         ask_depth_usdt: float | None = None,
         order_book_imbalance_percent: float | None = None,
+        ai_decision: str | None = None,
+        ai_reason: str | None = None,
+        ai_risk: str | None = None,
+        analysis_version: int = 1,
+        entry_dynamics: dict | None = None,
     ) -> int:
+        dynamics = entry_dynamics or {}
         cursor = self.connection.execute(
             "INSERT INTO signal_events("
             "timestamp, symbol, entry_price, signal_kind, change_percent, "
             "change_24h_percent, quote_volume_usdt, ai_score, ai_verdict, "
             "quote_volume_5m_usdt, volume_ratio_5m, trades_5m, "
             "taker_buy_ratio_percent, spread_bps, bid_depth_usdt, ask_depth_usdt, "
-            "order_book_imbalance_percent) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "order_book_imbalance_percent, ai_decision, ai_reason, ai_risk, "
+            "analysis_version, "
+            "change_15s_percent, change_30s_percent, change_60s_percent, "
+            "change_180s_percent, change_300s_percent, "
+            "pullback_from_high_percent, btc_change_60s_percent, "
+            "btc_change_300s_percent, market_breadth_60s_percent) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 timestamp,
                 symbol,
@@ -354,6 +412,19 @@ class AuditLog:
                 bid_depth_usdt,
                 ask_depth_usdt,
                 order_book_imbalance_percent,
+                ai_decision,
+                ai_reason,
+                ai_risk,
+                analysis_version,
+                dynamics.get("change_15s_percent"),
+                dynamics.get("change_30s_percent"),
+                dynamics.get("change_60s_percent"),
+                dynamics.get("change_180s_percent"),
+                dynamics.get("change_300s_percent"),
+                dynamics.get("pullback_from_5m_high_percent"),
+                dynamics.get("btc_change_60s_percent"),
+                dynamics.get("btc_change_300s_percent"),
+                dynamics.get("market_breadth_60s_percent"),
             ),
         )
         self.connection.commit()
@@ -429,36 +500,34 @@ class AuditLog:
                 (symbol, now - lookback_seconds, now),
             ).fetchall()
         ]
-        rolling: deque[tuple[float, float]] = deque()
-        events: list[tuple[float, float, float]] = []
-        last_event: float | None = None
-        for timestamp, price in points:
-            rolling.append((timestamp, price))
-            cutoff = timestamp - window_seconds
-            while rolling and rolling[0][0] < cutoff:
-                rolling.popleft()
-            if (
-                len(rolling) < 2
-                or timestamp - rolling[0][0] < window_seconds * 0.8
-            ):
-                continue
-            minimum = min(value for _at, value in rolling)
-            setup_change = (price / minimum - 1) * 100
-            if setup_change < setup_threshold_percent:
-                continue
-            if last_event is not None and timestamp - last_event < event_cooldown_seconds:
-                continue
-            events.append((timestamp, price, setup_change))
-            last_event = timestamp
-        completed = [event for event in events if event[0] + horizon_seconds <= now]
+        rows = self.connection.execute(
+            "SELECT timestamp, entry_price, change_percent, ai_score, "
+            "ai_decision, ai_verdict, ai_reason, ai_risk, "
+            "volume_ratio_5m, taker_buy_ratio_percent, "
+            "order_book_imbalance_percent, change_60s_percent, "
+            "pullback_from_high_percent FROM signal_events "
+            "WHERE symbol = ? AND analysis_version >= 2 "
+            "AND ai_score IS NOT NULL AND ai_decision IS NOT NULL "
+            "AND timestamp >= ? AND timestamp <= ? "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (symbol, now - lookback_seconds, now - horizon_seconds, limit),
+        ).fetchall()
+        completed = list(reversed(rows))
         impulses: list[HistoricalImpulse] = []
-        for event_at, entry_price, setup_change in completed[-limit:]:
-            future = [
-                price for timestamp, price in points
+        for row in completed:
+            event_at = float(row[0])
+            entry_price = float(row[1])
+            setup_change = float(row[2])
+            future_points = [
+                (timestamp, price) for timestamp, price in points
                 if event_at <= timestamp <= event_at + horizon_seconds
             ]
-            if not future:
+            if (
+                not future_points
+                or future_points[-1][0] < event_at + horizon_seconds * 0.8
+            ):
                 continue
+            future = [price for _timestamp, price in future_points]
             changes = [(price / entry_price - 1) * 100 for price in future]
             first_hit = False
             second_hit = False
@@ -481,6 +550,16 @@ class AuditLog:
                     first_hit,
                     second_hit,
                     stopped_before_first,
+                    int(row[3]) if row[3] is not None else None,
+                    str(row[4]) if row[4] is not None else None,
+                    str(row[5]) if row[5] is not None else None,
+                    str(row[6]) if row[6] is not None else None,
+                    str(row[7]) if row[7] is not None else None,
+                    float(row[8]) if row[8] is not None else None,
+                    float(row[9]) if row[9] is not None else None,
+                    float(row[10]) if row[10] is not None else None,
+                    float(row[11]) if row[11] is not None else None,
+                    float(row[12]) if row[12] is not None else None,
                 )
             )
         return SymbolBehavior(symbol, tuple(impulses))
