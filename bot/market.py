@@ -56,6 +56,7 @@ class MarketMonitor:
         self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.last_alert: dict[str, float] = {}
         self.market_stats: dict[str, tuple[float, float]] = {}
+        self.tick_sizes: dict[str, float] = {}
         self.eligible_count = 0
         self.last_symbol_refresh = 0.0
         self.client = httpx.Client(base_url=base_url, timeout=15.0)
@@ -69,6 +70,7 @@ class MarketMonitor:
             "USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BRL",
         }
         symbols = set()
+        tick_sizes: dict[str, float] = {}
         for item in response.json().get("symbols", []):
             base_asset = str(item.get("baseAsset", ""))
             if (
@@ -78,9 +80,22 @@ class MarketMonitor:
                 and base_asset not in excluded_assets
                 and not base_asset.endswith(("UP", "DOWN", "BULL", "BEAR"))
             ):
-                symbols.add(str(item["symbol"]))
+                symbol = str(item["symbol"])
+                symbols.add(symbol)
+                price_filter = next(
+                    (
+                        value for value in item.get("filters", [])
+                        if value.get("filterType") == "PRICE_FILTER"
+                    ),
+                    None,
+                )
+                if price_filter is not None:
+                    tick_size = float(price_filter.get("tickSize", 0))
+                    if tick_size > 0:
+                        tick_sizes[symbol] = tick_size
         if symbols:
             self.symbols = symbols
+            self.tick_sizes = tick_sizes
         self.last_symbol_refresh = time.time() if now is None else now
 
     def fetch_prices(self) -> dict[str, float]:
@@ -206,6 +221,35 @@ class MarketMonitor:
             ask_depth,
             imbalance,
         )
+
+    def execution_safety(
+        self,
+        symbol: str,
+        price: float,
+        context: SignalMarketContext | None,
+        max_spread_percent: float = 0.1,
+        max_tick_percent: float = 0.1,
+    ) -> tuple[bool, str | None, float | None]:
+        if context is None or context.spread_bps is None:
+            return False, "нет надёжных данных о спреде", None
+        spread_percent = context.spread_bps / 100
+        if spread_percent > max_spread_percent:
+            return (
+                False,
+                f"спред {spread_percent:.3f}% выше лимита {max_spread_percent:g}%",
+                None,
+            )
+        tick_size = self.tick_sizes.get(symbol)
+        if tick_size is None or price <= 0:
+            return False, "неизвестен минимальный шаг цены", None
+        tick_percent = tick_size / price * 100
+        if tick_percent > max_tick_percent:
+            return (
+                False,
+                f"шаг цены {tick_percent:.3f}% выше лимита {max_tick_percent:g}%",
+                tick_percent,
+            )
+        return True, None, tick_percent
 
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
