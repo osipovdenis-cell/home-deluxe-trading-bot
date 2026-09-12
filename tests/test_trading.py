@@ -15,6 +15,16 @@ def make_trader(path: str) -> PaperTrader:
 
 
 class PaperTraderTests(unittest.TestCase):
+    def test_empty_intelligence_report_without_signal_table(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                intelligence = trader.build_intelligence(100)
+                self.assertEqual(intelligence.closed_positions, 0)
+                self.assertEqual(intelligence.trade_breakdown_texts(), [])
+            finally:
+                trader.close()
+
     def test_lists_open_symbols_for_realtime_subscription(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
@@ -148,6 +158,14 @@ class PaperTraderTests(unittest.TestCase):
                 trader.connection.execute(
                     "CREATE TABLE samples(timestamp REAL, symbol TEXT, price REAL)"
                 )
+                trader.connection.execute(
+                    "CREATE TABLE signal_events(id INTEGER PRIMARY KEY, timestamp REAL, "
+                    "symbol TEXT, change_percent REAL)"
+                )
+                trader.connection.execute(
+                    "INSERT INTO signal_events(timestamp, symbol, change_percent) "
+                    "VALUES(0, 'TESTUSDT', 3.2)"
+                )
                 trader.open_on_signal("TESTUSDT", 100, "ранний", 63, 0)
                 for timestamp, price in ((60, 101.5), (120, 103), (180, 105)):
                     trader.connection.execute(
@@ -166,6 +184,10 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertGreater(intelligence.target_1_5_pnl_usdt, 0)
                 self.assertIn("Параллельный пересчёт", intelligence.telegram_text())
                 self.assertIn("всё на +1,5%", intelligence.telegram_text())
+                self.assertIn("от 3%", intelligence.telegram_text())
+                details = "\n".join(intelligence.trade_breakdown_texts())
+                self.assertIn("TESTUSDT: вход +3.20%", details)
+                self.assertIn("0,7% ✅ / 1% ✅", details)
             finally:
                 trader.close()
 
