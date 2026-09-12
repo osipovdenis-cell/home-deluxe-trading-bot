@@ -98,6 +98,7 @@ class MarketMonitor:
         early_threshold_percent: float | None = None,
         max_signals_per_cycle: int = 5,
         entry_confirmation_seconds: int = 20,
+        rescue_window_seconds: int = 90,
     ) -> None:
         self.symbols = set(symbols)
         self.scan_all_usdt = scan_all_usdt
@@ -112,9 +113,11 @@ class MarketMonitor:
         self.cooldown_seconds = cooldown_seconds
         self.max_signals_per_cycle = max_signals_per_cycle
         self.entry_confirmation_seconds = entry_confirmation_seconds
+        self.rescue_window_seconds = rescue_window_seconds
         self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.last_alert: dict[str, float] = {}
         self.pending_candidates: dict[str, PendingCandidate] = {}
+        self.rescue_candidates: dict[str, PendingCandidate] = {}
         self.confirmation_rejections: deque[tuple[float, str, str]] = deque()
         self.confirmation_events: deque[ConfirmationEvent] = deque()
         self.market_stats: dict[str, tuple[float, float]] = {}
@@ -394,7 +397,19 @@ class MarketMonitor:
         return events
 
     def active_confirmation_symbols(self) -> set[str]:
-        return set(self.pending_candidates)
+        return set(self.pending_candidates) | set(self.rescue_candidates)
+
+    @staticmethod
+    def _recent_candidate_change(
+        candidate: PendingCandidate, now: float, seconds: int, price: float
+    ) -> float:
+        cutoff = now - seconds
+        base = candidate.samples[0][1]
+        for sampled_at, sampled_price in candidate.samples:
+            if sampled_at >= cutoff:
+                base = sampled_price
+                break
+        return (price / base - 1) * 100 if base > 0 else 0.0
 
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
@@ -409,6 +424,49 @@ class MarketMonitor:
                 continue
             minimum = min(value for _, value in points)
             change = (price / minimum - 1) * 100
+            rescue = self.rescue_candidates.get(symbol)
+            if rescue is not None:
+                prior_peak = rescue.peak_price
+                rescue.peak_price = max(rescue.peak_price, price)
+                rescue.samples.append((now, price))
+                progress = (price / rescue.trigger_price - 1) * 100
+                pullback = (price / rescue.peak_price - 1) * 100
+                change_5s = self._recent_candidate_change(rescue, now, 5, price)
+                change_10s = self._recent_candidate_change(rescue, now, 10, price)
+                if now - rescue.started_at >= self.rescue_window_seconds:
+                    del self.rescue_candidates[symbol]
+                    reason = "повторное ускорение за 90 секунд не появилось"
+                    self.confirmation_events.append(ConfirmationEvent(
+                        rescue.started_at, now, symbol, rescue.trigger_price,
+                        price, False, reason, progress, pullback,
+                        change_5s, change_10s,
+                    ))
+                    self.last_alert[symbol] = now
+                    continue
+                recovered = (
+                    change >= self.early_threshold_percent
+                    and price > prior_peak
+                    and change_5s >= 0.05
+                    and change_10s >= 0.10
+                    and pullback >= -0.03
+                )
+                if recovered:
+                    del self.rescue_candidates[symbol]
+                    self.confirmation_events.append(ConfirmationEvent(
+                        rescue.started_at, now, symbol, rescue.trigger_price,
+                        price, True, "повторное ускорение подтверждено",
+                        progress, pullback, change_5s, change_10s,
+                    ))
+                    quote_volume, change_24h = self.market_stats.get(
+                        symbol, (0.0, 0.0)
+                    )
+                    kind = "сильный" if change >= self.threshold_percent else "ранний"
+                    candidates.append(PumpSignal(
+                        symbol, price, change, self.window_seconds, kind,
+                        quote_volume, change_24h, progress, pullback,
+                        change_5s, change_10s,
+                    ))
+                continue
             if change < self.early_threshold_percent:
                 pending = self.pending_candidates.pop(symbol, None)
                 if pending is not None:
@@ -423,6 +481,9 @@ class MarketMonitor:
                             (price / pending.trigger_price - 1) * 100,
                             (price / pending.peak_price - 1) * 100,
                         )
+                    )
+                    self.rescue_candidates[symbol] = PendingCandidate(
+                        now, price, price, [(now, price)]
                     )
                 continue
             last_alert = self.last_alert.get(symbol)
@@ -440,16 +501,8 @@ class MarketMonitor:
                 continue
             progress = (price / pending.trigger_price - 1) * 100
             pullback = (price / pending.peak_price - 1) * 100
-            def recent_change(seconds: int) -> float:
-                cutoff = now - seconds
-                base = pending.samples[0][1]
-                for sampled_at, sampled_price in pending.samples:
-                    if sampled_at >= cutoff:
-                        base = sampled_price
-                        break
-                return (price / base - 1) * 100 if base > 0 else 0.0
-            change_5s = recent_change(5)
-            change_10s = recent_change(10)
+            change_5s = self._recent_candidate_change(pending, now, 5, price)
+            change_10s = self._recent_candidate_change(pending, now, 10, price)
             del self.pending_candidates[symbol]
             if progress < 0.05 or pullback < -0.12:
                 reason = (
@@ -464,7 +517,9 @@ class MarketMonitor:
                         progress, pullback, change_5s, change_10s,
                     )
                 )
-                self.last_alert[symbol] = now
+                self.rescue_candidates[symbol] = PendingCandidate(
+                    now, price, price, [(now, price)]
+                )
                 continue
             self.confirmation_events.append(
                 ConfirmationEvent(
