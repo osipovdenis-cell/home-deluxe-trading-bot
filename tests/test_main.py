@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from bot.main import exceptional_new_entry
+from bot.main import exceptional_new_entry, history_entry_policy
 
 
 class ExceptionalEntryTests(unittest.TestCase):
@@ -28,6 +28,15 @@ class ExceptionalEntryTests(unittest.TestCase):
         analysis, context, dynamics = self._objects()
         context.volume_ratio_5m = 1.99
         self.assertFalse(exceptional_new_entry(analysis, context, dynamics))
+
+    def test_cold_history_uses_base_score(self) -> None:
+        behavior = SimpleNamespace(impulses=(), favorable=False)
+        self.assertEqual(history_entry_policy(behavior, False, 70), (True, 70))
+
+    def test_bad_mature_history_requires_exceptional_85(self) -> None:
+        behavior = SimpleNamespace(impulses=(1, 2, 3), favorable=False)
+        self.assertEqual(history_entry_policy(behavior, False, 70), (False, 85))
+        self.assertEqual(history_entry_policy(behavior, True, 70), (True, 85))
 
 
 if __name__ == "__main__":
