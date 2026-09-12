@@ -6,6 +6,18 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_records_entry_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                log.record_entry_rejection(1, "BTTUSDT", "широкий спред", 300, 3)
+                row = log.connection.execute(
+                    "SELECT symbol, reason FROM paper_entry_rejections"
+                ).fetchone()
+                self.assertEqual(row, ("BTTUSDT", "широкий спред"))
+            finally:
+                log.close()
+
     def test_detects_and_groups_pumps(self) -> None:
         candles = [
             (0, 100, 100),
