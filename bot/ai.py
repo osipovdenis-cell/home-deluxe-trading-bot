@@ -66,6 +66,7 @@ class AIAnalyst:
         bid_depth_usdt: float | None = None,
         ask_depth_usdt: float | None = None,
         order_book_imbalance_percent: float | None = None,
+        historical_behavior: dict | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -77,7 +78,9 @@ class AIAnalyst:
                 "instructions": (
                     "Ты аналитический модуль криптовалютного тестового бота. "
                     "Оцени вероятность продолжения импульса в ближайшие 15 минут "
-                    "только по переданным данным. Не обещай прибыль, не выдумывай "
+                    "по текущим данным и фактическим предыдущим импульсам именно "
+                    "этой монеты. Учитывай, достигали ли они целей раньше стопа. "
+                    "Не обещай прибыль, не выдумывай "
                     "новости или социальные сигналы. Пиши по-русски и кратко."
                 ),
                 "input": json.dumps(
@@ -97,6 +100,7 @@ class AIAnalyst:
                         "top_20_bid_depth_usdt": bid_depth_usdt,
                         "top_20_ask_depth_usdt": ask_depth_usdt,
                         "order_book_imbalance_percent": order_book_imbalance_percent,
+                        "historical_behavior": historical_behavior,
                     },
                     ensure_ascii=False,
                 ),
