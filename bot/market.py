@@ -65,6 +65,17 @@ class PendingCandidate:
     peak_price: float
 
 
+@dataclass(frozen=True)
+class ConfirmationEvent:
+    started_at: float
+    resolved_at: float
+    symbol: str
+    trigger_price: float
+    resolution_price: float
+    accepted: bool
+    reason: str
+
+
 class MarketMonitor:
     def __init__(
         self,
@@ -96,6 +107,7 @@ class MarketMonitor:
         self.last_alert: dict[str, float] = {}
         self.pending_candidates: dict[str, PendingCandidate] = {}
         self.confirmation_rejections: deque[tuple[float, str, str]] = deque()
+        self.confirmation_events: deque[ConfirmationEvent] = deque()
         self.market_stats: dict[str, tuple[float, float]] = {}
         self.tick_sizes: dict[str, float] = {}
         self.eligible_count = 0
@@ -367,6 +379,14 @@ class MarketMonitor:
         self.confirmation_rejections.clear()
         return rejected
 
+    def drain_confirmation_events(self) -> list[ConfirmationEvent]:
+        events = list(self.confirmation_events)
+        self.confirmation_events.clear()
+        return events
+
+    def active_confirmation_symbols(self) -> set[str]:
+        return set(self.pending_candidates)
+
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
         candidates: list[PumpSignal] = []
@@ -383,8 +403,15 @@ class MarketMonitor:
             if change < self.early_threshold_percent:
                 pending = self.pending_candidates.pop(symbol, None)
                 if pending is not None:
+                    reason = "импульс исчез во время подтверждения"
                     self.confirmation_rejections.append(
-                        (now, symbol, "импульс исчез во время подтверждения")
+                        (now, symbol, reason)
+                    )
+                    self.confirmation_events.append(
+                        ConfirmationEvent(
+                            pending.started_at, now, symbol,
+                            pending.trigger_price, price, False, reason,
+                        )
                     )
                 continue
             last_alert = self.last_alert.get(symbol)
@@ -406,8 +433,20 @@ class MarketMonitor:
                     f"движение {progress:+.2f}%, откат {pullback:.2f}%"
                 )
                 self.confirmation_rejections.append((now, symbol, reason))
+                self.confirmation_events.append(
+                    ConfirmationEvent(
+                        pending.started_at, now, symbol,
+                        pending.trigger_price, price, False, reason,
+                    )
+                )
                 self.last_alert[symbol] = now
                 continue
+            self.confirmation_events.append(
+                ConfirmationEvent(
+                    pending.started_at, now, symbol,
+                    pending.trigger_price, price, True, "подтверждён",
+                )
+            )
             quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
             kind = "сильный" if change >= self.threshold_percent else "ранний"
             candidates.append(
