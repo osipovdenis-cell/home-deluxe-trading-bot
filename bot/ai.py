@@ -72,6 +72,7 @@ class AIAnalyst:
         order_book_imbalance_percent: float | None = None,
         historical_behavior: dict | None = None,
         entry_dynamics: dict | None = None,
+        learned_policy: dict | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -90,7 +91,8 @@ class AIAnalyst:
                     "только при согласованном подтверждении факторов и достаточной "
                     "вероятности достижения +0,7% раньше −0,5%. При противоречии, "
                     "нехватке данных, затухании или входе возле вершины выбирай "
-                    "WAIT либо SKIP. "
+                    "WAIT либо SKIP. Учитывай learned_policy как накопленную "
+                    "размеченную статистику, но не отменяй жёсткий запрет BLOCK. "
                     "Не обещай прибыль, не выдумывай "
                     "новости или социальные сигналы. Пиши по-русски и кратко."
                 ),
@@ -113,6 +115,7 @@ class AIAnalyst:
                         "order_book_imbalance_percent": order_book_imbalance_percent,
                         "historical_behavior": historical_behavior,
                         "entry_dynamics": entry_dynamics,
+                        "learned_policy": learned_policy,
                     },
                     ensure_ascii=False,
                 ),
