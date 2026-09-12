@@ -73,6 +73,7 @@ class AIAnalyst:
         historical_behavior: dict | None = None,
         entry_dynamics: dict | None = None,
         learned_policy: dict | None = None,
+        large_trade_flow: dict | None = None,
     ) -> AIAnalysis:
         response = self.client.post(
             "/v1/responses",
@@ -101,6 +102,12 @@ class AIAnalyst:
                     "Если second_chance_90s=true, оцени повторное ускорение "
                     "после первого отказа особенно строго; это может быть "
                     "теневая оценка и само решение BUY не означает сделку. "
+                    "Крупный поток оценивай только по исполненным сделкам: "
+                    "важны устойчивый перевес крупных taker-покупок за 15 и "
+                    "60 секунд и подтверждение ценой. Одиночную крупную сделку "
+                    "или стенку не считай сигналом; крупная ask-стенка, резкое "
+                    "исчезновение перевеса и экстремальный поток без роста "
+                    "могут означать истощение импульса. "
                     "При отсутствии истории допускай осторожный тестовый BUY от "
                     "70 только при согласованном текущем импульсе после всех "
                     "рыночных проверок. Если накопленная история монеты плохая, "
@@ -131,6 +138,7 @@ class AIAnalyst:
                         "historical_behavior": historical_behavior,
                         "entry_dynamics": entry_dynamics,
                         "learned_policy": learned_policy,
+                        "large_trade_flow": large_trade_flow,
                     },
                     ensure_ascii=False,
                 ),
