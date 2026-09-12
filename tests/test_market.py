@@ -268,6 +268,29 @@ class MarketMonitorTests(unittest.TestCase):
                 "нет продолжения" in rejected[0][2]
                 or "импульс исчез" in rejected[0][2]
             )
+            event = monitor.drain_confirmation_events()[0]
+            self.assertFalse(event.accepted)
+            self.assertEqual(event.symbol, "AAAUSDT")
+            self.assertAlmostEqual(event.trigger_price, 100.6)
+        finally:
+            monitor.close()
+
+    def test_confirmation_records_accepted_candidate(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=20,
+        )
+        try:
+            for timestamp in range(0, 301, 15):
+                monitor.update(
+                    {"AAAUSDT": 100 if timestamp < 300 else 100.6},
+                    now=timestamp,
+                )
+            signals = monitor.update({"AAAUSDT": 100.7}, now=321)
+            self.assertEqual(len(signals), 1)
+            event = monitor.drain_confirmation_events()[0]
+            self.assertTrue(event.accepted)
+            self.assertAlmostEqual(event.resolution_price, 100.7)
         finally:
             monitor.close()
 
