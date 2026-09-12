@@ -7,6 +7,36 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_rescue_report_links_shadow_ai_decision_to_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                event = SimpleNamespace(
+                    started_at=0, resolved_at=20, symbol="RESCUEUSDT",
+                    trigger_price=100, resolution_price=100.1,
+                    accepted=True, reason="повторное ускорение подтверждено",
+                    progress_percent=0.1, pullback_percent=0,
+                    change_5s_percent=0.06, change_10s_percent=0.11,
+                )
+                log.record_confirmation_event(event)
+                log.record_signal(
+                    20, "RESCUEUSDT", 100.1, "ранний", 0.6, 1,
+                    1_000_000, 78, "теневой BUY", ai_decision="BUY",
+                    analysis_version=2,
+                )
+                for timestamp in range(0, 901):
+                    log.record_confirmation_prices(
+                        {"RESCUEUSDT": 100.9 if timestamp >= 100 else 100.1},
+                        timestamp,
+                    )
+                log.refresh_confirmation_outcomes(901, 0.7, 0.5)
+                report = log.candidate_pattern_report_text(901)
+                self.assertIn("Повторно ускорились: 1", report)
+                self.assertIn("Дошли до AI: 1; AI BUY: 1", report)
+                self.assertIn("цель +0,7% — 1", report)
+            finally:
+                log.close()
+
     def test_confirmation_audit_counts_missed_winner_and_prevented_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
