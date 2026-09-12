@@ -6,6 +6,73 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    @staticmethod
+    def _record_full_signal(log, timestamp, symbol="LEARNUSDT"):
+        return log.record_signal(
+            timestamp, symbol, 100, "ранний", 1.1, 3, 1_000_000,
+            75, "подтверждён", 100_000, 1.8, 500, 58,
+            2, 50_000, 40_000, 11, ai_decision="BUY",
+            analysis_version=2,
+            entry_dynamics={
+                "change_60s_percent": 0.2,
+                "pullback_from_5m_high_percent": -0.05,
+            },
+        )
+
+    def test_matured_signal_becomes_learning_example(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                self._record_full_signal(log, 0)
+                for timestamp in range(0, 901, 60):
+                    price = 100.8 if timestamp == 300 else 100.1
+                    log.record_prices({"LEARNUSDT": price}, timestamp)
+                inserted = log.refresh_learning_examples(901, 0.7, 1.0, 0.5)
+                self.assertEqual(inserted, 1)
+                row = log.connection.execute(
+                    "SELECT success_before_stop, maximum_return_percent "
+                    "FROM learning_examples"
+                ).fetchone()
+                self.assertEqual(row[0], 1)
+                self.assertAlmostEqual(row[1], 0.8)
+            finally:
+                log.close()
+
+    def test_learning_profile_blocks_repeated_failed_impulses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                for index in range(4):
+                    signal_id = self._record_full_signal(log, index * 2000)
+                    log.connection.execute(
+                        "INSERT INTO learning_examples("
+                        "signal_id,matured_at,signal_timestamp,symbol,"
+                        "success_before_stop,reached_second_target,"
+                        "maximum_return_percent,minimum_return_percent,"
+                        "setup_change_percent,volume_ratio_5m,"
+                        "taker_buy_ratio_percent,order_book_imbalance_percent,"
+                        "change_60s_percent,pullback_from_high_percent,"
+                        "ai_score,ai_decision) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (signal_id, index * 2000 + 900, index * 2000,
+                         "LEARNUSDT", 0, 0, 0.2, -0.6, 1.1, 1.8,
+                         58, 11, 0.2, -0.05, 75, "BUY"),
+                    )
+                log.connection.commit()
+                profile = log.build_learning_profile(
+                    "LEARNUSDT", 9000,
+                    {"volume_ratio_5m": 1.8,
+                     "taker_buy_ratio_percent": 58,
+                     "order_book_imbalance_percent": 11,
+                     "change_60s_percent": 0.2,
+                     "pullback_from_high_percent": -0.05},
+                )
+                self.assertTrue(profile.blocked)
+                self.assertEqual(profile.consecutive_failures, 4)
+                self.assertEqual(profile.required_ai_score(70), 85)
+            finally:
+                log.close()
+
     def test_old_price_only_history_cannot_authorize_entry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
