@@ -17,6 +17,26 @@ def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
         telegram.send(chat_id, trader.notice_telegram_text(notice, prices, now))
 
 
+def exceptional_new_entry(analysis, context, dynamics) -> bool:
+    """Allow a rare, strongly confirmed setup while symbol history is cold."""
+    return bool(
+        analysis is not None
+        and analysis.decision == "BUY"
+        and analysis.score >= 85
+        and context is not None
+        and context.volume_ratio_5m >= 2
+        and context.taker_buy_ratio_percent >= 60
+        and context.order_book_imbalance_percent is not None
+        and context.order_book_imbalance_percent >= 15
+        and dynamics.change_15s_percent >= 0.05
+        and dynamics.change_60s_percent >= 0.3
+        and dynamics.pullback_from_5m_high_percent >= -0.05
+        and dynamics.btc_change_300s_percent is not None
+        and dynamics.btc_change_300s_percent >= -0.1
+        and dynamics.market_breadth_60s_percent >= 45
+    )
+
+
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings,
@@ -126,9 +146,12 @@ def process_signal(
             tick_percent,
         )
         return False
-    if len(behavior.impulses) < 3 or not behavior.favorable:
+    history_ready = len(behavior.impulses) >= 3 and behavior.favorable
+    exceptional = exceptional_new_entry(analysis, context, dynamics)
+    if not history_ready and not exceptional:
         reason = (
-            f"полная AI-история накапливается: {len(behavior.impulses)}/3"
+            f"полная AI-история накапливается: {len(behavior.impulses)}/3; "
+            "исключительно сильный вход 85/100 не подтверждён"
             if len(behavior.impulses) < 3
             else (
                 f"история неблагоприятна: цель +0,7% достигалась "
@@ -169,7 +192,10 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
-    required_ai_score = learned.required_ai_score(settings.paper_min_ai_score)
+    required_ai_score = max(
+        learned.required_ai_score(settings.paper_min_ai_score),
+        85 if exceptional and not history_ready else 0,
+    )
     if analysis.decision != "BUY" or analysis.score < required_ai_score:
         reason = (
             f"AI решил {analysis.decision}, оценка {analysis.score}/100; "
@@ -277,6 +303,7 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
     )
     performance = audit.build_signal_performance(now)
     learning = audit.build_learning_report(now)
+    confirmation = audit.build_confirmation_audit(now)
     ai_text = ""
     if ai is not None and performance.signal_count:
         try:
@@ -288,7 +315,8 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
     telegram.send(
         chat_id,
         summary.telegram_text() + "\n\n" + performance.telegram_text()
-        + "\n\n" + learning.telegram_text() + ai_text,
+        + "\n\n" + learning.telegram_text()
+        + "\n\n" + confirmation.telegram_text() + ai_text,
     )
     audit.finish_period(now)
 
@@ -303,7 +331,10 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
         elif command == "/ai":
             text = audit.recent_ai_decisions_text()
         elif command == "/learning":
-            text = audit.build_learning_report(now).telegram_text()
+            text = (
+                audit.build_learning_report(now).telegram_text()
+                + "\n\n" + audit.build_confirmation_audit(now).telegram_text()
+            )
         elif command in {"/help", "/start"}:
             text = (
                 "👁 Команды наблюдателя\n"
@@ -387,6 +418,9 @@ def main() -> None:
             "объём, покупки, стакан, рынок и полная история монеты.\n"
             "Обучение: включено; результат каждого импульса через 15 минут "
             "влияет на следующие входы.\n"
+            "Холодный старт: исключительно сильный BUY от 85/100 может войти "
+            "без истории 3/3.\n"
+            "Ожидание 20 секунд: ведётся теневой контроль пропущенной прибыли.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
@@ -438,6 +472,20 @@ def main() -> None:
                             f"Вход {rejected_symbol} отклонён: {reason}",
                             flush=True,
                         )
+                    for confirmation_event in market.drain_confirmation_events():
+                        audit.record_confirmation_event(confirmation_event)
+                    confirmation_symbols = (
+                        market.active_confirmation_symbols()
+                        | audit.active_confirmation_symbols(now)
+                    )
+                    audit.record_confirmation_prices(
+                        {
+                            symbol: prices[symbol]
+                            for symbol in confirmation_symbols
+                            if symbol in prices
+                        },
+                        now,
+                    )
                     for signal in signals:
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
@@ -453,6 +501,11 @@ def main() -> None:
                         now,
                         settings.paper_take_profit_1_percent,
                         settings.paper_take_profit_2_percent,
+                        settings.paper_stop_loss_percent,
+                    )
+                    audit.refresh_confirmation_outcomes(
+                        now,
+                        settings.paper_take_profit_1_percent,
                         settings.paper_stop_loss_percent,
                     )
                     if trader:
@@ -483,7 +536,9 @@ def main() -> None:
                         telegram.send(
                             chat_id,
                             observer_text + "\n\n"
-                            + audit.build_learning_report(now).telegram_text(),
+                            + audit.build_learning_report(now).telegram_text()
+                            + "\n\n"
+                            + audit.build_confirmation_audit(now).telegram_text(),
                         )
                     last_observer = now
                 time.sleep(0.1)
