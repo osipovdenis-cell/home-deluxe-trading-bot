@@ -38,7 +38,7 @@ class AuditTests(unittest.TestCase):
             finally:
                 log.close()
 
-    def test_learning_profile_blocks_repeated_failed_impulses(self) -> None:
+    def test_learning_profile_demands_high_score_after_repeated_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
             try:
@@ -67,9 +67,30 @@ class AuditTests(unittest.TestCase):
                      "change_60s_percent": 0.2,
                      "pullback_from_high_percent": -0.05},
                 )
-                self.assertTrue(profile.blocked)
+                self.assertFalse(profile.blocked)
+                self.assertEqual(profile.status, "HIGH_CAUTION")
                 self.assertEqual(profile.consecutive_failures, 4)
                 self.assertEqual(profile.required_ai_score(70), 85)
+            finally:
+                log.close()
+
+    def test_learning_profile_uses_actual_consecutive_trade_losses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                log.connection.execute(
+                    "CREATE TABLE paper_positions(symbol TEXT, status TEXT, "
+                    "closed_at REAL, realized_pnl_usdt REAL)"
+                )
+                log.connection.executemany(
+                    "INSERT INTO paper_positions VALUES(?, 'CLOSED', ?, ?)",
+                    (("LEARNUSDT", 100, -0.3), ("LEARNUSDT", 200, -0.4)),
+                )
+                log.connection.commit()
+                profile = log.build_learning_profile("LEARNUSDT", 300, {})
+                self.assertEqual(profile.consecutive_trade_losses, 2)
+                self.assertEqual(profile.status, "HIGH_CAUTION")
+                self.assertEqual(profile.required_ai_score(70), 80)
             finally:
                 log.close()
 
