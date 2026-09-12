@@ -291,6 +291,8 @@ class MarketMonitorTests(unittest.TestCase):
             event = monitor.drain_confirmation_events()[0]
             self.assertTrue(event.accepted)
             self.assertAlmostEqual(event.resolution_price, 100.7)
+            self.assertGreater(event.progress_percent, 0)
+            self.assertIsNotNone(signals[0].confirmation_change_5s_percent)
         finally:
             monitor.close()
 
