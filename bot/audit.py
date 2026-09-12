@@ -164,6 +164,7 @@ class LearningProfile:
     similar_examples: int
     similar_successes: int
     consecutive_failures: int
+    consecutive_trade_losses: int
     status: str
     score_adjustment: int
     explanation: str
@@ -182,7 +183,7 @@ class LearningProfile:
 
     @property
     def blocked(self) -> bool:
-        return self.status == "BLOCK"
+        return False
 
     def required_ai_score(self, base_score: int) -> int:
         return max(65, min(90, base_score + self.score_adjustment))
@@ -198,6 +199,7 @@ class LearningProfile:
             "similar_market_successes": self.similar_successes,
             "similar_market_success_rate_percent": self.similar_success_rate_percent,
             "consecutive_failures": self.consecutive_failures,
+            "consecutive_trade_losses": self.consecutive_trade_losses,
             "ai_score_adjustment": self.score_adjustment,
             "explanation": self.explanation,
         }
@@ -698,6 +700,22 @@ class AuditLog:
             if int(row[1]):
                 break
             consecutive_failures += 1
+        trade_losses = 0
+        has_positions = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'paper_positions'"
+        ).fetchone()
+        if has_positions is not None:
+            trade_rows = self.connection.execute(
+                "SELECT realized_pnl_usdt FROM paper_positions "
+                "WHERE symbol = ? AND status = 'CLOSED' "
+                "ORDER BY closed_at DESC LIMIT 3",
+                (symbol,),
+            ).fetchall()
+            for trade_row in trade_rows:
+                if float(trade_row[0]) >= 0:
+                    break
+                trade_losses += 1
         symbol_rate = (
             symbol_successes / len(symbol_rows) if symbol_rows else None
         )
@@ -707,37 +725,45 @@ class AuditLog:
         status = "LEARNING"
         adjustment = 0
         explanation = "Недостаточно размеченных примеров; действует базовый фильтр."
+        if trade_losses:
+            status = "CAUTION" if trade_losses == 1 else "HIGH_CAUTION"
+            adjustment = (5, 10, 15)[min(trade_losses, 3) - 1]
+            explanation = (
+                f"Последние убыточные сделки подряд: {trade_losses}; "
+                "требуется усиленное подтверждение нового импульса."
+            )
         if len(symbol_rows) >= 4 and (
             symbol_rate is not None and symbol_rate < 0.35
             or consecutive_failures >= 3
         ):
-            status = "BLOCK"
-            adjustment = 15
+            status = "HIGH_CAUTION"
+            adjustment = max(adjustment, 15)
             explanation = (
                 "Монета повторяет неудачные импульсы: цель +0,7% редко "
-                "достигается раньше стопа."
+                "достигается раньше стопа; разрешён только исключительно "
+                "сильный новый сценарий."
             )
         elif len(similar_rows) >= 12 and similar_rate is not None and similar_rate < 0.35:
-            status = "BLOCK"
-            adjustment = 12
+            status = "HIGH_CAUTION"
+            adjustment = max(adjustment, 12)
             explanation = (
                 "Похожие рыночные ситуации чаще заканчиваются стопом, чем целью."
             )
-        elif len(symbol_rows) >= 4 and symbol_rate is not None and symbol_rate >= 0.65:
+        elif not trade_losses and len(symbol_rows) >= 4 and symbol_rate is not None and symbol_rate >= 0.65:
             status = "FAVORABLE"
             adjustment = -3
             explanation = "Монета стабильно достигала первой цели в похожих импульсах."
-        elif len(similar_rows) >= 12 and similar_rate is not None and similar_rate >= 0.60:
+        elif not trade_losses and len(similar_rows) >= 12 and similar_rate is not None and similar_rate >= 0.60:
             status = "FAVORABLE"
             adjustment = -2
             explanation = "Похожие рыночные ситуации имеют положительную историю."
-        elif len(symbol_rows) >= 3 or len(similar_rows) >= 8:
+        elif not trade_losses and (len(symbol_rows) >= 3 or len(similar_rows) >= 8):
             status = "CAUTION"
             adjustment = 5
             explanation = "История смешанная; для входа требуется более сильное решение AI."
         return LearningProfile(
             symbol, len(symbol_rows), symbol_successes, len(similar_rows),
-            similar_successes, consecutive_failures, status, adjustment,
+            similar_successes, consecutive_failures, trade_losses, status, adjustment,
             explanation,
         )
 
