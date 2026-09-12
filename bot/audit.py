@@ -22,7 +22,7 @@ class AuditSummary:
             "📊 Суточный отчёт мониторинга\n"
             f"Период: {hours:.1f} ч.\n"
             f"Скачков от {self.threshold_percent:g}%: {self.expected_pumps}.\n"
-            f"Сигналов доставлено: {self.delivered_alerts}.\n"
+            f"Сигналов обработано: {self.delivered_alerts}.\n"
             f"Предположительно пропущено: {self.missed_pumps}.\n"
             f"Ошибок отправки: {self.failed_alerts}.\n"
             f"Ошибок получения данных: {self.errors}.\n"
