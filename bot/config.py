@@ -19,6 +19,7 @@ class Settings:
     early_threshold_percent: float
     pump_threshold_percent: float
     max_signals_per_cycle: int
+    entry_confirmation_seconds: int
     estimated_round_trip_cost_percent: float
     paper_trading_enabled: bool
     paper_starting_balance_usdt: float
@@ -87,6 +88,9 @@ def load_settings() -> Settings:
         early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "0.5")),
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),
         max_signals_per_cycle=int(os.getenv("MAX_SIGNALS_PER_CYCLE", "5")),
+        entry_confirmation_seconds=int(
+            os.getenv("ENTRY_CONFIRMATION_SECONDS", "20")
+        ),
         estimated_round_trip_cost_percent=float(
             os.getenv("ESTIMATED_ROUND_TRIP_COST_PERCENT", "0.2")
         ),
@@ -96,7 +100,7 @@ def load_settings() -> Settings:
         ),
         paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
         paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "4")),
-        paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "55")),
+        paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "70")),
         paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "0.5")),
         paper_take_profit_1_percent=float(
             os.getenv("PAPER_TAKE_PROFIT_1_PERCENT", "0.7")
@@ -149,6 +153,7 @@ def load_settings() -> Settings:
         settings.poll_interval_seconds,
         settings.alert_cooldown_seconds,
         settings.max_signals_per_cycle,
+        settings.entry_confirmation_seconds,
         settings.paper_max_open_positions,
     ) <= 0 or min(
         settings.early_threshold_percent,
