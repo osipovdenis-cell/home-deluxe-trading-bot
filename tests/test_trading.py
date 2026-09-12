@@ -265,7 +265,7 @@ class PaperTraderTests(unittest.TestCase):
                 )
                 self.assertEqual(len(notices), 1)
                 self.assertEqual(
-                    notices[0].reason, "затухание импульса (выход в плюс)"
+                    notices[0].reason, "15 минут без роста (выход в плюс)"
                 )
                 self.assertGreater(notices[0].pnl_usdt, 0)
             finally:
@@ -292,6 +292,32 @@ class PaperTraderTests(unittest.TestCase):
                     {"TESTUSDT": 99.8}, 1800, {"TESTUSDT": (0.7, 45, -10)}
                 )
                 self.assertEqual(notices, [])
+            finally:
+                trader.close()
+
+    def test_exits_profitable_stagnation_after_fifteen_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL, symbol TEXT, price REAL)"
+                )
+                trader.open_on_signal("TESTUSDT", 100, "ранний", 60, 0)
+                trader.connection.executemany(
+                    "INSERT INTO samples(timestamp, symbol, price) VALUES(?, ?, ?)",
+                    (
+                        (300, "TESTUSDT", 100.6),
+                        (700, "TESTUSDT", 100.5),
+                        (900, "TESTUSDT", 100.4),
+                    ),
+                )
+                trader.connection.commit()
+                notices = trader.update_positions({"TESTUSDT": 100.4}, 900)
+                self.assertEqual(len(notices), 1)
+                self.assertEqual(
+                    notices[0].reason, "15 минут без роста (выход в плюс)"
+                )
+                self.assertGreater(notices[0].pnl_usdt, 0)
             finally:
                 trader.close()
 
