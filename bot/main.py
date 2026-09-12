@@ -17,7 +17,10 @@ def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
         telegram.send(chat_id, trader.notice_telegram_text(notice, prices, now))
 
 
-def process_signal(signal, prices, now, market, audit, trader, ai, telegram, chat_id):
+def process_signal(
+    signal, prices, now, market, audit, trader, ai, telegram, chat_id,
+    send_signal_alerts,
+):
     context = None
     try:
         context = market.fetch_signal_context(signal.symbol)
@@ -82,9 +85,7 @@ def process_signal(signal, prices, now, market, audit, trader, ai, telegram, cha
                               analysis.score if analysis else None, now)
         if trader else None
     )
-    try:
-        telegram.send(
-            chat_id,
+    signal_text = (
             f"{'🚀' if signal.kind == 'сильный' else '⚡️'} "
             f"{signal.kind.capitalize()} сигнал {signal.symbol}\n"
             f"Изменение: +{signal.change_percent:.2f}% за "
@@ -92,13 +93,22 @@ def process_signal(signal, prices, now, market, audit, trader, ai, telegram, cha
             f"Изменение за 24 ч: {signal.change_24h_percent:+.2f}%.\n"
             f"Оборот за 24 ч: {signal.quote_volume_usdt:,.0f} USDT.\n"
             f"Цена: {signal.price:.10g}\n{context_text}{ai_text}"
-            "Это информационный сигнал, не команда на покупку.",
-        )
+            "Это информационный сигнал, не команда на покупку."
+    )
+    if send_signal_alerts:
+        try:
+            telegram.send(chat_id, signal_text)
+            audit.record_alert(signal.symbol, True, now)
+        except httpx.HTTPError as error:
+            audit.record_alert(signal.symbol, False, now, str(error))
+    else:
+        # Сигнал обработан и сохранён, но пользователь выбрал тихий Telegram.
         audit.record_alert(signal.symbol, True, now)
-        if notice is not None:
+    if notice is not None:
+        try:
             telegram.send(chat_id, trader.notice_telegram_text(notice, prices, now))
-    except httpx.HTTPError as error:
-        audit.record_alert(signal.symbol, False, now, str(error))
+        except httpx.HTTPError as error:
+            audit.record_error(f"Telegram trade notice: {error}", now)
     return notice is not None
 
 
@@ -213,6 +223,8 @@ def main() -> None:
             f"Мониторинг: {monitoring}.\n"
             "Поток рынка: примерно раз в 1 секунду.\n"
             "Открытые позиции: лучшая цена продажи в реальном времени.\n"
+            f"Telegram-сигналы: "
+            f"{'включены' if settings.telegram_signal_alerts_enabled else 'скрыты; только сделки и отчёты'}.\n"
             f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% за "
             f"{settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
@@ -255,7 +267,7 @@ def main() -> None:
                     for signal in market.update(prices, now=now):
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
-                            telegram, chat_id,
+                            telegram, chat_id, settings.telegram_signal_alerts_enabled,
                         )
                         if opened:
                             position_stream.set_symbols(trader.open_symbols())
