@@ -293,6 +293,29 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
     audit.finish_period(now)
 
 
+def handle_observer_commands(commands, now, prices, audit, trader, telegram, chat_id):
+    for command in commands:
+        if command == "/status":
+            text = (
+                trader.summary(prices, now).telegram_text()
+                if trader is not None else "🧪 Тестовая торговля выключена."
+            )
+        elif command == "/ai":
+            text = audit.recent_ai_decisions_text()
+        elif command == "/learning":
+            text = audit.build_learning_report(now).telegram_text()
+        elif command in {"/help", "/start"}:
+            text = (
+                "👁 Команды наблюдателя\n"
+                "/status — банк и позиции\n"
+                "/ai — последние решения AI\n"
+                "/learning — накопленное обучение"
+            )
+        else:
+            continue
+        telegram.send(chat_id, text)
+
+
 def main() -> None:
     settings = load_settings()
     binance = BinanceTestnetClient(
@@ -325,6 +348,7 @@ def main() -> None:
     try:
         account = binance.account()
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
+        telegram.discard_pending_updates()
         prices = market.fetch_prices()
         market_stream = AllMarketMiniTickerStream(market.symbols, settings.min_quote_volume_usdt)
         market_stream.seed(prices, market.market_stats)
@@ -363,6 +387,8 @@ def main() -> None:
             "объём, покупки, стакан, рынок и полная история монеты.\n"
             "Обучение: включено; результат каждого импульса через 15 минут "
             "влияет на следующие входы.\n"
+            f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
+            "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций, вход от "
                f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
@@ -372,6 +398,8 @@ def main() -> None:
         )
         print(f"Потоки рынка запущены. TELEGRAM_CHAT_ID={chat_id}", flush=True)
         last_market = last_audit = last_fallback = last_report = 0.0
+        last_command_poll = time.time()
+        last_observer = time.time()
         while True:
             now = time.time()
             try:
@@ -441,6 +469,23 @@ def main() -> None:
                 if now - last_report >= 1:
                     send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id)
                     last_report = now
+                if now - last_command_poll >= 2:
+                    commands = telegram.poll_commands(chat_id)
+                    handle_observer_commands(
+                        commands, now, prices, audit, trader, telegram, chat_id
+                    )
+                    last_command_poll = now
+                if now - last_observer >= settings.observer_report_interval_seconds:
+                    observer_text = audit.observer_report_text(
+                        now, last_observer
+                    )
+                    if observer_text:
+                        telegram.send(
+                            chat_id,
+                            observer_text + "\n\n"
+                            + audit.build_learning_report(now).telegram_text(),
+                        )
+                    last_observer = now
                 time.sleep(0.1)
             except httpx.HTTPError as error:
                 audit.record_error(str(error))
