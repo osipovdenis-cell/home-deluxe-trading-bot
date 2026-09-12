@@ -97,15 +97,15 @@ def load_settings() -> Settings:
         paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
         paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "4")),
         paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "55")),
-        paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "1")),
+        paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "0.5")),
         paper_take_profit_1_percent=float(
-            os.getenv("PAPER_TAKE_PROFIT_1_PERCENT", "1.5")
+            os.getenv("PAPER_TAKE_PROFIT_1_PERCENT", "0.7")
         ),
         paper_take_profit_2_percent=float(
-            os.getenv("PAPER_TAKE_PROFIT_2_PERCENT", "3")
+            os.getenv("PAPER_TAKE_PROFIT_2_PERCENT", "1")
         ),
         paper_take_profit_3_percent=float(
-            os.getenv("PAPER_TAKE_PROFIT_3_PERCENT", "5")
+            os.getenv("PAPER_TAKE_PROFIT_3_PERCENT", "1.5")
         ),
         paper_trailing_drawdown_percent=float(
             os.getenv("PAPER_TRAILING_DRAWDOWN_PERCENT", "1")
