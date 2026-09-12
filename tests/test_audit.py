@@ -54,8 +54,9 @@ class AuditTests(unittest.TestCase):
                 self.assertEqual(len(behavior.impulses), 1)
                 self.assertTrue(behavior.impulses[0].first_target_hit)
                 pattern = log.candidate_pattern_report_text(901)
-                self.assertIn("Полных снимков: 2", pattern)
+                self.assertIn("Расширенных снимков: 2", pattern)
                 self.assertIn("taker-buy: успешно 65.00%", pattern)
+                self.assertIn("n=1", pattern)
             finally:
                 log.close()
     def test_observer_reports_ai_decisions_and_rejections(self) -> None:
