@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 
 import httpx
@@ -14,6 +14,10 @@ class PumpSignal:
     kind: str = "сильный"
     quote_volume_usdt: float = 0.0
     change_24h_percent: float = 0.0
+    confirmation_progress_percent: float | None = None
+    confirmation_pullback_percent: float | None = None
+    confirmation_change_5s_percent: float | None = None
+    confirmation_change_10s_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class PendingCandidate:
     started_at: float
     trigger_price: float
     peak_price: float
+    samples: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,10 @@ class ConfirmationEvent:
     resolution_price: float
     accepted: bool
     reason: str
+    progress_percent: float = 0.0
+    pullback_percent: float = 0.0
+    change_5s_percent: float = 0.0
+    change_10s_percent: float = 0.0
 
 
 class MarketMonitor:
@@ -411,6 +420,8 @@ class MarketMonitor:
                         ConfirmationEvent(
                             pending.started_at, now, symbol,
                             pending.trigger_price, price, False, reason,
+                            (price / pending.trigger_price - 1) * 100,
+                            (price / pending.peak_price - 1) * 100,
                         )
                     )
                 continue
@@ -419,13 +430,26 @@ class MarketMonitor:
                 continue
             pending = self.pending_candidates.get(symbol)
             if pending is None:
-                self.pending_candidates[symbol] = PendingCandidate(now, price, price)
+                self.pending_candidates[symbol] = PendingCandidate(
+                    now, price, price, [(now, price)]
+                )
                 continue
             pending.peak_price = max(pending.peak_price, price)
+            pending.samples.append((now, price))
             if now - pending.started_at < self.entry_confirmation_seconds:
                 continue
             progress = (price / pending.trigger_price - 1) * 100
             pullback = (price / pending.peak_price - 1) * 100
+            def recent_change(seconds: int) -> float:
+                cutoff = now - seconds
+                base = pending.samples[0][1]
+                for sampled_at, sampled_price in pending.samples:
+                    if sampled_at >= cutoff:
+                        base = sampled_price
+                        break
+                return (price / base - 1) * 100 if base > 0 else 0.0
+            change_5s = recent_change(5)
+            change_10s = recent_change(10)
             del self.pending_candidates[symbol]
             if progress < 0.05 or pullback < -0.12:
                 reason = (
@@ -437,6 +461,7 @@ class MarketMonitor:
                     ConfirmationEvent(
                         pending.started_at, now, symbol,
                         pending.trigger_price, price, False, reason,
+                        progress, pullback, change_5s, change_10s,
                     )
                 )
                 self.last_alert[symbol] = now
@@ -445,6 +470,7 @@ class MarketMonitor:
                 ConfirmationEvent(
                     pending.started_at, now, symbol,
                     pending.trigger_price, price, True, "подтверждён",
+                    progress, pullback, change_5s, change_10s,
                 )
             )
             quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
@@ -458,6 +484,10 @@ class MarketMonitor:
                     kind,
                     quote_volume,
                     change_24h,
+                    progress,
+                    pullback,
+                    change_5s,
+                    change_10s,
                 )
             )
         candidates.sort(key=lambda signal: signal.change_percent, reverse=True)
