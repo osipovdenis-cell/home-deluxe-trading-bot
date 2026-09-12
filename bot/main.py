@@ -27,6 +27,33 @@ def process_signal(
     except (httpx.HTTPError, ValueError) as error:
         audit.record_error(f"Signal context {signal.symbol}: {error}", now)
         print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
+    context_values = (
+        (context.quote_volume_5m_usdt, context.volume_ratio_5m,
+         context.trades_5m, context.taker_buy_ratio_percent,
+         context.spread_bps, context.bid_depth_usdt, context.ask_depth_usdt,
+         context.order_book_imbalance_percent)
+        if context else (None,) * 8
+    )
+    execution_safe, rejection_reason, tick_percent = market.execution_safety(
+        signal.symbol, signal.price, context
+    )
+    if not execution_safe:
+        audit.record_signal(
+            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
+            signal.change_24h_percent, signal.quote_volume_usdt,
+            None, "вход отклонён фильтром исполнения", *context_values,
+        )
+        audit.record_entry_rejection(
+            now,
+            signal.symbol,
+            rejection_reason or "небезопасное исполнение",
+            context.spread_bps if context else None,
+            tick_percent,
+        )
+        print(
+            f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
+        )
+        return False
     analysis = None
     if ai is not None:
         try:
@@ -46,13 +73,6 @@ def process_signal(
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI: {error}", now)
             print(f"Ошибка анализа OpenAI: {error}", flush=True)
-    context_values = (
-        (context.quote_volume_5m_usdt, context.volume_ratio_5m,
-         context.trades_5m, context.taker_buy_ratio_percent,
-         context.spread_bps, context.bid_depth_usdt, context.ask_depth_usdt,
-         context.order_book_imbalance_percent)
-        if context else (None,) * 8
-    )
     audit.record_signal(
         now, signal.symbol, signal.price, signal.kind, signal.change_percent,
         signal.change_24h_percent, signal.quote_volume_usdt,
