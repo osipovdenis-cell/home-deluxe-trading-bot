@@ -28,6 +28,43 @@ class SignalMarketContext:
     order_book_imbalance_percent: float | None = None
 
 
+@dataclass(frozen=True)
+class EntryDynamics:
+    change_15s_percent: float
+    change_30s_percent: float
+    change_60s_percent: float
+    change_180s_percent: float
+    change_300s_percent: float
+    pullback_from_5m_high_percent: float
+    btc_change_60s_percent: float | None
+    btc_change_300s_percent: float | None
+    market_breadth_60s_percent: float
+
+    def as_dict(self) -> dict:
+        return {
+            "change_15s_percent": round(self.change_15s_percent, 4),
+            "change_30s_percent": round(self.change_30s_percent, 4),
+            "change_60s_percent": round(self.change_60s_percent, 4),
+            "change_180s_percent": round(self.change_180s_percent, 4),
+            "change_300s_percent": round(self.change_300s_percent, 4),
+            "pullback_from_5m_high_percent": round(
+                self.pullback_from_5m_high_percent, 4
+            ),
+            "btc_change_60s_percent": self.btc_change_60s_percent,
+            "btc_change_300s_percent": self.btc_change_300s_percent,
+            "market_breadth_60s_percent": round(
+                self.market_breadth_60s_percent, 2
+            ),
+        }
+
+
+@dataclass
+class PendingCandidate:
+    started_at: float
+    trigger_price: float
+    peak_price: float
+
+
 class MarketMonitor:
     def __init__(
         self,
@@ -40,6 +77,7 @@ class MarketMonitor:
         min_quote_volume_usdt: float = 0.0,
         early_threshold_percent: float | None = None,
         max_signals_per_cycle: int = 5,
+        entry_confirmation_seconds: int = 20,
     ) -> None:
         self.symbols = set(symbols)
         self.scan_all_usdt = scan_all_usdt
@@ -53,8 +91,11 @@ class MarketMonitor:
         self.threshold_percent = threshold_percent
         self.cooldown_seconds = cooldown_seconds
         self.max_signals_per_cycle = max_signals_per_cycle
+        self.entry_confirmation_seconds = entry_confirmation_seconds
         self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.last_alert: dict[str, float] = {}
+        self.pending_candidates: dict[str, PendingCandidate] = {}
+        self.confirmation_rejections: deque[tuple[float, str, str]] = deque()
         self.market_stats: dict[str, tuple[float, float]] = {}
         self.tick_sizes: dict[str, float] = {}
         self.eligible_count = 0
@@ -251,6 +292,81 @@ class MarketMonitor:
             )
         return True, None, tick_percent
 
+    @staticmethod
+    def _period_change(
+        points: deque[tuple[float, float]], now: float, seconds: int
+    ) -> float:
+        if not points:
+            return 0.0
+        target = now - seconds
+        base = points[0][1]
+        for timestamp, price in points:
+            if timestamp >= target:
+                base = price
+                break
+        return (points[-1][1] / base - 1) * 100 if base > 0 else 0.0
+
+    def entry_dynamics(self, symbol: str, now: float) -> EntryDynamics:
+        points = self.history.get(symbol, deque())
+        changes = {
+            seconds: self._period_change(points, now, seconds)
+            for seconds in (15, 30, 60, 180, 300)
+        }
+        current = points[-1][1] if points else 0.0
+        high = max((price for _timestamp, price in points), default=current)
+        pullback = (current / high - 1) * 100 if high > 0 else 0.0
+        btc_points = self.history.get("BTCUSDT")
+        btc_60 = self._period_change(btc_points, now, 60) if btc_points else None
+        btc_300 = self._period_change(btc_points, now, 300) if btc_points else None
+        breadth_values = [
+            self._period_change(values, now, 60)
+            for values in self.history.values()
+            if len(values) >= 2
+        ]
+        breadth = (
+            sum(value > 0 for value in breadth_values) / len(breadth_values) * 100
+            if breadth_values else 0.0
+        )
+        return EntryDynamics(
+            changes[15], changes[30], changes[60], changes[180], changes[300],
+            pullback, btc_60, btc_300, breadth,
+        )
+
+    def entry_quality(
+        self, context: SignalMarketContext, dynamics: EntryDynamics
+    ) -> tuple[bool, str | None]:
+        if context.volume_ratio_5m < 1.2:
+            return False, f"объёмный импульс слабый: x{context.volume_ratio_5m:.2f}"
+        if context.taker_buy_ratio_percent < 52:
+            return False, (
+                f"покупатели не доминируют: {context.taker_buy_ratio_percent:.1f}%"
+            )
+        if context.order_book_imbalance_percent is None:
+            return False, "нет надёжного перевеса стакана"
+        if context.order_book_imbalance_percent < -20:
+            return False, (
+                f"стакан против входа: {context.order_book_imbalance_percent:+.1f}%"
+            )
+        if dynamics.change_30s_percent <= 0 or dynamics.change_60s_percent <= 0.05:
+            return False, "импульс уже не подтверждается на 30–60 секундах"
+        if dynamics.pullback_from_5m_high_percent < -0.15:
+            return False, (
+                "цена уже откатила от локального максимума на "
+                f"{abs(dynamics.pullback_from_5m_high_percent):.2f}%"
+            )
+        if (
+            dynamics.btc_change_300s_percent is not None
+            and dynamics.btc_change_300s_percent < -0.7
+            and dynamics.change_60s_percent < 0.3
+        ):
+            return False, "рынок падает, относительной силы монеты недостаточно"
+        return True, None
+
+    def drain_confirmation_rejections(self) -> list[tuple[float, str, str]]:
+        rejected = list(self.confirmation_rejections)
+        self.confirmation_rejections.clear()
+        return rejected
+
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
         candidates: list[PumpSignal] = []
@@ -265,9 +381,32 @@ class MarketMonitor:
             minimum = min(value for _, value in points)
             change = (price / minimum - 1) * 100
             if change < self.early_threshold_percent:
+                pending = self.pending_candidates.pop(symbol, None)
+                if pending is not None:
+                    self.confirmation_rejections.append(
+                        (now, symbol, "импульс исчез во время подтверждения")
+                    )
                 continue
             last_alert = self.last_alert.get(symbol)
             if last_alert is not None and now - last_alert < self.cooldown_seconds:
+                continue
+            pending = self.pending_candidates.get(symbol)
+            if pending is None:
+                self.pending_candidates[symbol] = PendingCandidate(now, price, price)
+                continue
+            pending.peak_price = max(pending.peak_price, price)
+            if now - pending.started_at < self.entry_confirmation_seconds:
+                continue
+            progress = (price / pending.trigger_price - 1) * 100
+            pullback = (price / pending.peak_price - 1) * 100
+            del self.pending_candidates[symbol]
+            if progress < 0.05 or pullback < -0.12:
+                reason = (
+                    f"нет продолжения за {self.entry_confirmation_seconds} сек: "
+                    f"движение {progress:+.2f}%, откат {pullback:.2f}%"
+                )
+                self.confirmation_rejections.append((now, symbol, reason))
+                self.last_alert[symbol] = now
                 continue
             quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
             kind = "сильный" if change >= self.threshold_percent else "ранний"
