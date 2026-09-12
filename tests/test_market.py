@@ -275,6 +275,27 @@ class MarketMonitorTests(unittest.TestCase):
         finally:
             monitor.close()
 
+    def test_rejected_candidate_gets_one_rescue_on_fresh_acceleration(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=20,
+            rescue_window_seconds=90,
+        )
+        try:
+            for timestamp in range(0, 301, 15):
+                price = 100 if timestamp < 300 else 100.6
+                monitor.update({"AAAUSDT": price}, now=timestamp)
+            self.assertEqual(monitor.update({"AAAUSDT": 100.5}, now=321), [])
+            self.assertEqual(monitor.update({"AAAUSDT": 100.51}, now=326), [])
+            signals = monitor.update({"AAAUSDT": 100.62}, now=331)
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0].symbol, "AAAUSDT")
+            events = monitor.drain_confirmation_events()
+            self.assertTrue(any(event.accepted for event in events))
+            self.assertIn("повторное ускорение", events[-1].reason)
+        finally:
+            monitor.close()
+
     def test_confirmation_records_accepted_candidate(self) -> None:
         monitor = MarketMonitor(
             "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800,
