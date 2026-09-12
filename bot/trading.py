@@ -87,9 +87,9 @@ class TradingIntelligenceSummary:
     average_mfe_percent: float
     average_mae_percent: float
     average_giveback_percent: float
-    fast_exit_pnl_usdt: float
-    target_3_pnl_usdt: float
-    target_5_pnl_usdt: float
+    target_0_7_pnl_usdt: float
+    target_1_pnl_usdt: float
+    target_1_5_pnl_usdt: float
 
     def as_dict(self) -> dict:
         return {
@@ -109,14 +109,14 @@ class TradingIntelligenceSummary:
                 self.average_giveback_percent, 3
             ),
             "control_strategies": {
+                "full_exit_at_0_7_percent_pnl_usdt": round(
+                    self.target_0_7_pnl_usdt, 4
+                ),
+                "full_exit_at_1_percent_pnl_usdt": round(
+                    self.target_1_pnl_usdt, 4
+                ),
                 "full_exit_at_1_5_percent_pnl_usdt": round(
-                    self.fast_exit_pnl_usdt, 4
-                ),
-                "full_exit_at_3_percent_pnl_usdt": round(
-                    self.target_3_pnl_usdt, 4
-                ),
-                "full_exit_at_5_percent_pnl_usdt": round(
-                    self.target_5_pnl_usdt, 4
+                    self.target_1_5_pnl_usdt, 4
                 ),
             },
         }
@@ -126,10 +126,10 @@ class TradingIntelligenceSummary:
             return "🧠 Разбор сделок: закрытые позиции пока не накоплены."
         factor = "нет убытков" if self.profit_factor is None else f"{self.profit_factor:.2f}"
         variants = {
-            "наша 40/40/20": self.actual_pnl_usdt,
-            "всё на +1,5%": self.fast_exit_pnl_usdt,
-            "всё на +3%": self.target_3_pnl_usdt,
-            "всё на +5%": self.target_5_pnl_usdt,
+            "наша 50/50": self.actual_pnl_usdt,
+            "всё на +0,7%": self.target_0_7_pnl_usdt,
+            "всё на +1%": self.target_1_pnl_usdt,
+            "всё на +1,5%": self.target_1_5_pnl_usdt,
         }
         winner = max(variants, key=variants.get)
         return (
@@ -143,10 +143,10 @@ class TradingIntelligenceSummary:
             f"Средняя отданная часть движения: "
             f"{self.average_giveback_percent:.2f} п.п.\n"
             "Параллельный пересчёт на тех же сигналах:\n"
-            f"• наша 40/40/20: {self.actual_pnl_usdt:+.3f} USDT;\n"
-            f"• всё на +1,5%: {self.fast_exit_pnl_usdt:+.3f} USDT;\n"
-            f"• всё на +3%: {self.target_3_pnl_usdt:+.3f} USDT;\n"
-            f"• всё на +5%: {self.target_5_pnl_usdt:+.3f} USDT.\n"
+            f"• наша 50/50: {self.actual_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +0,7%: {self.target_0_7_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +1%: {self.target_1_pnl_usdt:+.3f} USDT;\n"
+            f"• всё на +1,5%: {self.target_1_5_pnl_usdt:+.3f} USDT.\n"
             f"Лучший вариант за период: {winner}."
         )
 
@@ -488,10 +488,10 @@ class PaperTrader:
                 notices.append(
                     self._sell(
                         row,
-                        float(row["initial_quantity"]) * 0.4,
+                        float(row["initial_quantity"]) * 0.5,
                         price,
                         now,
-                        "фиксация +1,5%",
+                        "фиксация +0,7%",
                         "take_1_done",
                     )
                 )
@@ -505,10 +505,10 @@ class PaperTrader:
                 notices.append(
                     self._sell(
                         row,
-                        float(row["initial_quantity"]) * 0.4,
+                        float(row["remaining_quantity"]),
                         price,
                         now,
-                        "фиксация +3%",
+                        "фиксация +1%",
                         "take_2_done",
                     )
                 )
@@ -516,34 +516,6 @@ class PaperTrader:
                     "SELECT * FROM paper_positions WHERE id = ?", (row["id"],)
                 ).fetchone()
             if row["status"] != "OPEN":
-                continue
-            if (
-                int(row["take_2_done"])
-                and change + 1e-9 >= self.take_profit_3_percent
-            ):
-                notices.append(
-                    self._sell(
-                        row,
-                        float(row["remaining_quantity"]),
-                        price,
-                        now,
-                        "фиксация +5%",
-                    )
-                )
-                continue
-            if (
-                int(row["take_2_done"])
-                and change + 1e-9 < self.take_profit_2_percent
-            ):
-                notices.append(
-                    self._sell(
-                        row,
-                        float(row["remaining_quantity"]),
-                        price,
-                        now,
-                        "защита прибыли +3%",
-                    )
-                )
                 continue
             if (
                 int(row["take_1_done"])
@@ -555,7 +527,7 @@ class PaperTrader:
                         float(row["remaining_quantity"]),
                         price,
                         now,
-                        "защита прибыли +1,5%",
+                        "защита прибыли +0,7%",
                     )
                 )
                 continue
@@ -666,9 +638,9 @@ class PaperTrader:
         mfe_values: list[float] = []
         mae_values: list[float] = []
         giveback_values: list[float] = []
-        fast_pnl = 0.0
-        target_3_pnl = 0.0
-        target_5_pnl = 0.0
+        target_0_7_pnl = 0.0
+        target_1_pnl = 0.0
+        target_1_5_pnl = 0.0
         for row in positions:
             entry_price = float(row["entry_price"])
             position_usdt = float(row["position_usdt"])
@@ -698,14 +670,14 @@ class PaperTrader:
             mfe_values.append(mfe)
             mae_values.append(mae)
             giveback_values.append(max(0.0, mfe - actual_return))
-            fast_pnl += self._control_strategy_pnl(
+            target_0_7_pnl += self._control_strategy_pnl(
+                entry_price, position_usdt, observed_prices, 0.7
+            )
+            target_1_pnl += self._control_strategy_pnl(
+                entry_price, position_usdt, observed_prices, 1.0
+            )
+            target_1_5_pnl += self._control_strategy_pnl(
                 entry_price, position_usdt, observed_prices, 1.5
-            )
-            target_3_pnl += self._control_strategy_pnl(
-                entry_price, position_usdt, observed_prices, 3.0
-            )
-            target_5_pnl += self._control_strategy_pnl(
-                entry_price, position_usdt, observed_prices, 5.0
             )
         gains = sum(value for value in actual_values if value > 0)
         losses = abs(sum(value for value in actual_values if value < 0))
@@ -718,9 +690,9 @@ class PaperTrader:
             sum(mfe_values) / len(mfe_values),
             sum(mae_values) / len(mae_values),
             sum(giveback_values) / len(giveback_values),
-            fast_pnl,
-            target_3_pnl,
-            target_5_pnl,
+            target_0_7_pnl,
+            target_1_pnl,
+            target_1_5_pnl,
         )
 
     def finish_report(self, prices: dict[str, float], now: float) -> None:
