@@ -28,6 +28,13 @@ class AuditTests(unittest.TestCase):
                 report = log.build_confirmation_audit(901)
                 self.assertEqual(report.missed_winners, 1)
                 self.assertEqual(report.prevented_stops, 1)
+                learning = log.build_learning_report(901)
+                self.assertEqual(learning.examples, 2)
+                behavior = log.build_symbol_behavior(
+                    "WINUSDT", 901, 0.5, 0.7, 1.0, 0.5
+                )
+                self.assertEqual(len(behavior.impulses), 1)
+                self.assertTrue(behavior.impulses[0].first_target_hit)
             finally:
                 log.close()
     def test_observer_reports_ai_decisions_and_rejections(self) -> None:
