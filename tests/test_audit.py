@@ -1,11 +1,35 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_confirmation_audit_counts_missed_winner_and_prevented_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                for symbol in ("WINUSDT", "STOPUSDT"):
+                    log.record_confirmation_event(SimpleNamespace(
+                        started_at=0, resolved_at=20, symbol=symbol,
+                        trigger_price=100, resolution_price=100,
+                        accepted=False, reason="нет продолжения",
+                    ))
+                for timestamp in range(0, 901):
+                    log.record_confirmation_prices({
+                        "WINUSDT": 100.8 if timestamp >= 100 else 100,
+                        "STOPUSDT": 99.4 if timestamp >= 100 else 100,
+                    }, timestamp)
+                self.assertEqual(
+                    log.refresh_confirmation_outcomes(901, 0.7, 0.5), 2
+                )
+                report = log.build_confirmation_audit(901)
+                self.assertEqual(report.missed_winners, 1)
+                self.assertEqual(report.prevented_stops, 1)
+            finally:
+                log.close()
     def test_observer_reports_ai_decisions_and_rejections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
