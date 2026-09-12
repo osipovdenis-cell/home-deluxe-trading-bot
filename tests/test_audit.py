@@ -6,6 +6,26 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_observer_reports_ai_decisions_and_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                log.record_signal(
+                    100, "WATCHUSDT", 1, "ранний", 1.1, 2, 1_000_000,
+                    31, "слабый", ai_decision="SKIP",
+                    ai_reason="Импульс затухает", analysis_version=2,
+                )
+                log.record_entry_rejection(
+                    101, "WATCHUSDT", "AI решил SKIP", 1, 0.01
+                )
+                decisions = log.recent_ai_decisions_text()
+                observer = log.observer_report_text(200, 0)
+                self.assertIn("WATCHUSDT: SKIP, 31/100", decisions)
+                self.assertIn("Решения AI: SKIP 1", observer)
+                self.assertIn("решение AI 1", observer)
+            finally:
+                log.close()
+
     @staticmethod
     def _record_full_signal(log, timestamp, symbol="LEARNUSDT"):
         return log.record_signal(
