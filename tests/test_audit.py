@@ -6,6 +6,28 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_symbol_behavior_requires_repeated_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                points = {}
+                for base in (0, 2400, 4800):
+                    points[base] = 100
+                    points[base + 300] = 100.6
+                    points[base + 360] = 101.7
+                    points[base + 1200] = 101.0
+                for timestamp in range(0, 7501, 60):
+                    price = points.get(timestamp, 100)
+                    log.record_prices({"TESTUSDT": price}, timestamp)
+                behavior = log.build_symbol_behavior(
+                    "TESTUSDT", 7500, 0.5, 0.7, 1, 0.5
+                )
+                self.assertGreaterEqual(len(behavior.impulses), 3)
+                self.assertTrue(behavior.favorable)
+                self.assertGreaterEqual(behavior.first_target_hits, 2)
+            finally:
+                log.close()
+
     def test_records_entry_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
