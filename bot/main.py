@@ -278,16 +278,7 @@ def main() -> None:
                     audit.record_prices(prices, now)
                     audit.record_due_outcomes(prices, now, settings.estimated_round_trip_cost_percent)
                     if trader:
-                        contexts = {}
-                        for symbol in trader.stagnation_candidates(now):
-                            try:
-                                context = market.fetch_signal_context(symbol)
-                                contexts[symbol] = (context.volume_ratio_5m,
-                                                    context.taker_buy_ratio_percent,
-                                                    context.order_book_imbalance_percent)
-                            except (httpx.HTTPError, ValueError) as error:
-                                audit.record_error(f"Position context {symbol}: {error}", now)
-                        notices = trader.update_positions(prices, now, contexts)
+                        notices = trader.update_positions(prices, now)
                         send_trade_notices(trader, telegram, chat_id, notices, prices, now)
                         if notices:
                             position_stream.set_symbols(trader.open_symbols())
