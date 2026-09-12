@@ -1,4 +1,6 @@
+from collections import deque
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import sqlite3
 import time
@@ -72,6 +74,68 @@ class SignalPerformance:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class HistoricalImpulse:
+    timestamp: float
+    setup_change_percent: float
+    maximum_after_entry_percent: float
+    minimum_after_entry_percent: float
+    first_target_hit: bool
+    second_target_hit: bool
+    stopped_before_first_target: bool
+
+
+@dataclass(frozen=True)
+class SymbolBehavior:
+    symbol: str
+    impulses: tuple[HistoricalImpulse, ...]
+
+    @property
+    def first_target_hits(self) -> int:
+        return sum(item.first_target_hit for item in self.impulses)
+
+    @property
+    def second_target_hits(self) -> int:
+        return sum(item.second_target_hit for item in self.impulses)
+
+    @property
+    def favorable(self) -> bool:
+        if len(self.impulses) < 3:
+            return False
+        required = math.ceil(len(self.impulses) * 2 / 3)
+        repeated_failure = (
+            len(self.impulses) >= 2
+            and all(
+                item.stopped_before_first_target for item in self.impulses[-2:]
+            )
+        )
+        return self.first_target_hits >= required and not repeated_failure
+
+    def as_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "completed_similar_impulses": len(self.impulses),
+            "first_target_hits": self.first_target_hits,
+            "second_target_hits": self.second_target_hits,
+            "favorable_for_entry": self.favorable,
+            "impulses": [
+                {
+                    "setup_change_percent": round(item.setup_change_percent, 3),
+                    "maximum_next_15m_percent": round(
+                        item.maximum_after_entry_percent, 3
+                    ),
+                    "minimum_next_15m_percent": round(
+                        item.minimum_after_entry_percent, 3
+                    ),
+                    "reached_0_7_percent": item.first_target_hit,
+                    "reached_1_percent": item.second_target_hit,
+                    "stopped_before_first_target": item.stopped_before_first_target,
+                }
+                for item in self.impulses
+            ],
+        }
+
+
 def detect_pumps(
     candles: list[tuple[float, float, float]],
     window_seconds: int,
@@ -114,6 +178,8 @@ class AuditLog:
                 price REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS samples_time ON samples(timestamp);
+            CREATE INDEX IF NOT EXISTS samples_symbol_time
+                ON samples(symbol, timestamp);
             CREATE TABLE IF NOT EXISTS alerts (
                 timestamp REAL NOT NULL,
                 symbol TEXT NOT NULL,
@@ -340,6 +406,84 @@ class AuditLog:
         if inserted:
             self.connection.commit()
         return inserted
+
+    def build_symbol_behavior(
+        self,
+        symbol: str,
+        now: float,
+        setup_threshold_percent: float,
+        first_target_percent: float,
+        second_target_percent: float,
+        stop_loss_percent: float,
+        lookback_seconds: int = 86400,
+        window_seconds: int = 300,
+        horizon_seconds: int = 900,
+        event_cooldown_seconds: int = 1800,
+        limit: int = 4,
+    ) -> SymbolBehavior:
+        points = [
+            (float(row[0]), float(row[1]))
+            for row in self.connection.execute(
+                "SELECT timestamp, price FROM samples WHERE symbol = ? "
+                "AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+                (symbol, now - lookback_seconds, now),
+            ).fetchall()
+        ]
+        rolling: deque[tuple[float, float]] = deque()
+        events: list[tuple[float, float, float]] = []
+        last_event: float | None = None
+        for timestamp, price in points:
+            rolling.append((timestamp, price))
+            cutoff = timestamp - window_seconds
+            while rolling and rolling[0][0] < cutoff:
+                rolling.popleft()
+            if (
+                len(rolling) < 2
+                or timestamp - rolling[0][0] < window_seconds * 0.8
+            ):
+                continue
+            minimum = min(value for _at, value in rolling)
+            setup_change = (price / minimum - 1) * 100
+            if setup_change < setup_threshold_percent:
+                continue
+            if last_event is not None and timestamp - last_event < event_cooldown_seconds:
+                continue
+            events.append((timestamp, price, setup_change))
+            last_event = timestamp
+        completed = [event for event in events if event[0] + horizon_seconds <= now]
+        impulses: list[HistoricalImpulse] = []
+        for event_at, entry_price, setup_change in completed[-limit:]:
+            future = [
+                price for timestamp, price in points
+                if event_at <= timestamp <= event_at + horizon_seconds
+            ]
+            if not future:
+                continue
+            changes = [(price / entry_price - 1) * 100 for price in future]
+            first_hit = False
+            second_hit = False
+            stopped_before_first = False
+            for change in changes:
+                if not first_hit and change <= -stop_loss_percent:
+                    stopped_before_first = True
+                    break
+                if change >= first_target_percent:
+                    first_hit = True
+                if first_hit and change >= second_target_percent:
+                    second_hit = True
+                    break
+            impulses.append(
+                HistoricalImpulse(
+                    event_at,
+                    setup_change,
+                    max(changes),
+                    min(changes),
+                    first_hit,
+                    second_hit,
+                    stopped_before_first,
+                )
+            )
+        return SymbolBehavior(symbol, tuple(impulses))
 
     def build_signal_performance(self, now: float) -> SignalPerformance:
         started = self.period_started_at()
