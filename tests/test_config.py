@@ -17,6 +17,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings.paper_starting_balance_usdt, 200)
             self.assertEqual(settings.paper_position_usdt, 50)
             self.assertEqual(settings.paper_max_open_positions, 4)
+            self.assertEqual(settings.paper_min_ai_score, 70)
+            self.assertEqual(settings.entry_confirmation_seconds, 20)
 
     def test_signal_notifications_are_silent_by_default(self) -> None:
         values = {
