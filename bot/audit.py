@@ -376,6 +376,15 @@ class AuditLog:
                 ,btc_change_60s_percent REAL
                 ,btc_change_300s_percent REAL
                 ,market_breadth_60s_percent REAL
+                ,large_trade_threshold_usdt REAL
+                ,large_buy_volume_15s_usdt REAL
+                ,large_sell_volume_15s_usdt REAL
+                ,large_buy_volume_60s_usdt REAL
+                ,large_sell_volume_60s_usdt REAL
+                ,large_trade_imbalance_60s_percent REAL
+                ,large_trade_count_60s REAL
+                ,bid_wall_share_percent REAL
+                ,ask_wall_share_percent REAL
             );
             CREATE INDEX IF NOT EXISTS signal_events_time
                 ON signal_events(timestamp);
@@ -495,6 +504,11 @@ class AuditLog:
             "change_15s_percent", "change_60s_percent",
             "pullback_from_high_percent", "btc_change_300s_percent",
             "market_breadth_60s_percent",
+            "large_trade_threshold_usdt", "large_buy_volume_15s_usdt",
+            "large_sell_volume_15s_usdt", "large_buy_volume_60s_usdt",
+            "large_sell_volume_60s_usdt", "large_trade_imbalance_60s_percent",
+            "large_trade_count_60s", "bid_wall_share_percent",
+            "ask_wall_share_percent",
         ):
             if column not in confirmation_columns:
                 self.connection.execute(
@@ -530,8 +544,13 @@ class AuditLog:
             "confirmation_change_10s_percent,volume_ratio_5m,"
             "taker_buy_ratio_percent,order_book_imbalance_percent,spread_bps,"
             "change_15s_percent,change_60s_percent,pullback_from_high_percent,"
-            "btc_change_300s_percent,market_breadth_60s_percent) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "btc_change_300s_percent,market_breadth_60s_percent,"
+            "large_trade_threshold_usdt,large_buy_volume_15s_usdt,"
+            "large_sell_volume_15s_usdt,large_buy_volume_60s_usdt,"
+            "large_sell_volume_60s_usdt,large_trade_imbalance_60s_percent,"
+            "large_trade_count_60s,bid_wall_share_percent,"
+            "ask_wall_share_percent) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 event.started_at, event.resolved_at, event.symbol,
                 event.trigger_price, event.resolution_price,
@@ -549,6 +568,15 @@ class AuditLog:
                 dynamic_values.get("pullback_from_5m_high_percent"),
                 dynamic_values.get("btc_change_300s_percent"),
                 dynamic_values.get("market_breadth_60s_percent"),
+                getattr(context, "large_trade_threshold_usdt", None),
+                getattr(context, "large_buy_volume_15s_usdt", None),
+                getattr(context, "large_sell_volume_15s_usdt", None),
+                getattr(context, "large_buy_volume_60s_usdt", None),
+                getattr(context, "large_sell_volume_60s_usdt", None),
+                getattr(context, "large_trade_imbalance_60s_percent", None),
+                getattr(context, "large_trade_count_60s", None),
+                getattr(context, "bid_wall_share_percent", None),
+                getattr(context, "ask_wall_share_percent", None),
             ),
         )
         self.connection.commit()
@@ -906,6 +934,10 @@ class AuditLog:
             (row[6], current.get("order_book_imbalance_percent"), 30.0),
             (row[7], current.get("change_60s_percent"), 0.35),
             (row[8], current.get("pullback_from_high_percent"), 0.25),
+            (row[11], current.get("large_trade_imbalance_60s_percent"), 35.0),
+            (row[12], current.get("large_trade_count_60s"), 6.0),
+            (row[13], current.get("bid_wall_share_percent"), 15.0),
+            (row[14], current.get("ask_wall_share_percent"), 15.0),
         )
         available = 0
         matches = 0
@@ -927,7 +959,8 @@ class AuditLog:
             "SELECT symbol, success_before_stop, signal_timestamp, "
             "setup_change_percent, volume_ratio_5m, taker_buy_ratio_percent, "
             "order_book_imbalance_percent, change_60s_percent, "
-            "pullback_from_high_percent, NULL, NULL FROM learning_examples "
+            "pullback_from_high_percent, NULL, NULL, NULL, NULL, NULL, NULL "
+            "FROM learning_examples "
             "WHERE signal_timestamp >= ? "
             "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
             "WHERE c.symbol=learning_examples.symbol "
@@ -941,7 +974,9 @@ class AuditLog:
             "confirmation_progress_percent, volume_ratio_5m, "
             "taker_buy_ratio_percent, order_book_imbalance_percent, "
             "change_60s_percent, pullback_from_high_percent, "
-            "confirmation_change_5s_percent, confirmation_change_10s_percent "
+            "confirmation_change_5s_percent, confirmation_change_10s_percent, "
+            "large_trade_imbalance_60s_percent, large_trade_count_60s, "
+            "bid_wall_share_percent, ask_wall_share_percent "
             "FROM confirmation_events "
             "WHERE evaluated_at IS NOT NULL AND started_at >= ? "
             "ORDER BY started_at DESC LIMIT 4000",
@@ -1082,6 +1117,10 @@ class AuditLog:
             "volume_ratio_5m, taker_buy_ratio_percent, "
             "order_book_imbalance_percent, spread_bps, change_60s_percent, "
             "pullback_from_high_percent, market_breadth_60s_percent "
+            ",large_trade_threshold_usdt,large_buy_volume_15s_usdt,"
+            "large_sell_volume_15s_usdt,large_buy_volume_60s_usdt,"
+            "large_sell_volume_60s_usdt,large_trade_imbalance_60s_percent,"
+            "large_trade_count_60s,bid_wall_share_percent,ask_wall_share_percent "
             "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
             "AND started_at>=? AND confirmation_progress_percent IS NOT NULL",
             (now - lookback_seconds,),
@@ -1103,6 +1142,15 @@ class AuditLog:
             ("ход за 60 с", 8, "%"),
             ("откат от максимума", 9, "%"),
             ("ширина рынка", 10, "%"),
+            ("порог крупной сделки", 11, " USDT"),
+            ("крупные покупки 15 с", 12, " USDT"),
+            ("крупные продажи 15 с", 13, " USDT"),
+            ("крупные покупки 60 с", 14, " USDT"),
+            ("крупные продажи 60 с", 15, " USDT"),
+            ("перевес крупного потока 60 с", 16, "%"),
+            ("крупных сделок 60 с", 17, ""),
+            ("доля крупнейшей bid-стенки", 18, "%"),
+            ("доля крупнейшей ask-стенки", 19, "%"),
         )
         lines = ["🔬 Победители против остальных"]
         if rows:
