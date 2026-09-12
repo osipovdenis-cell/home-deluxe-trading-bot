@@ -20,11 +20,19 @@ from bot.ai import AIAnalyst, AIError
 class AIAnalystTests(unittest.TestCase):
     def test_parses_analysis(self) -> None:
         result = AIAnalyst._parse_analysis(
-            '{"score":72,"verdict":"средний","reason":"Импульс есть",'
+            '{"score":72,"decision":"BUY","verdict":"средний","reason":"Импульс есть",'
             '"risk":"Возможен откат"}'
         )
         self.assertEqual(result.score, 72)
+        self.assertEqual(result.decision, "BUY")
         self.assertEqual(result.verdict, "средний")
+
+    def test_rejects_unknown_decision(self) -> None:
+        with self.assertRaises(AIError):
+            AIAnalyst._parse_analysis(
+                '{"score":72,"decision":"ENTER","verdict":"x",'
+                '"reason":"x","risk":"x"}'
+            )
 
     def test_rejects_out_of_range_score(self) -> None:
         with self.assertRaises(AIError):
