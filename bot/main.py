@@ -125,6 +125,18 @@ def process_signal(
         ),
         "change_60s_percent": dynamics.change_60s_percent,
         "pullback_from_high_percent": dynamics.pullback_from_5m_high_percent,
+        "large_trade_imbalance_60s_percent": (
+            context.large_trade_imbalance_60s_percent if context else None
+        ),
+        "large_trade_count_60s": (
+            context.large_trade_count_60s if context else None
+        ),
+        "bid_wall_share_percent": (
+            context.bid_wall_share_percent if context else None
+        ),
+        "ask_wall_share_percent": (
+            context.ask_wall_share_percent if context else None
+        ),
     }
     learned = audit.build_learning_profile(
         signal.symbol, now, learned_features
@@ -149,6 +161,19 @@ def process_signal(
                 behavior.as_dict(),
                 dynamics_payload,
                 learned.as_dict(),
+                {
+                    "adaptive_large_trade_usdt": context.large_trade_threshold_usdt,
+                    "large_buy_15s_usdt": context.large_buy_volume_15s_usdt,
+                    "large_sell_15s_usdt": context.large_sell_volume_15s_usdt,
+                    "large_buy_60s_usdt": context.large_buy_volume_60s_usdt,
+                    "large_sell_60s_usdt": context.large_sell_volume_60s_usdt,
+                    "large_flow_imbalance_60s_percent": (
+                        context.large_trade_imbalance_60s_percent
+                    ),
+                    "large_trades_60s": context.large_trade_count_60s,
+                    "largest_bid_wall_share_percent": context.bid_wall_share_percent,
+                    "largest_ask_wall_share_percent": context.ask_wall_share_percent,
+                } if context else None,
             )
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI: {error}", now)
@@ -459,6 +484,8 @@ def main() -> None:
             "Ожидание 20 секунд: ведётся теневой контроль пропущенной прибыли.\n"
             "Второй шанс: после отказа ещё 90 секунд наблюдения; повторный "
             "анализ только при новом ускорении.\n"
+            "Крупный поток: исполненные крупные покупки/продажи за 15/60 сек "
+            "и концентрация стенок стакана; пока теневой фактор.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
