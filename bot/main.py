@@ -45,14 +45,15 @@ def history_entry_policy(behavior, exceptional: bool, base_score: int) -> tuple[
 
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
-    settings,
+    settings, preloaded_context=None,
 ):
-    context = None
-    try:
-        context = market.fetch_signal_context(signal.symbol)
-    except (httpx.HTTPError, ValueError) as error:
-        audit.record_error(f"Signal context {signal.symbol}: {error}", now)
-        print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
+    context = preloaded_context
+    if context is None:
+        try:
+            context = market.fetch_signal_context(signal.symbol)
+        except (httpx.HTTPError, ValueError) as error:
+            audit.record_error(f"Signal context {signal.symbol}: {error}", now)
+            print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
     context_values = (
         (context.quote_volume_5m_usdt, context.volume_ratio_5m,
          context.trades_5m, context.taker_buy_ratio_percent,
@@ -104,6 +105,9 @@ def process_signal(
         settings.paper_stop_loss_percent,
     )
     learned_features = {
+        "confirmation_progress_percent": signal.confirmation_progress_percent,
+        "confirmation_change_5s_percent": signal.confirmation_change_5s_percent,
+        "confirmation_change_10s_percent": signal.confirmation_change_10s_percent,
         "volume_ratio_5m": context.volume_ratio_5m,
         "taker_buy_ratio_percent": context.taker_buy_ratio_percent,
         "order_book_imbalance_percent": context.order_book_imbalance_percent,
@@ -337,6 +341,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             text = (
                 audit.build_learning_report(now).telegram_text()
                 + "\n\n" + audit.build_confirmation_audit(now).telegram_text()
+                + "\n\n" + audit.candidate_pattern_report_text(now)
             )
         elif command in {"/help", "/start"}:
             text = (
@@ -466,6 +471,7 @@ def main() -> None:
                         if notices:
                             position_stream.set_symbols(trader.open_symbols())
                     signals = market.update(prices, now=now)
+                    confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
                     ):
@@ -477,7 +483,25 @@ def main() -> None:
                             flush=True,
                         )
                     for confirmation_event in market.drain_confirmation_events():
-                        audit.record_confirmation_event(confirmation_event)
+                        confirmation_context = None
+                        try:
+                            confirmation_context = market.fetch_signal_context(
+                                confirmation_event.symbol
+                            )
+                        except (httpx.HTTPError, ValueError) as error:
+                            audit.record_error(
+                                f"Confirmation context {confirmation_event.symbol}: {error}",
+                                now,
+                            )
+                        audit.record_confirmation_event(
+                            confirmation_event,
+                            confirmation_context,
+                            market.entry_dynamics(confirmation_event.symbol, now),
+                        )
+                        if confirmation_event.accepted:
+                            confirmation_contexts[confirmation_event.symbol] = (
+                                confirmation_context
+                            )
                     confirmation_symbols = (
                         market.active_confirmation_symbols()
                         | audit.active_confirmation_symbols(now)
@@ -494,6 +518,7 @@ def main() -> None:
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
                             telegram, chat_id, settings,
+                            confirmation_contexts.pop(signal.symbol, None),
                         )
                         if opened:
                             position_stream.set_symbols(trader.open_symbols())
