@@ -890,7 +890,11 @@ class AuditLog:
             "ORDER BY started_at DESC LIMIT 4000",
             (now - lookback_seconds,),
         ).fetchall()
-        rows = list(rows) + list(shadow_rows)
+        rows = sorted(
+            [*rows, *shadow_rows],
+            key=lambda row: float(row[2]),
+            reverse=True,
+        )
         symbol_rows = [row for row in rows if str(row[0]) == symbol]
         similar_rows = [
             row for row in rows
