@@ -426,6 +426,19 @@ class AuditLog:
                 delayed_stopped_first INTEGER,
                 delayed_max_return_percent REAL,
                 delayed_min_return_percent REAL
+                ,confirmation_progress_percent REAL
+                ,confirmation_pullback_percent REAL
+                ,confirmation_change_5s_percent REAL
+                ,confirmation_change_10s_percent REAL
+                ,volume_ratio_5m REAL
+                ,taker_buy_ratio_percent REAL
+                ,order_book_imbalance_percent REAL
+                ,spread_bps REAL
+                ,change_15s_percent REAL
+                ,change_60s_percent REAL
+                ,pullback_from_high_percent REAL
+                ,btc_change_300s_percent REAL
+                ,market_breadth_60s_percent REAL
             );
             CREATE INDEX IF NOT EXISTS confirmation_events_time
                 ON confirmation_events(started_at);
@@ -470,6 +483,23 @@ class AuditLog:
                 self.connection.execute(
                     f"ALTER TABLE signal_events ADD COLUMN {column} {definition}"
                 )
+        confirmation_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(confirmation_events)")
+        }
+        for column in (
+            "confirmation_progress_percent", "confirmation_pullback_percent",
+            "confirmation_change_5s_percent", "confirmation_change_10s_percent",
+            "volume_ratio_5m", "taker_buy_ratio_percent",
+            "order_book_imbalance_percent", "spread_bps",
+            "change_15s_percent", "change_60s_percent",
+            "pullback_from_high_percent", "btc_change_300s_percent",
+            "market_breadth_60s_percent",
+        ):
+            if column not in confirmation_columns:
+                self.connection.execute(
+                    f"ALTER TABLE confirmation_events ADD COLUMN {column} REAL"
+                )
         if self._metadata("period_started_at") is None:
             self._set_metadata("period_started_at", str(time.time()))
         self.connection.commit()
@@ -490,15 +520,35 @@ class AuditLog:
         )
         self.connection.commit()
 
-    def record_confirmation_event(self, event) -> int:
+    def record_confirmation_event(self, event, context=None, dynamics=None) -> int:
+        dynamic_values = dynamics.as_dict() if dynamics is not None else {}
         cursor = self.connection.execute(
             "INSERT INTO confirmation_events("
             "started_at,resolved_at,symbol,trigger_price,resolution_price,"
-            "accepted,reason) VALUES(?,?,?,?,?,?,?)",
+            "accepted,reason,confirmation_progress_percent,"
+            "confirmation_pullback_percent,confirmation_change_5s_percent,"
+            "confirmation_change_10s_percent,volume_ratio_5m,"
+            "taker_buy_ratio_percent,order_book_imbalance_percent,spread_bps,"
+            "change_15s_percent,change_60s_percent,pullback_from_high_percent,"
+            "btc_change_300s_percent,market_breadth_60s_percent) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 event.started_at, event.resolved_at, event.symbol,
                 event.trigger_price, event.resolution_price,
                 int(event.accepted), event.reason,
+                getattr(event, "progress_percent", None),
+                getattr(event, "pullback_percent", None),
+                getattr(event, "change_5s_percent", None),
+                getattr(event, "change_10s_percent", None),
+                context.volume_ratio_5m if context else None,
+                context.taker_buy_ratio_percent if context else None,
+                context.order_book_imbalance_percent if context else None,
+                context.spread_bps if context else None,
+                dynamic_values.get("change_15s_percent"),
+                dynamic_values.get("change_60s_percent"),
+                dynamic_values.get("pullback_from_5m_high_percent"),
+                dynamic_values.get("btc_change_300s_percent"),
+                dynamic_values.get("market_breadth_60s_percent"),
             ),
         )
         self.connection.commit()
@@ -848,6 +898,9 @@ class AuditLog:
     @staticmethod
     def _similar_learning_example(row: tuple, current: dict) -> bool:
         comparisons = (
+            (row[3], current.get("confirmation_progress_percent"), 0.25),
+            (row[9], current.get("confirmation_change_5s_percent"), 0.15),
+            (row[10], current.get("confirmation_change_10s_percent"), 0.20),
             (row[4], current.get("volume_ratio_5m"), 0.8),
             (row[5], current.get("taker_buy_ratio_percent"), 8.0),
             (row[6], current.get("order_book_imbalance_percent"), 30.0),
@@ -874,7 +927,7 @@ class AuditLog:
             "SELECT symbol, success_before_stop, signal_timestamp, "
             "setup_change_percent, volume_ratio_5m, taker_buy_ratio_percent, "
             "order_book_imbalance_percent, change_60s_percent, "
-            "pullback_from_high_percent FROM learning_examples "
+            "pullback_from_high_percent, NULL, NULL FROM learning_examples "
             "WHERE signal_timestamp >= ? "
             "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
             "WHERE c.symbol=learning_examples.symbol "
@@ -884,8 +937,12 @@ class AuditLog:
             (now - lookback_seconds,),
         ).fetchall()
         shadow_rows = self.connection.execute(
-            "SELECT symbol, immediate_success, started_at, 0, NULL, NULL, NULL, "
-            "NULL, NULL FROM confirmation_events "
+            "SELECT symbol, immediate_success, started_at, "
+            "confirmation_progress_percent, volume_ratio_5m, "
+            "taker_buy_ratio_percent, order_book_imbalance_percent, "
+            "change_60s_percent, pullback_from_high_percent, "
+            "confirmation_change_5s_percent, confirmation_change_10s_percent "
+            "FROM confirmation_events "
             "WHERE evaluated_at IS NOT NULL AND started_at >= ? "
             "ORDER BY started_at DESC LIMIT 4000",
             (now - lookback_seconds,),
@@ -1014,6 +1071,61 @@ class AuditLog:
             sum(round(item[1] * item[2] / 100) for item in ranked),
             len(eligible), best, blocked,
         )
+
+    def candidate_pattern_report_text(
+        self, now: float, lookback_seconds: int = 7 * 86400
+    ) -> str:
+        """Compare resolved market snapshots that won and lost."""
+        rows = self.connection.execute(
+            "SELECT immediate_success, confirmation_progress_percent, "
+            "confirmation_change_5s_percent, confirmation_change_10s_percent, "
+            "volume_ratio_5m, taker_buy_ratio_percent, "
+            "order_book_imbalance_percent, spread_bps, change_60s_percent, "
+            "pullback_from_high_percent, market_breadth_60s_percent "
+            "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
+            "AND started_at>=?",
+            (now - lookback_seconds,),
+        ).fetchall()
+        winners = [row for row in rows if int(row[0])]
+        losers = [row for row in rows if not int(row[0])]
+        if not winners or not losers:
+            return "🔬 Сравнение сценариев: полноценные снимки накапливаются."
+
+        def average(group: list[tuple], index: int) -> float | None:
+            values = [float(row[index]) for row in group if row[index] is not None]
+            return sum(values) / len(values) if values else None
+
+        features = (
+            ("ход за 20 с", 1, "%"),
+            ("ход за последние 5 с", 2, "%"),
+            ("ход за последние 10 с", 3, "%"),
+            ("объём", 4, "×"),
+            ("taker-buy", 5, "%"),
+            ("перевес стакана", 6, "%"),
+            ("спред", 7, " б.п."),
+            ("ход за 60 с", 8, "%"),
+            ("откат от максимума", 9, "%"),
+            ("ширина рынка", 10, "%"),
+        )
+        lines = [
+            "🔬 Победители против остальных",
+            f"Полных снимков: {len(rows)}; цель достигли {len(winners)} "
+            f"({len(winners) / len(rows) * 100:.1f}%).",
+        ]
+        for label, index, suffix in features:
+            winner_average = average(winners, index)
+            loser_average = average(losers, index)
+            if winner_average is None or loser_average is None:
+                continue
+            prefix = "×" if suffix == "×" else ""
+            suffix_text = "" if suffix == "×" else suffix
+            lines.append(
+                f"• {label}: успешно {prefix}{winner_average:.2f}{suffix_text}, "
+                f"неуспешно {prefix}{loser_average:.2f}{suffix_text}."
+            )
+        if len(lines) == 2:
+            lines.append("Новые расширенные снимки ещё не созрели 15 минут.")
+        return "\n".join(lines)
 
     def recent_ai_decisions_text(self, limit: int = 8) -> str:
         rows = self.connection.execute(
