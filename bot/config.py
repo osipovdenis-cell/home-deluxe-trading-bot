@@ -112,10 +112,10 @@ def load_settings() -> Settings:
         ),
         paper_max_hold_seconds=int(os.getenv("PAPER_MAX_HOLD_SECONDS", "0")),
         paper_stagnation_after_seconds=int(
-            os.getenv("PAPER_STAGNATION_AFTER_SECONDS", "1800")
+            os.getenv("PAPER_STAGNATION_AFTER_SECONDS", "900")
         ),
         paper_stagnation_window_seconds=int(
-            os.getenv("PAPER_STAGNATION_WINDOW_SECONDS", "900")
+            os.getenv("PAPER_STAGNATION_WINDOW_SECONDS", "300")
         ),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "15")),
         alert_cooldown_seconds=int(os.getenv("ALERT_COOLDOWN_SECONDS", "1800")),
