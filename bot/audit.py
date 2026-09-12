@@ -244,6 +244,40 @@ class LearningReport:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class ConfirmationAudit:
+    evaluated: int
+    accepted: int
+    rejected: int
+    immediate_winners: int
+    accepted_delayed_winners: int
+    prevented_stops: int
+    missed_winners: int
+    rejected_neutral: int
+
+    def telegram_text(self) -> str:
+        if not self.evaluated:
+            return "⏱ Проверка 20 секунд: результаты пока накапливаются."
+        immediate_rate = self.immediate_winners / self.evaluated * 100
+        delayed_rate = (
+            self.accepted_delayed_winners / self.accepted * 100
+            if self.accepted else 0.0
+        )
+        return (
+            "⏱ Аудит ожидания 20 секунд\n"
+            f"Проверено кандидатов: {self.evaluated}.\n"
+            f"Прошли/отклонены: {self.accepted}/{self.rejected}.\n"
+            f"Вход сразу достиг бы +0,7% раньше стопа: "
+            f"{self.immediate_winners} ({immediate_rate:.1f}%).\n"
+            f"После подтверждения цель достигли: "
+            f"{self.accepted_delayed_winners}/{self.accepted} "
+            f"({delayed_rate:.1f}%).\n"
+            f"Предотвращено стопов: {self.prevented_stops}.\n"
+            f"Пропущено потенциальных +0,7%: {self.missed_winners}.\n"
+            f"Нейтральных отклонений: {self.rejected_neutral}."
+        )
+
+
 def detect_pumps(
     candles: list[tuple[float, float, float]],
     window_seconds: int,
@@ -374,6 +408,35 @@ class AuditLog:
             );
             CREATE INDEX IF NOT EXISTS learning_examples_symbol_time
                 ON learning_examples(symbol, signal_timestamp);
+            CREATE TABLE IF NOT EXISTS confirmation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at REAL NOT NULL,
+                resolved_at REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                trigger_price REAL NOT NULL,
+                resolution_price REAL NOT NULL,
+                accepted INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                evaluated_at REAL,
+                immediate_success INTEGER,
+                immediate_stopped_first INTEGER,
+                immediate_max_return_percent REAL,
+                immediate_min_return_percent REAL,
+                delayed_success INTEGER,
+                delayed_stopped_first INTEGER,
+                delayed_max_return_percent REAL,
+                delayed_min_return_percent REAL
+            );
+            CREATE INDEX IF NOT EXISTS confirmation_events_time
+                ON confirmation_events(started_at);
+            CREATE TABLE IF NOT EXISTS confirmation_samples (
+                timestamp REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                PRIMARY KEY(timestamp, symbol)
+            );
+            CREATE INDEX IF NOT EXISTS confirmation_samples_symbol_time
+                ON confirmation_samples(symbol, timestamp);
             """
         )
         signal_columns = {
@@ -426,6 +489,134 @@ class AuditLog:
             (timestamp, symbol, reason, spread_bps, tick_percent),
         )
         self.connection.commit()
+
+    def record_confirmation_event(self, event) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO confirmation_events("
+            "started_at,resolved_at,symbol,trigger_price,resolution_price,"
+            "accepted,reason) VALUES(?,?,?,?,?,?,?)",
+            (
+                event.started_at, event.resolved_at, event.symbol,
+                event.trigger_price, event.resolution_price,
+                int(event.accepted), event.reason,
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def active_confirmation_symbols(
+        self, now: float, horizon_seconds: int = 900
+    ) -> set[str]:
+        rows = self.connection.execute(
+            "SELECT DISTINCT symbol FROM confirmation_events "
+            "WHERE evaluated_at IS NULL AND started_at > ?",
+            (now - horizon_seconds,),
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def record_confirmation_prices(
+        self, prices: dict[str, float], timestamp: float
+    ) -> None:
+        if not prices:
+            return
+        self.connection.executemany(
+            "INSERT OR REPLACE INTO confirmation_samples(timestamp,symbol,price) "
+            "VALUES(?,?,?)",
+            ((timestamp, symbol, price) for symbol, price in prices.items()),
+        )
+        self.connection.commit()
+
+    @staticmethod
+    def _path_outcome(
+        prices: list[float], entry_price: float,
+        target_percent: float, stop_percent: float,
+    ) -> tuple[bool, bool, float, float]:
+        changes = [(price / entry_price - 1) * 100 for price in prices]
+        success = False
+        stopped_first = False
+        for change in changes:
+            if change <= -stop_percent:
+                stopped_first = True
+                break
+            if change >= target_percent:
+                success = True
+                break
+        return success, stopped_first, max(changes), min(changes)
+
+    def refresh_confirmation_outcomes(
+        self,
+        now: float,
+        target_percent: float,
+        stop_percent: float,
+        horizon_seconds: int = 900,
+    ) -> int:
+        rows = self.connection.execute(
+            "SELECT id,started_at,resolved_at,symbol,trigger_price,"
+            "resolution_price,accepted FROM confirmation_events "
+            "WHERE evaluated_at IS NULL AND started_at <= ? ORDER BY id",
+            (now - horizon_seconds,),
+        ).fetchall()
+        updated = 0
+        for event_id, started_at, resolved_at, symbol, trigger, resolved, accepted in rows:
+            points = self.connection.execute(
+                "SELECT timestamp,price FROM confirmation_samples WHERE symbol=? "
+                "AND timestamp>=? AND timestamp<=? ORDER BY timestamp",
+                (symbol, started_at, float(started_at) + horizon_seconds),
+            ).fetchall()
+            if not points or float(points[-1][0]) < float(started_at) + horizon_seconds * 0.8:
+                continue
+            immediate_prices = [float(price) for _timestamp, price in points]
+            immediate = self._path_outcome(
+                immediate_prices, float(trigger), target_percent, stop_percent
+            )
+            delayed = (None, None, None, None)
+            if int(accepted):
+                delayed_prices = [
+                    float(price) for timestamp, price in points
+                    if float(timestamp) >= float(resolved_at)
+                ]
+                if delayed_prices:
+                    delayed = self._path_outcome(
+                        delayed_prices, float(resolved), target_percent, stop_percent
+                    )
+            self.connection.execute(
+                "UPDATE confirmation_events SET evaluated_at=?,"
+                "immediate_success=?,immediate_stopped_first=?,"
+                "immediate_max_return_percent=?,immediate_min_return_percent=?,"
+                "delayed_success=?,delayed_stopped_first=?,"
+                "delayed_max_return_percent=?,delayed_min_return_percent=? "
+                "WHERE id=?",
+                (now, int(immediate[0]), int(immediate[1]), immediate[2], immediate[3],
+                 None if delayed[0] is None else int(delayed[0]),
+                 None if delayed[1] is None else int(delayed[1]),
+                 delayed[2], delayed[3], event_id),
+            )
+            updated += 1
+        if updated:
+            self.connection.execute(
+                "DELETE FROM confirmation_samples WHERE timestamp < ?",
+                (now - 172800,),
+            )
+            self.connection.commit()
+        return updated
+
+    def build_confirmation_audit(self, now: float, lookback_seconds: int = 86400) -> ConfirmationAudit:
+        rows = self.connection.execute(
+            "SELECT accepted,immediate_success,immediate_stopped_first,"
+            "delayed_success FROM confirmation_events "
+            "WHERE evaluated_at IS NOT NULL AND started_at>=?",
+            (now - lookback_seconds,),
+        ).fetchall()
+        accepted = sum(int(row[0]) for row in rows)
+        rejected_rows = [row for row in rows if not int(row[0])]
+        return ConfirmationAudit(
+            len(rows), accepted, len(rows) - accepted,
+            sum(int(row[1]) for row in rows),
+            sum(int(row[3] or 0) for row in rows if int(row[0])),
+            sum(int(row[2]) for row in rejected_rows),
+            sum(int(row[1]) for row in rejected_rows),
+            sum(not int(row[1]) and not int(row[2]) for row in rejected_rows),
+        )
 
     def _metadata(self, key: str) -> str | None:
         row = self.connection.execute(
