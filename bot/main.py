@@ -54,6 +54,21 @@ def process_signal(
             f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
         )
         return False
+    dynamics = market.entry_dynamics(signal.symbol, now)
+    quality_safe, quality_reason = market.entry_quality(context, dynamics)
+    if not quality_safe:
+        audit.record_signal(
+            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
+            signal.change_24h_percent, signal.quote_volume_usdt,
+            None, "вход отклонён качеством импульса", *context_values,
+            entry_dynamics=dynamics.as_dict(),
+        )
+        audit.record_entry_rejection(
+            now, signal.symbol, quality_reason or "слабое качество импульса",
+            context.spread_bps, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {quality_reason}", flush=True)
+        return False
     behavior = audit.build_symbol_behavior(
         signal.symbol,
         now,
@@ -62,26 +77,6 @@ def process_signal(
         settings.paper_take_profit_2_percent,
         settings.paper_stop_loss_percent,
     )
-    if len(behavior.impulses) < 3 or not behavior.favorable:
-        reason = (
-            f"история накапливается: {len(behavior.impulses)}/3 импульсов"
-            if len(behavior.impulses) < 3
-            else (
-                f"история монеты неблагоприятна: цель +0,7% достигалась "
-                f"{behavior.first_target_hits}/{len(behavior.impulses)} раз"
-            )
-        )
-        audit.record_signal(
-            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
-            signal.change_24h_percent, signal.quote_volume_usdt,
-            None, "вход отклонён историей монеты", *context_values,
-        )
-        audit.record_entry_rejection(
-            now, signal.symbol, reason,
-            context.spread_bps if context else None, tick_percent,
-        )
-        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
-        return False
     analysis = None
     if ai is not None:
         try:
@@ -98,6 +93,7 @@ def process_signal(
                 context.ask_depth_usdt if context else None,
                 context.order_book_imbalance_percent if context else None,
                 behavior.as_dict(),
+                dynamics.as_dict(),
             )
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI: {error}", now)
@@ -107,7 +103,42 @@ def process_signal(
         signal.change_24h_percent, signal.quote_volume_usdt,
         analysis.score if analysis else None,
         analysis.verdict if analysis else None, *context_values,
+        ai_decision=analysis.decision if analysis else None,
+        ai_reason=analysis.reason if analysis else None,
+        ai_risk=analysis.risk if analysis else None,
+        analysis_version=2 if analysis else 1,
+        entry_dynamics=dynamics.as_dict(),
     )
+    if analysis is None:
+        audit.record_entry_rejection(
+            now, signal.symbol, "нет полного решения AI", context.spread_bps,
+            tick_percent,
+        )
+        return False
+    if len(behavior.impulses) < 3 or not behavior.favorable:
+        reason = (
+            f"полная AI-история накапливается: {len(behavior.impulses)}/3"
+            if len(behavior.impulses) < 3
+            else (
+                f"история неблагоприятна: цель +0,7% достигалась "
+                f"{behavior.first_target_hits}/{len(behavior.impulses)} раз"
+            )
+        )
+        audit.record_entry_rejection(
+            now, signal.symbol, reason, context.spread_bps, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
+        return False
+    if analysis.decision != "BUY" or analysis.score < settings.paper_min_ai_score:
+        reason = (
+            f"AI решил {analysis.decision}, оценка {analysis.score}/100; "
+            f"нужно BUY и минимум {settings.paper_min_ai_score}/100"
+        )
+        audit.record_entry_rejection(
+            now, signal.symbol, reason, context.spread_bps, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
+        return False
     context_text = (
         f"Объём за 5 мин: {context.quote_volume_5m_usdt:,.0f} USDT "
         f"(x{context.volume_ratio_5m:.2f} к среднему).\n"
@@ -125,7 +156,8 @@ def process_signal(
         ) if context else "Данные объёма за 5 мин временно недоступны.\n"
     )
     ai_text = (
-        f"\nИИ-оценка: {analysis.score}/100 ({analysis.verdict}).\n"
+        f"\nИИ-решение: {analysis.decision}. Оценка: "
+        f"{analysis.score}/100 ({analysis.verdict}).\n"
         f"Причина: {analysis.reason}\nРиск: {analysis.risk}\n"
         if analysis else "\nИИ-анализ временно недоступен.\n"
     )
@@ -225,7 +257,7 @@ def main() -> None:
         settings.pump_window_seconds, settings.pump_threshold_percent,
         settings.alert_cooldown_seconds, settings.scan_all_usdt,
         settings.min_quote_volume_usdt, settings.early_threshold_percent,
-        settings.max_signals_per_cycle,
+        settings.max_signals_per_cycle, settings.entry_confirmation_seconds,
     )
     audit = AuditLog(settings.audit_db_path)
     trader = PaperTrader(
@@ -279,9 +311,11 @@ def main() -> None:
             f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% за "
             f"{settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
+            f"Подтверждение входа: {settings.entry_confirmation_seconds} сек; "
+            "объём, покупки, стакан, рынок и полная история монеты.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций, вход от "
-               f"{settings.paper_min_ai_score}/100.\n"
+               f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
                "Выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%.\n"
                if trader else "Тестовые сделки: выключены.\n")
             + f"ИИ-аналитик: {ai_status}.\nСуточный аудит: включён.",
@@ -315,7 +349,18 @@ def main() -> None:
                         send_trade_notices(trader, telegram, chat_id, notices, prices, now)
                         if notices:
                             position_stream.set_symbols(trader.open_symbols())
-                    for signal in market.update(prices, now=now):
+                    signals = market.update(prices, now=now)
+                    for rejected_at, rejected_symbol, reason in (
+                        market.drain_confirmation_rejections()
+                    ):
+                        audit.record_entry_rejection(
+                            rejected_at, rejected_symbol, reason, None, None
+                        )
+                        print(
+                            f"Вход {rejected_symbol} отклонён: {reason}",
+                            flush=True,
+                        )
+                    for signal in signals:
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
                             telegram, chat_id, settings,
