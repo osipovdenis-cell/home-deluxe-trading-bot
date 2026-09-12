@@ -31,6 +31,15 @@ class SignalMarketContext:
     bid_depth_usdt: float | None = None
     ask_depth_usdt: float | None = None
     order_book_imbalance_percent: float | None = None
+    large_trade_threshold_usdt: float | None = None
+    large_buy_volume_15s_usdt: float | None = None
+    large_sell_volume_15s_usdt: float | None = None
+    large_buy_volume_60s_usdt: float | None = None
+    large_sell_volume_60s_usdt: float | None = None
+    large_trade_imbalance_60s_percent: float | None = None
+    large_trade_count_60s: int | None = None
+    bid_wall_share_percent: float | None = None
+    ask_wall_share_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -242,7 +251,7 @@ class MarketMonitor:
             if previous_average_5m > 0
             else 0.0
         )
-        trades = sum(int(row[8]) for row in recent)
+        trade_count_5m = sum(int(row[8]) for row in recent)
         taker_buy_quote_volume = sum(float(row[10]) for row in recent)
         taker_buy_ratio = (
             taker_buy_quote_volume / recent_quote_volume * 100
@@ -253,6 +262,8 @@ class MarketMonitor:
         bid_depth = None
         ask_depth = None
         imbalance = None
+        bid_wall_share = None
+        ask_wall_share = None
         try:
             depth_response = self.client.get(
                 "/api/v3/depth", params={"symbol": symbol, "limit": 20}
@@ -273,19 +284,77 @@ class MarketMonitor:
                     if total_depth > 0
                     else 0.0
                 )
+                bid_wall_share = (
+                    max(price * quantity for price, quantity in bids)
+                    / bid_depth * 100 if bid_depth > 0 else 0.0
+                )
+                ask_wall_share = (
+                    max(price * quantity for price, quantity in asks)
+                    / ask_depth * 100 if ask_depth > 0 else 0.0
+                )
         except Exception:
             # Стакан — дополнительный контекст: его сбой не должен скрывать
             # уже полученные свечи и объём сигнала.
             pass
+        large_flow = (None,) * 7
+        try:
+            trades_response = self.client.get(
+                "/api/v3/aggTrades", params={"symbol": symbol, "limit": 1000}
+            )
+            trades_response.raise_for_status()
+            aggregate_trades = trades_response.json()
+            if aggregate_trades:
+                latest_ms = max(int(item["T"]) for item in aggregate_trades)
+                notionals = sorted(
+                    float(item["p"]) * float(item["q"])
+                    for item in aggregate_trades
+                )
+                percentile_index = min(
+                    len(notionals) - 1, int(len(notionals) * 0.95)
+                )
+                threshold = max(1000.0, notionals[percentile_index])
+
+                def volumes(seconds: int) -> tuple[float, float, int]:
+                    buys = sells = 0.0
+                    count = 0
+                    cutoff_ms = latest_ms - seconds * 1000
+                    for item in aggregate_trades:
+                        notional = float(item["p"]) * float(item["q"])
+                        if int(item["T"]) < cutoff_ms or notional < threshold:
+                            continue
+                        count += 1
+                        if bool(item.get("m")):
+                            sells += notional
+                        else:
+                            buys += notional
+                    return buys, sells, count
+
+                buy_15, sell_15, _count_15 = volumes(15)
+                buy_60, sell_60, count_60 = volumes(60)
+                total_60 = buy_60 + sell_60
+                flow_imbalance = (
+                    (buy_60 - sell_60) / total_60 * 100
+                    if total_60 > 0 else 0.0
+                )
+                large_flow = (
+                    threshold, buy_15, sell_15, buy_60, sell_60,
+                    flow_imbalance, count_60,
+                )
+        except Exception:
+            # Крупный поток — дополнительный сигнал, а не причина остановки.
+            pass
         return SignalMarketContext(
             recent_quote_volume,
             volume_ratio,
-            trades,
+            trade_count_5m,
             taker_buy_ratio,
             spread_bps,
             bid_depth,
             ask_depth,
             imbalance,
+            *large_flow,
+            bid_wall_share,
+            ask_wall_share,
         )
 
     def execution_safety(
