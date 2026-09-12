@@ -6,6 +6,18 @@ from bot.config import load_settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_default_paper_bank_has_four_fifty_usdt_slots(self) -> None:
+        values = {
+            "BINANCE_API_KEY": "key",
+            "BINANCE_API_SECRET": "secret",
+            "TELEGRAM_BOT_TOKEN": "token",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            settings = load_settings()
+            self.assertEqual(settings.paper_starting_balance_usdt, 200)
+            self.assertEqual(settings.paper_position_usdt, 50)
+            self.assertEqual(settings.paper_max_open_positions, 4)
+
     def test_signal_notifications_are_silent_by_default(self) -> None:
         values = {
             "BINANCE_API_KEY": "key",
