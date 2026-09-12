@@ -18,6 +18,7 @@ class PumpSignal:
     confirmation_pullback_percent: float | None = None
     confirmation_change_5s_percent: float | None = None
     confirmation_change_10s_percent: float | None = None
+    is_rescue: bool = False
 
 
 @dataclass(frozen=True)
@@ -464,7 +465,7 @@ class MarketMonitor:
                     candidates.append(PumpSignal(
                         symbol, price, change, self.window_seconds, kind,
                         quote_volume, change_24h, progress, pullback,
-                        change_5s, change_10s,
+                        change_5s, change_10s, True,
                     ))
                 continue
             if change < self.early_threshold_percent:
