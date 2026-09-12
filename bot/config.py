@@ -92,10 +92,10 @@ def load_settings() -> Settings:
         ),
         paper_trading_enabled=_env_bool("PAPER_TRADING_ENABLED", True),
         paper_starting_balance_usdt=float(
-            os.getenv("PAPER_STARTING_BALANCE_USDT", "150")
+            os.getenv("PAPER_STARTING_BALANCE_USDT", "200")
         ),
         paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
-        paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "3")),
+        paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "4")),
         paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "55")),
         paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "1")),
         paper_take_profit_1_percent=float(
