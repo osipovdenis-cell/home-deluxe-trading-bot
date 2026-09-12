@@ -125,6 +125,13 @@ class AuditLog:
                 timestamp REAL NOT NULL,
                 message TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS paper_entry_rejections (
+                timestamp REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                spread_bps REAL,
+                tick_percent REAL
+            );
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -182,6 +189,22 @@ class AuditLog:
                 )
         if self._metadata("period_started_at") is None:
             self._set_metadata("period_started_at", str(time.time()))
+        self.connection.commit()
+
+    def record_entry_rejection(
+        self,
+        timestamp: float,
+        symbol: str,
+        reason: str,
+        spread_bps: float | None,
+        tick_percent: float | None,
+    ) -> None:
+        self.connection.execute(
+            "INSERT INTO paper_entry_rejections("
+            "timestamp, symbol, reason, spread_bps, tick_percent) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (timestamp, symbol, reason, spread_bps, tick_percent),
+        )
         self.connection.commit()
 
     def _metadata(self, key: str) -> str | None:
