@@ -12,11 +12,29 @@ class AuditTests(unittest.TestCase):
             log = AuditLog(str(Path(directory) / "audit.db"))
             try:
                 for symbol in ("WINUSDT", "STOPUSDT"):
-                    log.record_confirmation_event(SimpleNamespace(
+                    event = SimpleNamespace(
                         started_at=0, resolved_at=20, symbol=symbol,
                         trigger_price=100, resolution_price=100,
                         accepted=False, reason="нет продолжения",
-                    ))
+                        progress_percent=0.2 if symbol == "WINUSDT" else -0.1,
+                        pullback_percent=-0.02 if symbol == "WINUSDT" else -0.2,
+                        change_5s_percent=0.1 if symbol == "WINUSDT" else -0.1,
+                        change_10s_percent=0.15 if symbol == "WINUSDT" else -0.15,
+                    )
+                    context = SimpleNamespace(
+                        volume_ratio_5m=2 if symbol == "WINUSDT" else 1.2,
+                        taker_buy_ratio_percent=65 if symbol == "WINUSDT" else 51,
+                        order_book_imbalance_percent=(20 if symbol == "WINUSDT" else -15),
+                        spread_bps=2 if symbol == "WINUSDT" else 8,
+                    )
+                    dynamics = SimpleNamespace(as_dict=lambda symbol=symbol: {
+                        "change_15s_percent": 0.2 if symbol == "WINUSDT" else -0.1,
+                        "change_60s_percent": 0.5 if symbol == "WINUSDT" else 0.1,
+                        "pullback_from_5m_high_percent": (-0.02 if symbol == "WINUSDT" else -0.2),
+                        "btc_change_300s_percent": 0.1,
+                        "market_breadth_60s_percent": 55,
+                    })
+                    log.record_confirmation_event(event, context, dynamics)
                 for timestamp in range(0, 901):
                     log.record_confirmation_prices({
                         "WINUSDT": 100.8 if timestamp >= 100 else 100,
@@ -35,6 +53,9 @@ class AuditTests(unittest.TestCase):
                 )
                 self.assertEqual(len(behavior.impulses), 1)
                 self.assertTrue(behavior.impulses[0].first_target_hit)
+                pattern = log.candidate_pattern_report_text(901)
+                self.assertIn("Полных снимков: 2", pattern)
+                self.assertIn("taker-buy: успешно 65.00%", pattern)
             finally:
                 log.close()
     def test_observer_reports_ai_decisions_and_rejections(self) -> None:
