@@ -19,7 +19,7 @@ def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
 
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
-    send_signal_alerts,
+    settings,
 ):
     context = None
     try:
@@ -54,6 +54,34 @@ def process_signal(
             f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
         )
         return False
+    behavior = audit.build_symbol_behavior(
+        signal.symbol,
+        now,
+        settings.early_threshold_percent,
+        settings.paper_take_profit_1_percent,
+        settings.paper_take_profit_2_percent,
+        settings.paper_stop_loss_percent,
+    )
+    if len(behavior.impulses) < 3 or not behavior.favorable:
+        reason = (
+            f"история накапливается: {len(behavior.impulses)}/3 импульсов"
+            if len(behavior.impulses) < 3
+            else (
+                f"история монеты неблагоприятна: цель +0,7% достигалась "
+                f"{behavior.first_target_hits}/{len(behavior.impulses)} раз"
+            )
+        )
+        audit.record_signal(
+            now, signal.symbol, signal.price, signal.kind, signal.change_percent,
+            signal.change_24h_percent, signal.quote_volume_usdt,
+            None, "вход отклонён историей монеты", *context_values,
+        )
+        audit.record_entry_rejection(
+            now, signal.symbol, reason,
+            context.spread_bps if context else None, tick_percent,
+        )
+        print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
+        return False
     analysis = None
     if ai is not None:
         try:
@@ -69,6 +97,7 @@ def process_signal(
                 context.bid_depth_usdt if context else None,
                 context.ask_depth_usdt if context else None,
                 context.order_book_imbalance_percent if context else None,
+                behavior.as_dict(),
             )
         except (httpx.HTTPError, AIError) as error:
             audit.record_error(f"OpenAI: {error}", now)
@@ -115,7 +144,7 @@ def process_signal(
             f"Цена: {signal.price:.10g}\n{context_text}{ai_text}"
             "Это информационный сигнал, не команда на покупку."
     )
-    if send_signal_alerts:
+    if settings.telegram_signal_alerts_enabled:
         try:
             telegram.send(chat_id, signal_text)
             audit.record_alert(signal.symbol, True, now)
@@ -289,7 +318,7 @@ def main() -> None:
                     for signal in market.update(prices, now=now):
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
-                            telegram, chat_id, settings.telegram_signal_alerts_enabled,
+                            telegram, chat_id, settings,
                         )
                         if opened:
                             position_stream.set_symbols(trader.open_symbols())
