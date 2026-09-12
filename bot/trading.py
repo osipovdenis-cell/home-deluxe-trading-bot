@@ -248,8 +248,8 @@ class PaperTrader:
         trailing_drawdown_percent: float,
         max_hold_seconds: int,
         round_trip_cost_percent: float,
-        stagnation_after_seconds: int = 1800,
-        stagnation_window_seconds: int = 900,
+        stagnation_after_seconds: int = 900,
+        stagnation_window_seconds: int = 300,
     ) -> None:
         database = Path(database_path)
         database.parent.mkdir(parents=True, exist_ok=True)
@@ -494,7 +494,7 @@ class PaperTrader:
     def stagnation_candidates(self, now: float) -> tuple[str, ...]:
         rows = self.connection.execute(
             "SELECT symbol FROM paper_positions WHERE status = 'OPEN' "
-            "AND take_1_done = 0 AND ? - opened_at >= ? ORDER BY id",
+            "AND ? - opened_at >= ? ORDER BY id",
             (now, self.stagnation_after_seconds),
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
@@ -613,15 +613,10 @@ class PaperTrader:
                     )
                 )
                 continue
-            context = (market_contexts or {}).get(symbol)
             net_change = change - self.round_trip_cost_percent
             if (
-                not int(row["take_1_done"])
-                and now - float(row["opened_at"]) >= self.stagnation_after_seconds
+                now - float(row["opened_at"]) >= self.stagnation_after_seconds
                 and net_change > 0
-                and context is not None
-                and context[0] < 1.0
-                and context[1] < 50.0
                 and self._price_has_stagnated(row, now)
             ):
                 notices.append(
@@ -630,7 +625,7 @@ class PaperTrader:
                         float(row["remaining_quantity"]),
                         price,
                         now,
-                        "затухание импульса (выход в плюс)",
+                        "15 минут без роста (выход в плюс)",
                     )
                 )
                 continue
