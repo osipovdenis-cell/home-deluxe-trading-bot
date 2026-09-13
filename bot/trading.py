@@ -349,8 +349,11 @@ class PaperTrader:
         signal_kind: str,
         ai_score: int | None,
         now: float,
+        bypass_min_score: bool = False,
     ) -> TradeNotice | None:
-        if ai_score is None or ai_score < self.min_ai_score:
+        if not bypass_min_score and (
+            ai_score is None or ai_score < self.min_ai_score
+        ):
             return None
         exists = self.connection.execute(
             "SELECT 1 FROM paper_positions WHERE symbol = ? AND status = 'OPEN'",
@@ -552,6 +555,7 @@ class PaperTrader:
                     "SELECT * FROM paper_positions WHERE id = ?", (initial_row["id"],)
                 ).fetchone()
             change = (price / float(row["entry_price"]) - 1) * 100
+            is_rocket = "лидер" in str(row["signal_kind"])
             if change <= -self.stop_loss_percent:
                 notices.append(
                     self._sell(
@@ -562,6 +566,32 @@ class PaperTrader:
                         "стоп-лосс",
                     )
                 )
+                continue
+            if is_rocket:
+                highest_change = (
+                    float(row["highest_price"]) / float(row["entry_price"]) - 1
+                ) * 100
+                if not int(row["take_1_done"]) and highest_change >= 1.0:
+                    self.connection.execute(
+                        "UPDATE paper_positions SET take_1_done=1 WHERE id=?",
+                        (row["id"],),
+                    )
+                    self.connection.commit()
+                    row = self.connection.execute(
+                        "SELECT * FROM paper_positions WHERE id=?", (row["id"],)
+                    ).fetchone()
+                if int(row["take_1_done"]):
+                    protection = max(1.0, highest_change - 1.0)
+                    if change + 1e-9 < highest_change and change <= protection:
+                        notices.append(
+                            self._sell(
+                                row, float(row["remaining_quantity"]), price, now,
+                                f"ракета: откат 1 п.п. от максимума "
+                                f"{highest_change:+.2f}%",
+                            )
+                        )
+                # A leader keeps 100% of the position; ordinary staged takes and
+                # the stagnation exit below do not apply.
                 continue
             if (
                 not int(row["take_1_done"])

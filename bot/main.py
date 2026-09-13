@@ -47,6 +47,7 @@ def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
 ):
+    leader_paper_entry = "лидер" in signal.kind
     context = preloaded_context
     if context is None:
         try:
@@ -236,7 +237,7 @@ def process_signal(
         exceptional,
         learned.required_ai_score(settings.paper_min_ai_score),
     )
-    if not history_allowed:
+    if not history_allowed and not leader_paper_entry:
         reason = (
             f"история неблагоприятна: цель +0,7% достигалась "
             f"{behavior.first_target_hits}/{len(behavior.impulses)} раз; "
@@ -247,7 +248,7 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
-    if learned.consecutive_trade_losses >= 2:
+    if learned.consecutive_trade_losses >= 2 and not leader_paper_entry:
         stronger_checks = (
             context.volume_ratio_5m >= 1.5,
             context.taker_buy_ratio_percent >= 55,
@@ -269,14 +270,17 @@ def process_signal(
             )
             print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
             return False
-    if learned.blocked:
+    if learned.blocked and not leader_paper_entry:
         reason = f"обучаемый фильтр BLOCK: {learned.explanation}"
         audit.record_entry_rejection(
             now, signal.symbol, reason, context.spread_bps, tick_percent,
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
-    if analysis.decision != "BUY" or analysis.score < required_ai_score:
+    if (
+        not leader_paper_entry
+        and (analysis.decision != "BUY" or analysis.score < required_ai_score)
+    ):
         reason = (
             f"AI решил {analysis.decision}, оценка {analysis.score}/100; "
             f"нужно BUY и минимум {required_ai_score}/100 "
@@ -312,7 +316,8 @@ def process_signal(
     )
     notice = (
         trader.open_on_signal(signal.symbol, signal.price, signal.kind,
-                              analysis.score if analysis else None, now)
+                              analysis.score if analysis else None, now,
+                              bypass_min_score=leader_paper_entry)
         if trader else None
     )
     signal_text = (

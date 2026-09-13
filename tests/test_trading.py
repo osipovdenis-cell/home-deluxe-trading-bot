@@ -15,6 +15,30 @@ def make_trader(path: str) -> PaperTrader:
 
 
 class PaperTraderTests(unittest.TestCase):
+    def test_rocket_keeps_full_position_and_trails_one_point_from_peak(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                opened = trader.open_on_signal(
+                    "ROCKETUSDT", 100, "аномальный лидер", 20, 0,
+                    bypass_min_score=True,
+                )
+                self.assertIsNotNone(opened)
+                self.assertEqual(trader.update_positions({"ROCKETUSDT": 101}, 10), [])
+                row = trader.connection.execute(
+                    "SELECT remaining_quantity,take_1_done FROM paper_positions"
+                ).fetchone()
+                self.assertEqual(int(row[1]), 1)
+                self.assertAlmostEqual(float(row[0]), opened.quantity)
+                self.assertEqual(trader.update_positions({"ROCKETUSDT": 110}, 20), [])
+                closed = trader.update_positions({"ROCKETUSDT": 109}, 30)
+                self.assertEqual(len(closed), 1)
+                self.assertEqual(closed[0].remaining_percent, 0)
+                self.assertIn("откат 1 п.п.", closed[0].reason)
+                self.assertGreater(closed[0].pnl_percent, 8)
+            finally:
+                trader.close()
+
     def test_empty_intelligence_report_without_signal_table(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
