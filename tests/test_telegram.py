@@ -17,6 +17,7 @@ class FakeResponse:
 class FakeClient:
     def __init__(self, updates):
         self.updates = updates
+        self.posts = []
 
     def get(self, _path, params=None):
         offset = int((params or {}).get("offset", 0))
@@ -27,8 +28,24 @@ class FakeClient:
             ]
         })
 
+    def post(self, path, json=None):
+        self.posts.append((path, json))
+        return FakeResponse({"ok": True})
+
 
 class TelegramClientTests(unittest.TestCase):
+    def test_splits_long_messages_without_losing_text(self):
+        telegram = TelegramClient.__new__(TelegramClient)
+        telegram.client = FakeClient([])
+        text = ("строка\n" * 1000).rstrip()
+
+        telegram.send("123", text)
+
+        parts = [payload["text"] for _, payload in telegram.client.posts]
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 4000 for part in parts))
+        self.assertEqual("\n".join(parts), text)
+
     def test_polls_only_commands_from_allowed_chat_without_replay(self):
         telegram = TelegramClient.__new__(TelegramClient)
         telegram.update_offset = 0

@@ -411,6 +411,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
         elif command == "/ai":
             text = audit.recent_ai_decisions_text()
         elif command == "/learning":
+            telegram.send(chat_id, "⏳ Команда /learning принята, формирую отчёт…")
             telegram.send(
                 chat_id,
                 audit.build_learning_report(now).telegram_text()
@@ -540,6 +541,13 @@ def main() -> None:
         while True:
             now = time.time()
             try:
+                # Commands must not wait behind market scans and AI requests.
+                if now - last_command_poll >= 2:
+                    commands = telegram.poll_commands(chat_id)
+                    handle_observer_commands(
+                        commands, now, prices, audit, trader, telegram, chat_id
+                    )
+                    last_command_poll = now
                 if trader:
                     for event_at, symbol, bid in position_stream.drain_events():
                         prices[symbol] = bid
@@ -648,12 +656,6 @@ def main() -> None:
                 if now - last_report >= 1:
                     send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id)
                     last_report = now
-                if now - last_command_poll >= 2:
-                    commands = telegram.poll_commands(chat_id)
-                    handle_observer_commands(
-                        commands, now, prices, audit, trader, telegram, chat_id
-                    )
-                    last_command_poll = now
                 if now - last_observer >= settings.observer_report_interval_seconds:
                     observer_text = audit.observer_report_text(
                         now, last_observer

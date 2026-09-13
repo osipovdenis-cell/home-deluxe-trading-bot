@@ -43,10 +43,22 @@ class TelegramClient:
         return commands
 
     def send(self, chat_id: str, text: str) -> None:
-        response = self.client.post(
-            "/sendMessage", json={"chat_id": chat_id, "text": text}
-        )
-        response.raise_for_status()
+        # Telegram accepts at most 4096 characters per message. Reports grow
+        # together with the learning database, so split them at line breaks.
+        remaining = text
+        while remaining:
+            if len(remaining) <= 4000:
+                part, remaining = remaining, ""
+            else:
+                split_at = remaining.rfind("\n", 0, 4000)
+                if split_at <= 0:
+                    split_at = 4000
+                part = remaining[:split_at]
+                remaining = remaining[split_at:].lstrip("\n")
+            response = self.client.post(
+                "/sendMessage", json={"chat_id": chat_id, "text": part}
+            )
+            response.raise_for_status()
 
     def close(self) -> None:
         self.client.close()
