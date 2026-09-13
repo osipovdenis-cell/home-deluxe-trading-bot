@@ -143,6 +143,9 @@ def process_signal(
     )
     dynamics_payload = dynamics.as_dict()
     dynamics_payload["second_chance_90s"] = bool(signal.is_rescue)
+    dynamics_payload["change_12h_percent"] = (
+        market.change_12h_percent.get(signal.symbol)
+    )
     dynamics_payload["leader_mode"] = (
         signal.kind if "лидер" in signal.kind else None
     )
@@ -466,6 +469,7 @@ def main() -> None:
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
         telegram.discard_pending_updates()
         prices = market.fetch_prices()
+        market.refresh_12h_changes(prices, time.time())
         market_stream = AllMarketMiniTickerStream(market.symbols, settings.min_quote_volume_usdt)
         market_stream.seed(prices, market.market_stats)
         market_stream.start()
@@ -499,6 +503,10 @@ def main() -> None:
             f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% за "
             f"{settings.pump_window_seconds // 60} мин.\n"
             f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
+            "Фильтр направления: только монеты с ростом за последние 12 ч "
+            "по скользящей статистике Binance "
+            f"({sum(value > 0 for value in market.change_12h_percent.values())} "
+            "сейчас в зелёной зоне).\n"
             f"Подтверждение входа: {settings.entry_confirmation_seconds} сек; "
             "объём, покупки, стакан, рынок и история монеты.\n"
             "Обучение: включено; результат каждого импульса через 15 минут "
@@ -526,6 +534,7 @@ def main() -> None:
         )
         print(f"Потоки рынка запущены. TELEGRAM_CHAT_ID={chat_id}", flush=True)
         last_market = last_audit = last_fallback = last_report = 0.0
+        last_12h_refresh = time.time()
         last_command_poll = time.time()
         last_observer = time.time()
         while True:
@@ -633,6 +642,9 @@ def main() -> None:
                     prices.update(refreshed)
                     market_stream.set_symbols(market.symbols)
                     market_stream.seed(refreshed, market.market_stats)
+                if now - last_12h_refresh >= 300:
+                    market.refresh_12h_changes(prices, now)
+                    last_12h_refresh = now
                 if now - last_report >= 1:
                     send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id)
                     last_report = now

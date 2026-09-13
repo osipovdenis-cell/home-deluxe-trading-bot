@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+import json
 import time
 
 import httpx
@@ -151,6 +152,8 @@ class MarketMonitor:
         self.confirmation_rejections: deque[tuple[float, str, str]] = deque()
         self.confirmation_events: deque[ConfirmationEvent] = deque()
         self.market_stats: dict[str, tuple[float, float]] = {}
+        self.change_12h_percent: dict[str, float] = {}
+        self.last_12h_refresh = 0.0
         self.tick_sizes: dict[str, float] = {}
         self.eligible_count = 0
         self.last_symbol_refresh = 0.0
@@ -218,6 +221,36 @@ class MarketMonitor:
         self.market_stats = stats
         self.eligible_count = len(prices)
         return prices
+
+    def refresh_12h_changes(
+        self, symbols, now: float | None = None
+    ) -> dict[str, float]:
+        """Refresh Binance rolling 12-hour returns in API-safe batches."""
+        selected = sorted(set(symbols) & self.symbols)
+        changes: dict[str, float] = {}
+        for offset in range(0, len(selected), 100):
+            batch = selected[offset:offset + 100]
+            response = self.client.get(
+                "/api/v3/ticker",
+                params={
+                    "symbols": json.dumps(batch, separators=(",", ":")),
+                    "windowSize": "12h",
+                    "type": "MINI",
+                    "symbolStatus": "TRADING",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            rows = [payload] if isinstance(payload, dict) else payload
+            for item in rows:
+                symbol = str(item.get("symbol", ""))
+                open_price = float(item.get("openPrice", 0))
+                last_price = float(item.get("lastPrice", 0))
+                if symbol in batch and open_price > 0 and last_price > 0:
+                    changes[symbol] = (last_price / open_price - 1) * 100
+        self.change_12h_percent = changes
+        self.last_12h_refresh = time.time() if now is None else now
+        return dict(changes)
 
     def fetch_minute_candles(
         self, symbol: str, started_at: float, finished_at: float
@@ -543,6 +576,14 @@ class MarketMonitor:
             cutoff = now - self.window_seconds
             while points and points[0][0] < cutoff:
                 points.popleft()
+            change_12h = self.change_12h_percent.get(symbol)
+            if self.change_12h_percent and (
+                change_12h is None or change_12h <= 0
+            ):
+                self.pending_candidates.pop(symbol, None)
+                self.rescue_candidates.pop(symbol, None)
+                self.leaders.pop(symbol, None)
+                continue
             if len(points) < 2 or now - points[0][0] < self.window_seconds * 0.8:
                 continue
             minimum = min(value for _, value in points)

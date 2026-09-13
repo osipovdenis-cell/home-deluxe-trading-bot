@@ -25,6 +25,48 @@ from bot.market import MarketMonitor, SignalMarketContext
 
 
 class MarketMonitorTests(unittest.TestCase):
+    def test_refreshes_rolling_12h_changes_from_binance(self) -> None:
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = [
+            {"symbol": "GREENUSDT", "openPrice": "100", "lastPrice": "102"},
+            {"symbol": "REDUSDT", "openPrice": "100", "lastPrice": "99"},
+        ]
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("GREENUSDT", "REDUSDT"),
+            300, 3, 1800,
+        )
+        monitor.client = Mock()
+        monitor.client.get.return_value = response
+        changes = monitor.refresh_12h_changes(
+            ("GREENUSDT", "REDUSDT"), now=1000
+        )
+        self.assertAlmostEqual(changes["GREENUSDT"], 2)
+        self.assertAlmostEqual(changes["REDUSDT"], -1)
+        params = monitor.client.get.call_args.kwargs["params"]
+        self.assertEqual(params["windowSize"], "12h")
+        self.assertEqual(params["type"], "MINI")
+        self.assertEqual(monitor.last_12h_refresh, 1000)
+
+    def test_excludes_red_12h_coin_before_signal(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("REDUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=0,
+        )
+        try:
+            monitor.change_12h_percent = {"REDUSDT": -0.01}
+            monitor.market_stats["REDUSDT"] = (2_000_000, 10)
+            for timestamp in range(300):
+                monitor.update({"REDUSDT": 100}, now=timestamp)
+            monitor.update({"REDUSDT": 104}, now=300)
+            self.assertEqual(
+                monitor.update({"REDUSDT": 104.1}, now=300), []
+            )
+            self.assertNotIn("REDUSDT", monitor.pending_candidates)
+            self.assertNotIn("REDUSDT", monitor.leaders)
+        finally:
+            monitor.close()
+
     def test_rejects_wide_spread_before_entry(self) -> None:
         monitor = MarketMonitor(
             "https://api.binance.com", ("BTTUSDT",), 300, 3, 1800
