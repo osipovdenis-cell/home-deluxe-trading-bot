@@ -143,6 +143,24 @@ def process_signal(
     )
     dynamics_payload = dynamics.as_dict()
     dynamics_payload["second_chance_90s"] = bool(signal.is_rescue)
+    dynamics_payload["leader_mode"] = (
+        signal.kind if "лидер" in signal.kind else None
+    )
+    if context is not None:
+        dynamics_payload.update({
+            "trend_change_15m_percent": context.trend_change_15m_percent,
+            "trend_change_60m_percent": context.trend_change_60m_percent,
+            "trend_change_240m_percent": context.trend_change_240m_percent,
+            "trend_efficiency_15m_percent": (
+                context.trend_efficiency_15m_percent
+            ),
+            "trend_efficiency_60m_percent": (
+                context.trend_efficiency_60m_percent
+            ),
+            "trend_efficiency_240m_percent": (
+                context.trend_efficiency_240m_percent
+            ),
+        })
     analysis = None
     if ai is not None:
         try:
@@ -295,7 +313,7 @@ def process_signal(
         if trader else None
     )
     signal_text = (
-            f"{'🚀' if signal.kind == 'сильный' else '⚡️'} "
+            f"{'🚀' if signal.kind == 'сильный' or 'лидер' in signal.kind else '⚡️'} "
             f"{signal.kind.capitalize()} сигнал {signal.symbol}\n"
             f"Изменение: +{signal.change_percent:.2f}% за "
             f"{signal.window_seconds // 60} мин.\n"
@@ -396,7 +414,11 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
                 + "\n\n" + audit.build_confirmation_audit(now).telegram_text()
             )
             telegram.send(chat_id, audit.candidate_pattern_report_text(now))
-            telegram.send(chat_id, audit.probability_shadow_report_text(now))
+            telegram.send(
+                chat_id,
+                audit.probability_shadow_report_text(now)
+                + "\n\n" + audit.leader_report_text(now),
+            )
             continue
         elif command in {"/help", "/start"}:
             text = (
@@ -491,6 +513,8 @@ def main() -> None:
             "и концентрация стенок стакана; пока теневой фактор.\n"
             "Вероятностная модель: теневой прогноз по прошлым исходам; "
             "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
+            "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
+            "повторный вход ищется после отката и нового ускорения.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "

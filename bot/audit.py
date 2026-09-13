@@ -695,6 +695,32 @@ class AuditLog:
         lines.append("Модель пока не открывает сделки — только проверяется.")
         return "\n".join(lines)
 
+    def leader_report_text(
+        self, now: float, lookback_seconds: int = 86400
+    ) -> str:
+        rows = self.connection.execute(
+            "SELECT s.signal_kind,COUNT(*),"
+            "SUM(CASE WHEN s.ai_decision='BUY' THEN 1 ELSE 0 END),"
+            "SUM(COALESCE(l.success_before_stop,0)),"
+            "COUNT(l.signal_id) FROM signal_events s "
+            "LEFT JOIN learning_examples l ON l.signal_id=s.id "
+            "WHERE s.timestamp>=? AND s.signal_kind LIKE '%лидер%' "
+            "GROUP BY s.signal_kind ORDER BY s.signal_kind",
+            (now - lookback_seconds,),
+        ).fetchall()
+        lines = ["🚀 Усиленное наблюдение за лидерами"]
+        if not rows:
+            lines.append("Сигналы лидеров пока не сформированы.")
+            return "\n".join(lines)
+        for kind, signals, ai_buys, successes, matured in rows:
+            rate = float(successes) / int(matured) * 100 if matured else 0.0
+            lines.append(
+                f"• {kind}: сигналов {signals}, AI BUY {ai_buys}; "
+                f"созрело {matured}, цель раньше стопа {successes} "
+                f"({rate:.1f}%)."
+            )
+        return "\n".join(lines)
+
     def active_confirmation_symbols(
         self, now: float, horizon_seconds: int = 900
     ) -> set[str]:

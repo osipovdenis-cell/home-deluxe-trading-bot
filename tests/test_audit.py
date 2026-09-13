@@ -7,6 +7,30 @@ from bot.audit import AuditLog, detect_pumps
 
 
 class AuditTests(unittest.TestCase):
+    def test_leader_report_summarizes_matured_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                signal_id = log.record_signal(
+                    100, "ROCKETUSDT", 1, "аномальный лидер", 3.5, 20,
+                    2_000_000, 82, "продолжение", ai_decision="BUY",
+                )
+                log.connection.execute(
+                    "INSERT INTO learning_examples("
+                    "signal_id,matured_at,signal_timestamp,symbol,"
+                    "success_before_stop,reached_second_target,"
+                    "maximum_return_percent,minimum_return_percent,"
+                    "setup_change_percent) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (signal_id, 1000, 100, "ROCKETUSDT", 1, 0, 0.8, -0.1, 3.5),
+                )
+                log.connection.commit()
+                report = log.leader_report_text(1000)
+                self.assertIn("аномальный лидер", report)
+                self.assertIn("AI BUY 1", report)
+                self.assertIn("100.0%", report)
+            finally:
+                log.close()
+
     def test_rescue_report_links_shadow_ai_decision_to_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))

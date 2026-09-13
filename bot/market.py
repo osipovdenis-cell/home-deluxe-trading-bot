@@ -84,6 +84,19 @@ class PendingCandidate:
     trigger_price: float
     peak_price: float
     samples: list[tuple[float, float]] = field(default_factory=list)
+    signal_kind: str | None = None
+
+
+@dataclass
+class LeaderState:
+    mode: str
+    detected_at: float
+    last_qualified_at: float
+    peak_price: float
+    trough_price: float
+    awaiting_pullback: bool = False
+    pullback_armed: bool = False
+    reentry_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +147,7 @@ class MarketMonitor:
         self.last_alert: dict[str, float] = {}
         self.pending_candidates: dict[str, PendingCandidate] = {}
         self.rescue_candidates: dict[str, PendingCandidate] = {}
+        self.leaders: dict[str, LeaderState] = {}
         self.confirmation_rejections: deque[tuple[float, str, str]] = deque()
         self.confirmation_events: deque[ConfirmationEvent] = deque()
         self.market_stats: dict[str, tuple[float, float]] = {}
@@ -517,6 +531,12 @@ class MarketMonitor:
     def update(self, prices: dict[str, float], now: float | None = None) -> list[PumpSignal]:
         now = time.time() if now is None else now
         candidates: list[PumpSignal] = []
+        top_24h = {
+            symbol for symbol, (_volume, change_24h) in sorted(
+                self.market_stats.items(), key=lambda item: item[1][1], reverse=True
+            )[:5]
+            if change_24h >= 5
+        }
         for symbol, price in prices.items():
             points = self.history[symbol]
             points.append((now, price))
@@ -527,6 +547,50 @@ class MarketMonitor:
                 continue
             minimum = min(value for _, value in points)
             change = (price / minimum - 1) * 100
+            _quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
+            leader_mode = None
+            if change >= self.threshold_percent:
+                leader_mode = "аномальный лидер"
+            elif symbol in top_24h:
+                leader_mode = "лидер"
+            leader = self.leaders.get(symbol)
+            if leader_mode is not None:
+                if leader is None:
+                    leader = LeaderState(
+                        leader_mode, now, now, price, price
+                    )
+                    self.leaders[symbol] = leader
+                else:
+                    leader.mode = leader_mode
+                    leader.last_qualified_at = now
+            elif leader is not None and now - leader.last_qualified_at > 900:
+                del self.leaders[symbol]
+                leader = None
+            if leader is not None:
+                previous_peak = leader.peak_price
+                if leader.awaiting_pullback:
+                    leader.peak_price = max(leader.peak_price, price)
+                    pullback = (price / leader.peak_price - 1) * 100
+                    if not leader.pullback_armed and pullback <= -0.25:
+                        leader.pullback_armed = True
+                        leader.trough_price = price
+                    if leader.pullback_armed:
+                        leader.trough_price = min(leader.trough_price, price)
+                        recovery = (price / leader.trough_price - 1) * 100
+                        recent_5s = self._period_change(points, now, 5)
+                        recent_10s = self._period_change(points, now, 10)
+                        if (
+                            recovery >= 0.15
+                            and recent_5s >= 0.03
+                            and recent_10s >= 0.06
+                            and price >= previous_peak * 0.997
+                        ):
+                            leader.reentry_ready = True
+                            leader.awaiting_pullback = False
+                            leader.pullback_armed = False
+                            leader.peak_price = price
+                else:
+                    leader.peak_price = max(leader.peak_price, price)
             rescue = self.rescue_candidates.get(symbol)
             if rescue is not None:
                 prior_peak = rescue.peak_price
@@ -563,7 +627,9 @@ class MarketMonitor:
                     quote_volume, change_24h = self.market_stats.get(
                         symbol, (0.0, 0.0)
                     )
-                    kind = "сильный" if change >= self.threshold_percent else "ранний"
+                    kind = rescue.signal_kind or (
+                        "сильный" if change >= self.threshold_percent else "ранний"
+                    )
                     candidates.append(PumpSignal(
                         symbol, price, change, self.window_seconds, kind,
                         quote_volume, change_24h, progress, pullback,
@@ -586,17 +652,27 @@ class MarketMonitor:
                         )
                     )
                     self.rescue_candidates[symbol] = PendingCandidate(
-                        now, price, price, [(now, price)]
+                        now, price, price, [(now, price)],
+                        pending.signal_kind,
                     )
                 continue
             last_alert = self.last_alert.get(symbol)
-            if last_alert is not None and now - last_alert < self.cooldown_seconds:
-                continue
+            leader_reentry = bool(leader and leader.reentry_ready)
             pending = self.pending_candidates.get(symbol)
+            if (
+                last_alert is not None
+                and now - last_alert < self.cooldown_seconds
+                and not leader_reentry
+                and pending is None
+            ):
+                continue
             if pending is None:
                 self.pending_candidates[symbol] = PendingCandidate(
-                    now, price, price, [(now, price)]
+                    now, price, price, [(now, price)],
+                    leader.mode if leader else None,
                 )
+                if leader_reentry:
+                    leader.reentry_ready = False
                 continue
             pending.peak_price = max(pending.peak_price, price)
             pending.samples.append((now, price))
@@ -621,7 +697,8 @@ class MarketMonitor:
                     )
                 )
                 self.rescue_candidates[symbol] = PendingCandidate(
-                    now, price, price, [(now, price)]
+                    now, price, price, [(now, price)],
+                    pending.signal_kind,
                 )
                 continue
             self.confirmation_events.append(
@@ -632,7 +709,9 @@ class MarketMonitor:
                 )
             )
             quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
-            kind = "сильный" if change >= self.threshold_percent else "ранний"
+            kind = pending.signal_kind or (
+                "сильный" if change >= self.threshold_percent else "ранний"
+            )
             candidates.append(
                 PumpSignal(
                     symbol,
@@ -652,6 +731,13 @@ class MarketMonitor:
         signals = candidates[: self.max_signals_per_cycle]
         for signal in signals:
             self.last_alert[signal.symbol] = now
+            leader = self.leaders.get(signal.symbol)
+            if leader is not None:
+                leader.awaiting_pullback = True
+                leader.pullback_armed = False
+                leader.reentry_ready = False
+                leader.peak_price = signal.price
+                leader.trough_price = signal.price
         return signals
 
     def close(self) -> None:

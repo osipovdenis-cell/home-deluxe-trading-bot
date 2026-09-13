@@ -101,7 +101,51 @@ class MarketMonitorTests(unittest.TestCase):
             )
             kinds = {signal.symbol: signal.kind for signal in signals}
             self.assertEqual(kinds["DOGEUSDT"], "ранний")
-            self.assertEqual(kinds["PEPEUSDT"], "сильный")
+            self.assertEqual(kinds["PEPEUSDT"], "аномальный лидер")
+        finally:
+            monitor.close()
+
+    def test_single_large_candle_becomes_anomalous_leader(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("ROCKETUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=0,
+        )
+        try:
+            monitor.market_stats["ROCKETUSDT"] = (2_000_000, 4)
+            monitor.update({"ROCKETUSDT": 100}, now=0)
+            monitor.update({"ROCKETUSDT": 104}, now=300)
+            signals = monitor.update({"ROCKETUSDT": 104.1}, now=300)
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0].kind, "аномальный лидер")
+            self.assertIn("ROCKETUSDT", monitor.leaders)
+        finally:
+            monitor.close()
+
+    def test_leader_can_reenter_after_pullback_and_reacceleration(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("LEADERUSDT",), 300, 3, 1800,
+            early_threshold_percent=0.5, entry_confirmation_seconds=0,
+        )
+        try:
+            monitor.market_stats["LEADERUSDT"] = (5_000_000, 20)
+            for timestamp in range(300):
+                monitor.update({"LEADERUSDT": 100}, now=timestamp)
+            monitor.update({"LEADERUSDT": 104}, now=300)
+            first = monitor.update({"LEADERUSDT": 104.1}, now=300)
+            self.assertEqual(len(first), 1)
+            for timestamp in range(301, 310):
+                monitor.update({"LEADERUSDT": 104.1}, now=timestamp)
+            monitor.update({"LEADERUSDT": 105}, now=310)
+            for timestamp in range(311, 320):
+                monitor.update({"LEADERUSDT": 105}, now=timestamp)
+            monitor.update({"LEADERUSDT": 104.6}, now=320)
+            for timestamp in range(321, 330):
+                price = 104.6 + (timestamp - 320) * 0.02
+                monitor.update({"LEADERUSDT": price}, now=timestamp)
+            monitor.update({"LEADERUSDT": 104.8}, now=330)
+            second = monitor.update({"LEADERUSDT": 104.9}, now=330)
+            self.assertEqual(len(second), 1)
+            self.assertIn("лидер", second[0].kind)
         finally:
             monitor.close()
 
