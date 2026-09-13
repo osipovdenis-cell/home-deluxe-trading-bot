@@ -17,17 +17,3 @@ jobs:
     steps:
       - name: Deploy tested main branch
         run: sudo /usr/local/sbin/deploy-home-deluxe-bot
-      - name: Collect sanitized diagnostics
-        if: always()
-        run: |
-          {
-            systemctl show home-deluxe-trading-bot -p ActiveState -p SubState -p NRestarts -p ExecMainStatus -p ExecMainStartTimestamp --no-pager
-            sudo /usr/local/sbin/diagnose-home-deluxe-bot
-          } > "$RUNNER_TEMP/home-deluxe-diagnostic.txt" 2>&1
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: home-deluxe-diagnostic
-          path: ${{ runner.temp }}/home-deluxe-diagnostic.txt
-          retention-days: 1
