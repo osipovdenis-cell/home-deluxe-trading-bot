@@ -228,18 +228,33 @@ class MarketMonitor:
         """Refresh Binance rolling 12-hour returns in API-safe batches."""
         selected = sorted(set(symbols) & self.symbols)
         changes: dict[str, float] = {}
-        for offset in range(0, len(selected), 100):
-            batch = selected[offset:offset + 100]
+
+        def fetch_batch(batch: list[str]) -> None:
             response = self.client.get(
                 "/api/v3/ticker",
                 params={
-                    "symbols": json.dumps(batch, separators=(",", ":")),
+                    "symbols": json.dumps(
+                        batch, separators=(",", ":"), ensure_ascii=False
+                    ),
                     "windowSize": "12h",
                     "type": "MINI",
                     "symbolStatus": "TRADING",
                 },
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPError as error:
+                # Binance rejects the complete list when just one recently
+                # delisted or unusual symbol is invalid. Isolate that symbol
+                # instead of crashing and restarting the whole bot.
+                if getattr(getattr(error, "response", None), "status_code", None) != 400:
+                    raise
+                if len(batch) == 1:
+                    return
+                middle = len(batch) // 2
+                fetch_batch(batch[:middle])
+                fetch_batch(batch[middle:])
+                return
             payload = response.json()
             rows = [payload] if isinstance(payload, dict) else payload
             for item in rows:
@@ -248,6 +263,9 @@ class MarketMonitor:
                 last_price = float(item.get("lastPrice", 0))
                 if symbol in batch and open_price > 0 and last_price > 0:
                     changes[symbol] = (last_price / open_price - 1) * 100
+
+        for offset in range(0, len(selected), 100):
+            fetch_batch(selected[offset:offset + 100])
         self.change_12h_percent = changes
         self.last_12h_refresh = time.time() if now is None else now
         return dict(changes)

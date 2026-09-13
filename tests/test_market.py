@@ -1,5 +1,6 @@
 import unittest
 import sys
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -7,6 +8,9 @@ try:
     import httpx  # noqa: F401
 except ModuleNotFoundError:
     class DummyHTTPError(Exception):
+        pass
+
+    class DummyHTTPStatusError(DummyHTTPError):
         pass
 
     class DummyClient:
@@ -19,12 +23,57 @@ except ModuleNotFoundError:
     sys.modules["httpx"] = SimpleNamespace(
         Client=DummyClient,
         HTTPError=DummyHTTPError,
+        HTTPStatusError=DummyHTTPStatusError,
     )
 
 from bot.market import MarketMonitor, SignalMarketContext
 
 
 class MarketMonitorTests(unittest.TestCase):
+    def test_bad_rolling_ticker_symbol_does_not_crash_refresh(self) -> None:
+        import httpx
+
+        if not hasattr(httpx, "HTTPError"):
+            httpx.HTTPError = RuntimeError
+
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("GOODUSDT", "BADUSDT"),
+            300, 3, 1800,
+        )
+
+        def response_for(_path, params=None):
+            symbols = json.loads(params["symbols"])
+            if "BADUSDT" in symbols:
+                response = Mock()
+                if hasattr(httpx, "HTTPStatusError") and hasattr(httpx, "Request"):
+                    request = httpx.Request(
+                        "GET", "https://api.binance.com/api/v3/ticker"
+                    )
+                    raw_response = httpx.Response(400, request=request)
+                    error = httpx.HTTPStatusError(
+                        "bad symbol", request=request, response=raw_response
+                    )
+                else:
+                    error = httpx.HTTPError("bad symbol")
+                    error.response = SimpleNamespace(status_code=400)
+                response.raise_for_status.side_effect = error
+                return response
+            response = Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = [
+                {"symbol": symbol, "openPrice": "100", "lastPrice": "101"}
+                for symbol in symbols
+            ]
+            return response
+
+        monitor.client = Mock()
+        monitor.client.get.side_effect = response_for
+        changes = monitor.refresh_12h_changes(
+            ("GOODUSDT", "BADUSDT"), now=1000
+        )
+        self.assertAlmostEqual(changes["GOODUSDT"], 1)
+        self.assertNotIn("BADUSDT", changes)
+
     def test_refreshes_rolling_12h_changes_from_binance(self) -> None:
         response = Mock()
         response.raise_for_status.return_value = None
