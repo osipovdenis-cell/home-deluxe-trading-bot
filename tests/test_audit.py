@@ -89,6 +89,35 @@ class AuditTests(unittest.TestCase):
                 self.assertIn("n=1", pattern)
             finally:
                 log.close()
+
+    def test_rejected_candidate_gets_outcome_from_confirmation_price(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                event = SimpleNamespace(
+                    started_at=0, resolved_at=20, symbol="REJECTEDUSDT",
+                    trigger_price=100, resolution_price=100.2,
+                    accepted=False, reason="нет продолжения",
+                    progress_percent=0.2, pullback_percent=-0.05,
+                    change_5s_percent=0.05, change_10s_percent=0.1,
+                )
+                event_id = log.record_confirmation_event(event)
+                for timestamp in range(0, 901):
+                    price = 100.2 if timestamp < 100 else 100.91
+                    log.record_confirmation_prices(
+                        {"REJECTEDUSDT": price}, timestamp
+                    )
+                self.assertEqual(
+                    log.refresh_confirmation_outcomes(901, 0.7, 0.5), 1
+                )
+                row = log.connection.execute(
+                    "SELECT delayed_success,delayed_stopped_first "
+                    "FROM confirmation_events WHERE id=?", (event_id,),
+                ).fetchone()
+                self.assertEqual(row, (1, 0))
+            finally:
+                log.close()
+
     def test_observer_reports_ai_decisions_and_rejections(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))

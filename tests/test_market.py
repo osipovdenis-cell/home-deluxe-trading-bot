@@ -207,6 +207,28 @@ class MarketMonitorTests(unittest.TestCase):
         self.assertEqual(context.trades_5m, 50)
         self.assertEqual(context.taker_buy_ratio_percent, 60)
 
+    def test_builds_multi_hour_trend_context(self) -> None:
+        rows = []
+        for index in range(241):
+            close = 1 + index / 1000
+            rows.append(
+                [index, str(close), str(close), str(close), str(close), "1",
+                 index, 100, 10, "0", 55]
+            )
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = rows
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("AAAUSDT",), 300, 3, 1800
+        )
+        monitor.client = Mock()
+        monitor.client.get.return_value = response
+        context = monitor.fetch_signal_context("AAAUSDT")
+        self.assertGreater(context.trend_change_15m_percent, 1)
+        self.assertGreater(context.trend_change_60m_percent, 5)
+        self.assertGreater(context.trend_change_240m_percent, 20)
+        self.assertAlmostEqual(context.trend_efficiency_240m_percent, 100)
+
     def test_builds_order_book_context(self) -> None:
         rows = []
         for index in range(25):

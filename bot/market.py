@@ -40,6 +40,12 @@ class SignalMarketContext:
     large_trade_count_60s: int | None = None
     bid_wall_share_percent: float | None = None
     ask_wall_share_percent: float | None = None
+    trend_change_15m_percent: float | None = None
+    trend_change_60m_percent: float | None = None
+    trend_change_240m_percent: float | None = None
+    trend_efficiency_15m_percent: float | None = None
+    trend_efficiency_60m_percent: float | None = None
+    trend_efficiency_240m_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -232,14 +238,16 @@ class MarketMonitor:
     def fetch_signal_context(self, symbol: str) -> SignalMarketContext:
         response = self.client.get(
             "/api/v3/klines",
-            params={"symbol": symbol, "interval": "1m", "limit": 25},
+            params={"symbol": symbol, "interval": "1m", "limit": 241},
         )
         response.raise_for_status()
         rows = response.json()
         if len(rows) < 10:
             raise ValueError("Недостаточно минутных свечей для анализа объёма")
         recent = rows[-5:]
-        previous = rows[:-5]
+        # Keep the established 20-minute volume baseline unchanged while the
+        # extra candles are used only by the new shadow trend features.
+        previous = rows[-25:-5]
         recent_quote_volume = sum(float(row[7]) for row in recent)
         previous_quote_volume = sum(float(row[7]) for row in previous)
         comparable_blocks = len(previous) / 5
@@ -258,6 +266,25 @@ class MarketMonitor:
             if recent_quote_volume > 0
             else 0.0
         )
+
+        def trend_metrics(minutes: int) -> tuple[float | None, float | None]:
+            period = rows[-(minutes + 1):]
+            if len(period) < min(minutes + 1, 10):
+                return None, None
+            closes = [float(row[4]) for row in period]
+            if closes[0] <= 0:
+                return None, None
+            change = (closes[-1] / closes[0] - 1) * 100
+            travelled = sum(
+                abs(current - previous)
+                for previous, current in zip(closes, closes[1:])
+            ) / closes[0] * 100
+            efficiency = change / travelled * 100 if travelled > 0 else 0.0
+            return change, efficiency
+
+        trend_15m = trend_metrics(15)
+        trend_60m = trend_metrics(60)
+        trend_240m = trend_metrics(240)
         spread_bps = None
         bid_depth = None
         ask_depth = None
@@ -355,6 +382,12 @@ class MarketMonitor:
             *large_flow,
             bid_wall_share,
             ask_wall_share,
+            trend_15m[0],
+            trend_60m[0],
+            trend_240m[0],
+            trend_15m[1],
+            trend_60m[1],
+            trend_240m[1],
         )
 
     def execution_safety(

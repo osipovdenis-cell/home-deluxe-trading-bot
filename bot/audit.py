@@ -5,6 +5,8 @@ from pathlib import Path
 import sqlite3
 import time
 
+from bot.probability import FEATURE_NAMES, train_probability_model
+
 
 @dataclass(frozen=True)
 class AuditSummary:
@@ -312,6 +314,8 @@ class AuditLog:
         database.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(database)
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self._probability_cache = None
+        self._probability_cache_at = 0.0
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS samples (
@@ -509,6 +513,10 @@ class AuditLog:
             "large_sell_volume_60s_usdt", "large_trade_imbalance_60s_percent",
             "large_trade_count_60s", "bid_wall_share_percent",
             "ask_wall_share_percent",
+            "trend_change_15m_percent", "trend_change_60m_percent",
+            "trend_change_240m_percent", "trend_efficiency_15m_percent",
+            "trend_efficiency_60m_percent", "trend_efficiency_240m_percent",
+            "shadow_probability_percent", "shadow_model_examples",
         ):
             if column not in confirmation_columns:
                 self.connection.execute(
@@ -536,6 +544,34 @@ class AuditLog:
 
     def record_confirmation_event(self, event, context=None, dynamics=None) -> int:
         dynamic_values = dynamics.as_dict() if dynamics is not None else {}
+        feature_values = {
+            "confirmation_progress_percent": getattr(event, "progress_percent", None),
+            "confirmation_change_5s_percent": getattr(event, "change_5s_percent", None),
+            "confirmation_change_10s_percent": getattr(event, "change_10s_percent", None),
+            "volume_ratio_5m": getattr(context, "volume_ratio_5m", None),
+            "taker_buy_ratio_percent": getattr(context, "taker_buy_ratio_percent", None),
+            "order_book_imbalance_percent": getattr(context, "order_book_imbalance_percent", None),
+            "spread_bps": getattr(context, "spread_bps", None),
+            "change_15s_percent": dynamic_values.get("change_15s_percent"),
+            "change_60s_percent": dynamic_values.get("change_60s_percent"),
+            "pullback_from_high_percent": dynamic_values.get("pullback_from_5m_high_percent"),
+            "btc_change_300s_percent": dynamic_values.get("btc_change_300s_percent"),
+            "market_breadth_60s_percent": dynamic_values.get("market_breadth_60s_percent"),
+            "large_buy_volume_15s_usdt": getattr(context, "large_buy_volume_15s_usdt", None),
+            "large_sell_volume_15s_usdt": getattr(context, "large_sell_volume_15s_usdt", None),
+            "large_buy_volume_60s_usdt": getattr(context, "large_buy_volume_60s_usdt", None),
+            "large_sell_volume_60s_usdt": getattr(context, "large_sell_volume_60s_usdt", None),
+            "large_trade_imbalance_60s_percent": getattr(context, "large_trade_imbalance_60s_percent", None),
+            "large_trade_count_60s": getattr(context, "large_trade_count_60s", None),
+            "trend_change_15m_percent": getattr(context, "trend_change_15m_percent", None),
+            "trend_change_60m_percent": getattr(context, "trend_change_60m_percent", None),
+            "trend_change_240m_percent": getattr(context, "trend_change_240m_percent", None),
+            "trend_efficiency_15m_percent": getattr(context, "trend_efficiency_15m_percent", None),
+            "trend_efficiency_60m_percent": getattr(context, "trend_efficiency_60m_percent", None),
+            "trend_efficiency_240m_percent": getattr(context, "trend_efficiency_240m_percent", None),
+        }
+        model = self._current_probability_model(float(event.started_at))
+        probability = model.predict_percent(feature_values) if model else None
         cursor = self.connection.execute(
             "INSERT INTO confirmation_events("
             "started_at,resolved_at,symbol,trigger_price,resolution_price,"
@@ -549,8 +585,12 @@ class AuditLog:
             "large_sell_volume_15s_usdt,large_buy_volume_60s_usdt,"
             "large_sell_volume_60s_usdt,large_trade_imbalance_60s_percent,"
             "large_trade_count_60s,bid_wall_share_percent,"
-            "ask_wall_share_percent) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "ask_wall_share_percent,trend_change_15m_percent,"
+            "trend_change_60m_percent,trend_change_240m_percent,"
+            "trend_efficiency_15m_percent,trend_efficiency_60m_percent,"
+            "trend_efficiency_240m_percent,shadow_probability_percent,"
+            "shadow_model_examples) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 event.started_at, event.resolved_at, event.symbol,
                 event.trigger_price, event.resolution_price,
@@ -577,10 +617,83 @@ class AuditLog:
                 getattr(context, "large_trade_count_60s", None),
                 getattr(context, "bid_wall_share_percent", None),
                 getattr(context, "ask_wall_share_percent", None),
+                getattr(context, "trend_change_15m_percent", None),
+                getattr(context, "trend_change_60m_percent", None),
+                getattr(context, "trend_change_240m_percent", None),
+                getattr(context, "trend_efficiency_15m_percent", None),
+                getattr(context, "trend_efficiency_60m_percent", None),
+                getattr(context, "trend_efficiency_240m_percent", None),
+                probability,
+                model.examples if model else None,
             ),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def _probability_samples(self, before: float) -> list[tuple[int, dict]]:
+        columns = ",".join(FEATURE_NAMES)
+        rows = self.connection.execute(
+            f"SELECT delayed_success,{columns} FROM confirmation_events "
+            "WHERE evaluated_at IS NOT NULL AND delayed_success IS NOT NULL "
+            "AND started_at < ? "
+            "ORDER BY started_at DESC LIMIT 5000",
+            (before,),
+        ).fetchall()
+        rows.reverse()
+        return [
+            (int(row[0]), dict(zip(FEATURE_NAMES, row[1:])))
+            for row in rows
+        ]
+
+    def _current_probability_model(self, now: float):
+        if self._probability_cache is None or now - self._probability_cache_at >= 300:
+            self._probability_cache = train_probability_model(
+                self._probability_samples(now)
+            )
+            self._probability_cache_at = now
+        return self._probability_cache
+
+    def probability_shadow_report_text(
+        self, now: float, lookback_seconds: int = 7 * 86400
+    ) -> str:
+        model = self._current_probability_model(now)
+        lines = ["🎯 Теневая вероятностная модель"]
+        if model is None:
+            count = len(self._probability_samples(now))
+            lines.append(f"Обучение накапливается: {count}/400 примеров.")
+            return "\n".join(lines)
+        lines.extend((
+            f"Обучающих примеров: {model.examples}; контрольных: "
+            f"{model.validation_examples}.",
+            f"Контрольная база: {model.validation_base_rate_percent:.1f}%; "
+            f"верхняя четверть прогнозов: "
+            f"{model.validation_top_quartile_rate_percent:.1f}%.",
+            f"Brier score: {model.validation_brier_score:.3f} "
+            "(меньше — лучше).",
+        ))
+        rows = self.connection.execute(
+            "SELECT shadow_probability_percent,delayed_success "
+            "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
+            "AND delayed_success IS NOT NULL AND started_at>=? "
+            "AND shadow_probability_percent IS NOT NULL",
+            (now - lookback_seconds,),
+        ).fetchall()
+        if not rows:
+            lines.append("Новые прогнозы ещё не созрели 15 минут.")
+            return "\n".join(lines)
+        buckets = ((0, 30), (30, 40), (40, 50), (50, 60), (60, 101))
+        for lower, upper in buckets:
+            bucket = [row for row in rows if lower <= float(row[0]) < upper]
+            if not bucket:
+                continue
+            successes = sum(int(row[1]) for row in bucket)
+            label = f"{lower}–{upper - 1}%" if upper < 101 else "60%+"
+            lines.append(
+                f"• прогноз {label}: {successes}/{len(bucket)} "
+                f"({successes / len(bucket) * 100:.1f}%)."
+            )
+        lines.append("Модель пока не открывает сделки — только проверяется.")
+        return "\n".join(lines)
 
     def active_confirmation_symbols(
         self, now: float, horizon_seconds: int = 900
@@ -631,7 +744,8 @@ class AuditLog:
         rows = self.connection.execute(
             "SELECT id,started_at,resolved_at,symbol,trigger_price,"
             "resolution_price,accepted FROM confirmation_events "
-            "WHERE evaluated_at IS NULL AND started_at <= ? ORDER BY id",
+            "WHERE (evaluated_at IS NULL OR delayed_success IS NULL) "
+            "AND started_at <= ? ORDER BY id",
             (now - horizon_seconds,),
         ).fetchall()
         updated = 0
@@ -648,15 +762,14 @@ class AuditLog:
                 immediate_prices, float(trigger), target_percent, stop_percent
             )
             delayed = (None, None, None, None)
-            if int(accepted):
-                delayed_prices = [
-                    float(price) for timestamp, price in points
-                    if float(timestamp) >= float(resolved_at)
-                ]
-                if delayed_prices:
-                    delayed = self._path_outcome(
-                        delayed_prices, float(resolved), target_percent, stop_percent
-                    )
+            delayed_prices = [
+                float(price) for timestamp, price in points
+                if float(timestamp) >= float(resolved_at)
+            ]
+            if delayed_prices:
+                delayed = self._path_outcome(
+                    delayed_prices, float(resolved), target_percent, stop_percent
+                )
             self.connection.execute(
                 "UPDATE confirmation_events SET evaluated_at=?,"
                 "immediate_success=?,immediate_stopped_first=?,"
@@ -1120,7 +1233,10 @@ class AuditLog:
             ",large_trade_threshold_usdt,large_buy_volume_15s_usdt,"
             "large_sell_volume_15s_usdt,large_buy_volume_60s_usdt,"
             "large_sell_volume_60s_usdt,large_trade_imbalance_60s_percent,"
-            "large_trade_count_60s,bid_wall_share_percent,ask_wall_share_percent "
+            "large_trade_count_60s,bid_wall_share_percent,ask_wall_share_percent,"
+            "trend_change_15m_percent,trend_change_60m_percent,"
+            "trend_change_240m_percent,trend_efficiency_15m_percent,"
+            "trend_efficiency_60m_percent,trend_efficiency_240m_percent "
             "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
             "AND started_at>=? AND confirmation_progress_percent IS NOT NULL",
             (now - lookback_seconds,),
@@ -1151,6 +1267,12 @@ class AuditLog:
             ("крупных сделок 60 с", 17, ""),
             ("доля крупнейшей bid-стенки", 18, "%"),
             ("доля крупнейшей ask-стенки", 19, "%"),
+            ("тренд за 15 мин", 20, "%"),
+            ("тренд за 1 ч", 21, "%"),
+            ("тренд за 4 ч", 22, "%"),
+            ("эффективность тренда 15 мин", 23, "%"),
+            ("эффективность тренда 1 ч", 24, "%"),
+            ("эффективность тренда 4 ч", 25, "%"),
         )
         lines = ["🔬 Победители против остальных"]
         if rows:

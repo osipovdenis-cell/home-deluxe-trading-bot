@@ -390,11 +390,14 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
         elif command == "/ai":
             text = audit.recent_ai_decisions_text()
         elif command == "/learning":
-            text = (
+            telegram.send(
+                chat_id,
                 audit.build_learning_report(now).telegram_text()
                 + "\n\n" + audit.build_confirmation_audit(now).telegram_text()
-                + "\n\n" + audit.candidate_pattern_report_text(now)
             )
+            telegram.send(chat_id, audit.candidate_pattern_report_text(now))
+            telegram.send(chat_id, audit.probability_shadow_report_text(now))
+            continue
         elif command in {"/help", "/start"}:
             text = (
                 "👁 Команды наблюдателя\n"
@@ -486,6 +489,8 @@ def main() -> None:
             "анализ только при новом ускорении.\n"
             "Крупный поток: исполненные крупные покупки/продажи за 15/60 сек "
             "и концентрация стенок стакана; пока теневой фактор.\n"
+            "Вероятностная модель: теневой прогноз по прошлым исходам; "
+            "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
