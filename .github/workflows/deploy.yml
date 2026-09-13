@@ -1,0 +1,19 @@
+name: Deploy bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: home-deluxe-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.actor == 'osipovdenis-cell'
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 10
+    steps:
+      - name: Deploy tested main branch
+        run: sudo /usr/local/sbin/deploy-home-deluxe-bot

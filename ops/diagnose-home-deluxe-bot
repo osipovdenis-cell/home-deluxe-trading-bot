@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+cd /root/bot
+echo "=== BOT ==="
+echo "commit=$(git rev-parse --short HEAD)"
+echo "service=$(systemctl is-active home-deluxe-trading-bot)"
+echo
+echo "=== TESTS ==="
+/root/.venv/bin/python -m unittest discover -s tests -q
+echo
+echo "=== RECENT ERRORS (6h) ==="
+journalctl -u home-deluxe-trading-bot --since "6 hours ago" --no-pager |
+  grep -Ei "error|ошиб|exception|traceback|429|timeout|failed" |
+  tail -n 100 || true

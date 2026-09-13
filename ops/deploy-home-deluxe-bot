@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+exec 9>/run/lock/home-deluxe-trading-bot-deploy.lock
+flock -n 9 || { echo "Deployment already running"; exit 0; }
+
+cd /root/bot
+echo "Fetching main..."
+git fetch origin main
+git merge --ff-only origin/main
+
+echo "Running tests..."
+/root/.venv/bin/python -m unittest discover -s tests -q
+
+echo "Restarting bot..."
+systemctl restart home-deluxe-trading-bot
+systemctl is-active --quiet home-deluxe-trading-bot
+echo "Bot is active on commit $(git rev-parse --short HEAD)"
