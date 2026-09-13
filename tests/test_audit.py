@@ -4,9 +4,46 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bot.audit import AuditLog, detect_pumps
+from bot.probability import FEATURE_NAMES, train_probability_model
 
 
 class AuditTests(unittest.TestCase):
+    def test_probability_report_keeps_validation_and_shadow_counts_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                samples = []
+                for index in range(500):
+                    features = {name: None for name in FEATURE_NAMES}
+                    features["confirmation_progress_percent"] = index % 10
+                    samples.append((int(index % 5 == 0), features))
+                model = train_probability_model(samples)
+                log._probability_cache = model
+                log._probability_cache_at = 1000
+                event = SimpleNamespace(
+                    started_at=900, resolved_at=920, symbol="MODELUSDT",
+                    trigger_price=100, resolution_price=100,
+                    accepted=False, reason="shadow", progress_percent=0.1,
+                    pullback_percent=0, change_5s_percent=0.1,
+                    change_10s_percent=0.1,
+                )
+                event_id = log.record_confirmation_event(event)
+                log.connection.execute(
+                    "UPDATE confirmation_events SET evaluated_at=999,"
+                    "delayed_success=1,delayed_stopped_first=0,"
+                    "shadow_probability_percent=45,spread_bps=10 WHERE id=?",
+                    (event_id,),
+                )
+                log.connection.commit()
+                report = log.probability_shadow_report_text(1000)
+                self.assertIn("только отложенная выборка", report)
+                self.assertIn("отдельная выборка, не контрольная", report)
+                self.assertIn("Прогноз 40%+: 1", report)
+                bucket_total = sum(item[3] for item in model.validation_buckets)
+                self.assertEqual(bucket_total, model.validation_examples)
+            finally:
+                log.close()
+
     def test_leader_report_summarizes_matured_signals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))

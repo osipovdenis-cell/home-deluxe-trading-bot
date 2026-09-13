@@ -23,6 +23,10 @@ class ProbabilityModelTests(unittest.TestCase):
             model.validation_top_quartile_rate_percent,
             model.validation_base_rate_percent,
         )
+        self.assertEqual(
+            sum(bucket[3] for bucket in model.validation_buckets),
+            model.validation_examples,
+        )
         winner = {name: None for name in FEATURE_NAMES}
         winner.update({
             "confirmation_progress_percent": 0.2,

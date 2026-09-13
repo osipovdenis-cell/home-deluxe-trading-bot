@@ -671,8 +671,18 @@ class AuditLog:
             f"Brier score: {model.validation_brier_score:.3f} "
             "(меньше — лучше).",
         ))
+        lines.append("Контрольные диапазоны (только отложенная выборка):")
+        for lower, upper, successes, count in model.validation_buckets:
+            if not count:
+                continue
+            label = f"{lower}–{upper - 1}%" if upper < 101 else "60%+"
+            lines.append(
+                f"• прогноз {label}: {successes}/{count} "
+                f"({successes / count * 100:.1f}%)."
+            )
         rows = self.connection.execute(
-            "SELECT shadow_probability_percent,delayed_success "
+            "SELECT shadow_probability_percent,delayed_success,"
+            "delayed_stopped_first,COALESCE(spread_bps,0) "
             "FROM confirmation_events WHERE evaluated_at IS NOT NULL "
             "AND delayed_success IS NOT NULL AND started_at>=? "
             "AND shadow_probability_percent IS NOT NULL",
@@ -681,16 +691,26 @@ class AuditLog:
         if not rows:
             lines.append("Новые прогнозы ещё не созрели 15 минут.")
             return "\n".join(lines)
-        buckets = ((0, 30), (30, 40), (40, 50), (50, 60), (60, 101))
-        for lower, upper in buckets:
-            bucket = [row for row in rows if lower <= float(row[0]) < upper]
-            if not bucket:
-                continue
-            successes = sum(int(row[1]) for row in bucket)
-            label = f"{lower}–{upper - 1}%" if upper < 101 else "60%+"
+        strong = [row for row in rows if float(row[0]) >= 40]
+        lines.append(
+            f"Созревшие теневые прогнозы за {lookback_seconds // 86400} дн.: "
+            f"{len(rows)} (это отдельная выборка, не контрольная)."
+        )
+        if strong:
+            successes = sum(int(row[1]) for row in strong)
+            stops = sum(int(row[2] or 0) for row in strong)
+            neutral = len(strong) - successes - stops
+            # Conservative paper estimate: 0.1% fee on entry and exit plus
+            # the observed entry spread. Neutral observations are closed flat.
+            net = sum(
+                (0.7 if int(row[1]) else -0.5 if int(row[2] or 0) else 0.0)
+                - 0.2 - float(row[3] or 0) / 100
+                for row in strong
+            )
             lines.append(
-                f"• прогноз {label}: {successes}/{len(bucket)} "
-                f"({successes / len(bucket) * 100:.1f}%)."
+                f"Прогноз 40%+: {len(strong)}; цели {successes}, стопы "
+                f"{stops}, нейтральные {neutral}; расчётный итог "
+                f"{net:+.2f}% (комиссия 0,2% + фактический спред)."
             )
         lines.append("Модель пока не открывает сделки — только проверяется.")
         return "\n".join(lines)

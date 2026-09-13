@@ -44,6 +44,7 @@ class ProbabilityModel:
     validation_base_rate_percent: float
     validation_top_quartile_rate_percent: float
     validation_brier_score: float
+    validation_buckets: tuple[tuple[int, int, int, int], ...]
 
     def predict_percent(self, features: dict) -> float:
         values = _transform(features, self.medians, self.means, self.scales)
@@ -169,6 +170,14 @@ def train_probability_model(
         (probability - label) ** 2
         for probability, label in validation_predictions
     ) / len(validation_predictions)
+    bucket_ranges = ((0, 30), (30, 40), (40, 50), (50, 60), (60, 101))
+    validation_buckets = []
+    for lower, upper in bucket_ranges:
+        bucket = [
+            label for probability, label in validation_predictions
+            if lower <= probability * 100 < upper
+        ]
+        validation_buckets.append((lower, upper, sum(bucket), len(bucket)))
 
     # The validation slice remains untouched for the measurements above.  The
     # production shadow prediction is then fitted on every already matured event.
@@ -176,5 +185,5 @@ def train_probability_model(
     return ProbabilityModel(
         FEATURE_NAMES, medians, means, scales, weights, intercept,
         len(samples), len(validation_predictions), base_rate * 100,
-        top_rate * 100, brier,
+        top_rate * 100, brier, tuple(validation_buckets),
     )
