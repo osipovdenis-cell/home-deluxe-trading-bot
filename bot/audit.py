@@ -1437,9 +1437,10 @@ class AuditLog:
             "SELECT reason FROM paper_entry_rejections WHERE timestamp >= ?",
             (since,),
         ).fetchall()
-        error_count = int(self.connection.execute(
-            "SELECT COUNT(*) FROM errors WHERE timestamp >= ?", (since,)
-        ).fetchone()[0])
+        error_rows = self.connection.execute(
+            "SELECT message FROM errors WHERE timestamp >= ?", (since,)
+        ).fetchall()
+        error_count = len(error_rows)
         if not decisions and not rejection_rows and not error_count:
             return None
         decision_counts = {str(name or "ERROR"): int(count) for name, count in decisions}
@@ -1455,13 +1456,32 @@ class AuditLog:
             f"{name} {count}"
             for name, count in sorted(categories.items(), key=lambda item: -item[1])[:5]
         ) or "нет"
+        error_categories: dict[str, int] = {}
+        for row in error_rows:
+            message = str(row[0] or "").lower()
+            if message.startswith("openai") or "openai" in message:
+                category = "OpenAI"
+            elif "telegram" in message:
+                category = "Telegram"
+            elif "binance" in message or "context" in message:
+                category = "Binance/данные"
+            else:
+                category = "другие"
+            error_categories[category] = error_categories.get(category, 0) + 1
+        errors_text = ", ".join(
+            f"{name} {count}"
+            for name, count in sorted(
+                error_categories.items(), key=lambda item: -item[1]
+            )
+        )
         return (
             "👁 Наблюдатель AI-бота\n"
             f"Период: {hours:.1f} ч.\n"
             f"Решения AI: {decisions_text}.\n"
             f"Отклонено до покупки: {len(rejection_rows)}.\n"
             f"Основные причины: {filters_text}.\n"
-            f"Технические ошибки: {error_count}."
+            f"Технические ошибки: {error_count}"
+            + (f" ({errors_text})." if errors_text else ".")
         )
 
     def build_symbol_behavior(

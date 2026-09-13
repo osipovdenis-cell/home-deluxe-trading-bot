@@ -411,6 +411,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
         if command == "/status":
             text = (
                 trader.summary(prices, now).telegram_text()
+                + "\n\n" + trader.rocket_report_text(prices, now)
                 if trader is not None else "🧪 Тестовая торговля выключена."
             )
         elif command == "/ai":
@@ -428,6 +429,8 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
                 audit.probability_shadow_report_text(now)
                 + "\n\n" + audit.leader_report_text(now),
             )
+            if trader is not None:
+                telegram.send(chat_id, trader.rocket_report_text(prices, now))
             continue
         elif command in {"/help", "/start"}:
             text = (
@@ -528,13 +531,16 @@ def main() -> None:
             "Вероятностная модель: теневой прогноз по прошлым исходам; "
             "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
             "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
-            "повторный вход ищется после отката и нового ускорения.\n"
+            "повторный вход ищется после отката и нового ускорения; AI оценивает, "
+            "но после рыночных фильтров не блокирует тестовый вход.\n"
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций, вход от "
                f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
-               "Выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%.\n"
+               "Обычный выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%. "
+               "Лидер: держим 100%; после +1% защищаем минимум +1% и "
+               "выходим при откате 1 п.п. от максимума.\n"
                if trader else "Тестовые сделки: выключены.\n")
             + f"ИИ-аналитик: {ai_status}.\nСуточный аудит: включён.",
         )
@@ -666,12 +672,18 @@ def main() -> None:
                         now, last_observer
                     )
                     if observer_text:
+                        rocket_text = (
+                            "\n\n" + trader.rocket_report_text(
+                                prices, now, last_observer
+                            ) if trader is not None else ""
+                        )
                         telegram.send(
                             chat_id,
                             observer_text + "\n\n"
                             + audit.build_learning_report(now).telegram_text()
                             + "\n\n"
-                            + audit.build_confirmation_audit(now).telegram_text(),
+                            + audit.build_confirmation_audit(now).telegram_text()
+                            + rocket_text,
                         )
                     last_observer = now
                 time.sleep(0.1)

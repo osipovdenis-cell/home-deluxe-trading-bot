@@ -36,6 +36,10 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertEqual(closed[0].remaining_percent, 0)
                 self.assertIn("откат 1 п.п.", closed[0].reason)
                 self.assertGreater(closed[0].pnl_percent, 8)
+                report = trader.rocket_report_text({"ROCKETUSDT": 109}, 40)
+                self.assertIn("Входов: 1", report)
+                self.assertIn("выходов по откату: 1", report)
+                self.assertIn("Максимальный рост после входа: 10.00%", report)
             finally:
                 trader.close()
 

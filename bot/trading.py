@@ -707,6 +707,49 @@ class PaperTrader:
             sum(value > 0 for value in values),
         )
 
+    def rocket_report_text(
+        self,
+        prices: dict[str, float],
+        now: float,
+        since: float | None = None,
+    ) -> str:
+        if since is None:
+            since = float(self.connection.execute(
+                "SELECT report_started_at FROM paper_account WHERE id = 1"
+            ).fetchone()[0])
+        rows = self.connection.execute(
+            "SELECT * FROM paper_positions WHERE opened_at >= ? "
+            "AND opened_at < ? AND signal_kind LIKE '%лидер%' ORDER BY opened_at",
+            (since, now),
+        ).fetchall()
+        if not rows:
+            return "🚀 Сделки по ракетам: входов за период пока нет."
+        closed = [row for row in rows if row["status"] == "CLOSED"]
+        opened = [row for row in rows if row["status"] == "OPEN"]
+        protected = sum(bool(row["take_1_done"]) for row in rows)
+        trailing = sum("ракета:" in str(row["close_reason"] or "") for row in closed)
+        stops = sum(str(row["close_reason"] or "") == "стоп-лосс" for row in closed)
+        realized = sum(float(row["realized_pnl_usdt"]) for row in closed)
+        unrealized = 0.0
+        mfe: list[float] = []
+        for row in rows:
+            entry = float(row["entry_price"])
+            mfe.append((float(row["highest_price"]) / entry - 1) * 100)
+            if row["status"] == "OPEN":
+                current = prices.get(str(row["symbol"]), entry)
+                change = (current / entry - 1) * 100 - self.round_trip_cost_percent
+                unrealized += float(row["position_usdt"]) * change / 100
+        return (
+            "🚀 Сделки по ракетам\n"
+            f"Входов: {len(rows)}; закрыто {len(closed)}, открыто {len(opened)}.\n"
+            f"Защита +1% включалась: {protected}; выходов по откату: {trailing}; "
+            f"стопов: {stops}.\n"
+            f"Реализованный результат: {realized:+.3f} USDT; "
+            f"открытый: {unrealized:+.3f} USDT.\n"
+            f"Максимальный рост после входа: {max(mfe):.2f}%; "
+            f"средний: {sum(mfe) / len(mfe):.2f}%."
+        )
+
     def _control_strategy_pnl(
         self,
         entry_price: float,

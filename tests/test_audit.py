@@ -191,11 +191,15 @@ class AuditTests(unittest.TestCase):
                 log.record_entry_rejection(
                     101, "WATCHUSDT", "AI решил SKIP", 1, 0.01
                 )
+                log.record_error("OpenAI: timeout", 102)
+                log.record_error("Binance context unavailable", 103)
                 decisions = log.recent_ai_decisions_text()
                 observer = log.observer_report_text(200, 0)
                 self.assertIn("WATCHUSDT: SKIP, 31/100", decisions)
                 self.assertIn("Решения AI: SKIP 1", observer)
                 self.assertIn("решение AI 1", observer)
+                self.assertIn("OpenAI 1", observer)
+                self.assertIn("Binance/данные 1", observer)
             finally:
                 log.close()
 
