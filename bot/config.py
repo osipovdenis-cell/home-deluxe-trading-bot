@@ -84,7 +84,7 @@ def load_settings() -> Settings:
             if symbol.strip()
         ),
         scan_all_usdt=_env_bool("SCAN_ALL_USDT", True),
-        min_quote_volume_usdt=float(os.getenv("MIN_QUOTE_VOLUME_USDT", "500000")),
+        min_quote_volume_usdt=float(os.getenv("MIN_QUOTE_VOLUME_USDT", "100000")),
         pump_window_seconds=int(os.getenv("PUMP_WINDOW_SECONDS", "300")),
         early_threshold_percent=float(os.getenv("EARLY_THRESHOLD_PERCENT", "0.5")),
         pump_threshold_percent=float(os.getenv("PUMP_THRESHOLD_PERCENT", "3")),

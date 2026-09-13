@@ -88,7 +88,8 @@ BTC и ширина рынка. Неполные или противоречив
 По умолчанию включено динамическое сканирование всех активных Spot-пар к USDT.
 Режим, минимальный оборот, ранний и сильный пороги, частота проверки и пауза между
 повторными уведомлениями настраиваются переменными `SCAN_ALL_USDT`,
-`MIN_QUOTE_VOLUME_USDT`, `EARLY_THRESHOLD_PERCENT`, `PUMP_THRESHOLD_PERCENT`,
+`MIN_QUOTE_VOLUME_USDT` (по умолчанию `100000`), `EARLY_THRESHOLD_PERCENT`,
+`PUMP_THRESHOLD_PERCENT`,
 `POLL_INTERVAL_SECONDS`, `ALERT_COOLDOWN_SECONDS` и
 `TELEGRAM_SIGNAL_ALERTS_ENABLED`.
 
