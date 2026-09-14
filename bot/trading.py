@@ -752,6 +752,95 @@ class PaperTrader:
             f"средний: {sum(mfe) / len(mfe):.2f}%."
         )
 
+    def post_stop_report_text(
+        self,
+        now: float,
+        since: float | None = None,
+        horizon_seconds: int = 3600,
+    ) -> str:
+        """Measure the path after a stop without changing the trading stop."""
+        if since is None:
+            since = float(self.connection.execute(
+                "SELECT report_started_at FROM paper_account WHERE id = 1"
+            ).fetchone()[0])
+        samples_table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='samples'"
+        ).fetchone()
+        if samples_table is None:
+            return "📉 После стопа: ценовые наблюдения пока отсутствуют."
+        stopped = self.connection.execute(
+            "SELECT p.id,p.symbol,p.entry_price,p.closed_at,p.signal_kind,f.price "
+            "FROM paper_positions p JOIN paper_fills f ON f.position_id=p.id "
+            "WHERE p.status='CLOSED' AND p.close_reason='стоп-лосс' "
+            "AND f.reason='стоп-лосс' AND p.closed_at>=? AND p.closed_at<? "
+            "ORDER BY p.closed_at",
+            (since, now),
+        ).fetchall()
+        if not stopped:
+            return "📉 После стопа: стопов за период пока нет."
+
+        observations = []
+        pending = 0
+        for row in stopped:
+            closed_at = float(row[3])
+            if now < closed_at + horizon_seconds:
+                pending += 1
+                continue
+            prices = self.connection.execute(
+                "SELECT timestamp,price FROM samples WHERE symbol=? "
+                "AND timestamp>=? AND timestamp<=? ORDER BY timestamp",
+                (str(row[1]), closed_at, closed_at + horizon_seconds),
+            ).fetchall()
+            if not prices:
+                pending += 1
+                continue
+            entry_price = float(row[2])
+            stop_price = float(row[5])
+            trough_index = min(range(len(prices)), key=lambda i: float(prices[i][1]))
+            trough_at, trough_price = prices[trough_index]
+            after_trough = [float(item[1]) for item in prices[trough_index:]]
+            rebound_high = max(after_trough)
+            observations.append({
+                "leader": "лидер" in str(row[4]),
+                "fall_after_stop": (float(trough_price) / stop_price - 1) * 100,
+                "trough_from_entry": (float(trough_price) / entry_price - 1) * 100,
+                "minutes_to_trough": (float(trough_at) - closed_at) / 60,
+                "rebound_from_trough": (rebound_high / float(trough_price) - 1) * 100,
+                "recovered_stop": rebound_high >= stop_price,
+                "recovered_entry": rebound_high >= entry_price,
+                "reached_target": rebound_high >= entry_price * 1.007,
+            })
+        if not observations:
+            return (
+                "📉 Что происходило после стопа\n"
+                f"Стопов: {len(stopped)}; наблюдение 60 минут ещё идёт: {pending}."
+            )
+
+        count = len(observations)
+        leaders = sum(item["leader"] for item in observations)
+        average = lambda key: sum(float(item[key]) for item in observations) / count
+        recovered_stop = sum(item["recovered_stop"] for item in observations)
+        recovered_entry = sum(item["recovered_entry"] for item in observations)
+        reached_target = sum(item["reached_target"] for item in observations)
+        protected = count - recovered_entry
+        deepest = min(float(item["fall_after_stop"]) for item in observations)
+        return (
+            "📉 Что происходило после стопа\n"
+            f"Созрело 60-минутных наблюдений: {count}; из них лидеры: {leaders}; "
+            f"ещё наблюдаются: {pending}.\n"
+            f"После закрытия падали ещё в среднем на {average('fall_after_stop'):.2f}%; "
+            f"максимально на {deepest:.2f}%.\n"
+            f"Дно относительно входа: {average('trough_from_entry'):.2f}%; "
+            f"среднее время до дна: {average('minutes_to_trough'):.1f} мин.\n"
+            f"Последующий отскок от дна: в среднем {average('rebound_from_trough'):.2f}%.\n"
+            f"Вернулись к цене стопа: {recovered_stop}/{count}; к цене входа: "
+            f"{recovered_entry}/{count}; позже достигли +0,7% от входа: "
+            f"{reached_target}/{count}.\n"
+            f"Стоп защитил от невосстановившегося падения: {protected}/{count}; "
+            f"возможных ложных стопов: {recovered_entry}/{count}.\n"
+            "Это теневой аудит: параметры стоп-лосса автоматически не меняются."
+        )
+
     def _control_strategy_pnl(
         self,
         entry_price: float,

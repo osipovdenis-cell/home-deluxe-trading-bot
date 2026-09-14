@@ -494,6 +494,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             )
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
+                telegram.send(chat_id, trader.post_stop_report_text(now))
             continue
         elif command in {"/help", "/start"}:
             text = (
@@ -750,6 +751,9 @@ def main() -> None:
                         rocket_text = (
                             "\n\n" + trader.rocket_report_text(
                                 prices, now, last_observer
+                            )
+                            + "\n\n" + trader.post_stop_report_text(
+                                now, last_observer
                             ) if trader is not None else ""
                         )
                         telegram.send(

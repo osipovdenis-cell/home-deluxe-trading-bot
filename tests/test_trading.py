@@ -15,6 +15,33 @@ def make_trader(path: str) -> PaperTrader:
 
 
 class PaperTraderTests(unittest.TestCase):
+    def test_post_stop_report_tracks_further_fall_and_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL,symbol TEXT,price REAL)"
+                )
+                trader.open_on_signal(
+                    "STOPUSDT", 100, "аномальный лидер", 20, 0,
+                    bypass_min_score=True,
+                )
+                trader.update_positions({"STOPUSDT": 99.5}, 10)
+                trader.connection.executemany(
+                    "INSERT INTO samples(timestamp,symbol,price) VALUES(?,?,?)",
+                    ((20, "STOPUSDT", 99.0), (300, "STOPUSDT", 98.0),
+                     (1200, "STOPUSDT", 100.8), (3600, "STOPUSDT", 100.2)),
+                )
+                trader.connection.commit()
+                report = trader.post_stop_report_text(3700, 0)
+                self.assertIn("Созрело 60-минутных наблюдений: 1", report)
+                self.assertIn("максимально на -1.51%", report)
+                self.assertIn("к цене входа: 1/1", report)
+                self.assertIn("достигли +0,7% от входа: 1/1", report)
+                self.assertIn("возможных ложных стопов: 1/1", report)
+            finally:
+                trader.close()
+
     def test_rocket_keeps_full_position_and_trails_one_point_from_peak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
