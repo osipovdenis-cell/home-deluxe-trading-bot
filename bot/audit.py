@@ -453,6 +453,14 @@ class AuditLog:
                 ,btc_change_300s_percent REAL
                 ,market_breadth_60s_percent REAL
                 ,signal_kind TEXT
+                ,flow_cvd_60s_percent REAL
+                ,flow_trade_rate_acceleration REAL
+                ,flow_price_change_60s_percent REAL
+                ,flow_price_efficiency_per_10k REAL
+                ,flow_ask_depletion_percent REAL
+                ,flow_bid_support_percent REAL
+                ,flow_spread_bps REAL
+                ,flow_spread_change_bps REAL
             );
             CREATE INDEX IF NOT EXISTS confirmation_events_time
                 ON confirmation_events(started_at);
@@ -536,6 +544,10 @@ class AuditLog:
             "trend_change_240m_percent", "trend_efficiency_15m_percent",
             "trend_efficiency_60m_percent", "trend_efficiency_240m_percent",
             "shadow_probability_percent", "shadow_model_examples",
+            "flow_cvd_60s_percent", "flow_trade_rate_acceleration",
+            "flow_price_change_60s_percent", "flow_price_efficiency_per_10k",
+            "flow_ask_depletion_percent", "flow_bid_support_percent",
+            "flow_spread_bps", "flow_spread_change_bps",
         ):
             if column not in confirmation_columns:
                 self.connection.execute(
@@ -592,6 +604,14 @@ class AuditLog:
             "trend_efficiency_15m_percent": getattr(context, "trend_efficiency_15m_percent", None),
             "trend_efficiency_60m_percent": getattr(context, "trend_efficiency_60m_percent", None),
             "trend_efficiency_240m_percent": getattr(context, "trend_efficiency_240m_percent", None),
+            "flow_cvd_60s_percent": getattr(context, "flow_cvd_60s_percent", None),
+            "flow_trade_rate_acceleration": getattr(context, "flow_trade_rate_acceleration", None),
+            "flow_price_change_60s_percent": getattr(context, "flow_price_change_60s_percent", None),
+            "flow_price_efficiency_per_10k": getattr(context, "flow_price_efficiency_per_10k", None),
+            "flow_ask_depletion_percent": getattr(context, "flow_ask_depletion_percent", None),
+            "flow_bid_support_percent": getattr(context, "flow_bid_support_percent", None),
+            "flow_spread_bps": getattr(context, "flow_spread_bps", None),
+            "flow_spread_change_bps": getattr(context, "flow_spread_change_bps", None),
         }
         model = self._current_probability_model(float(event.started_at))
         probability = model.predict_percent(feature_values) if model else None
@@ -653,6 +673,24 @@ class AuditLog:
         )
         confirmation_id = int(cursor.lastrowid)
         if context is not None and getattr(context, "flow_cvd_60s_percent", None) is not None:
+            self.connection.execute(
+                "UPDATE confirmation_events SET flow_cvd_60s_percent=?,"
+                "flow_trade_rate_acceleration=?,flow_price_change_60s_percent=?,"
+                "flow_price_efficiency_per_10k=?,flow_ask_depletion_percent=?,"
+                "flow_bid_support_percent=?,flow_spread_bps=?,"
+                "flow_spread_change_bps=? WHERE id=?",
+                (
+                    context.flow_cvd_60s_percent,
+                    context.flow_trade_rate_acceleration,
+                    context.flow_price_change_60s_percent,
+                    context.flow_price_efficiency_per_10k,
+                    context.flow_ask_depletion_percent,
+                    context.flow_bid_support_percent,
+                    context.flow_spread_bps,
+                    context.flow_spread_change_bps,
+                    confirmation_id,
+                ),
+            )
             self.connection.execute(
                 "INSERT OR REPLACE INTO order_flow_snapshots("
                 "confirmation_id,timestamp,symbol,buy_5s_usdt,sell_5s_usdt,"

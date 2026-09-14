@@ -28,6 +28,14 @@ FEATURE_NAMES = (
     "trend_efficiency_15m_percent",
     "trend_efficiency_60m_percent",
     "trend_efficiency_240m_percent",
+    "flow_cvd_60s_percent",
+    "flow_trade_rate_acceleration",
+    "flow_price_change_60s_percent",
+    "flow_price_efficiency_per_10k",
+    "flow_ask_depletion_percent",
+    "flow_bid_support_percent",
+    "flow_spread_bps",
+    "flow_spread_change_bps",
 )
 
 
