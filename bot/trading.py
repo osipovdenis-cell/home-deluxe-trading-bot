@@ -796,6 +796,17 @@ class PaperTrader:
                 continue
             entry_price = float(row[2])
             stop_price = float(row[5])
+            alternative_outcome = "neutral"
+            for _timestamp, observed_price in prices:
+                change_from_entry = (
+                    float(observed_price) / entry_price - 1
+                ) * 100
+                if change_from_entry <= -1.0:
+                    alternative_outcome = "stop_1"
+                    break
+                if change_from_entry >= 0.7:
+                    alternative_outcome = "target"
+                    break
             trough_index = min(range(len(prices)), key=lambda i: float(prices[i][1]))
             trough_at, trough_price = prices[trough_index]
             after_trough = [float(item[1]) for item in prices[trough_index:]]
@@ -809,6 +820,7 @@ class PaperTrader:
                 "recovered_stop": rebound_high >= stop_price,
                 "recovered_entry": rebound_high >= entry_price,
                 "reached_target": rebound_high >= entry_price * 1.007,
+                "alternative_outcome": alternative_outcome,
             })
         if not observations:
             return (
@@ -822,6 +834,13 @@ class PaperTrader:
         recovered_stop = sum(item["recovered_stop"] for item in observations)
         recovered_entry = sum(item["recovered_entry"] for item in observations)
         reached_target = sum(item["reached_target"] for item in observations)
+        waited_target = sum(
+            item["alternative_outcome"] == "target" for item in observations
+        )
+        waited_stop = sum(
+            item["alternative_outcome"] == "stop_1" for item in observations
+        )
+        waited_neutral = count - waited_target - waited_stop
         protected = count - recovered_entry
         deepest = min(float(item["fall_after_stop"]) for item in observations)
         return (
@@ -838,6 +857,10 @@ class PaperTrader:
             f"{reached_target}/{count}.\n"
             f"Стоп защитил от невосстановившегося падения: {protected}/{count}; "
             f"возможных ложных стопов: {recovered_entry}/{count}.\n"
+            "Если бы вместо −0,5% ждали до −1%: "
+            f"цель +0,7% раньше нового стопа — {waited_target}/{count}; "
+            f"стоп −1% раньше цели — {waited_stop}/{count}; "
+            f"нейтрально — {waited_neutral}/{count}.\n"
             "Это теневой аудит: параметры стоп-лосса автоматически не меняются."
         )
 

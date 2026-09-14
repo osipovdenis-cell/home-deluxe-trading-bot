@@ -39,6 +39,36 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertIn("к цене входа: 1/1", report)
                 self.assertIn("достигли +0,7% от входа: 1/1", report)
                 self.assertIn("возможных ложных стопов: 1/1", report)
+                self.assertIn(
+                    "цель +0,7% раньше нового стопа — 0/1", report
+                )
+                self.assertIn("стоп −1% раньше цели — 1/1", report)
+            finally:
+                trader.close()
+
+    def test_post_stop_report_detects_target_before_wider_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = make_trader(str(Path(directory) / "trades.db"))
+            try:
+                trader.connection.execute(
+                    "CREATE TABLE samples(timestamp REAL,symbol TEXT,price REAL)"
+                )
+                trader.open_on_signal("RECOVERUSDT", 100, "лидер", 20, 0,
+                                      bypass_min_score=True)
+                trader.update_positions({"RECOVERUSDT": 99.5}, 10)
+                trader.connection.executemany(
+                    "INSERT INTO samples(timestamp,symbol,price) VALUES(?,?,?)",
+                    ((20, "RECOVERUSDT", 99.4),
+                     (300, "RECOVERUSDT", 99.2),
+                     (900, "RECOVERUSDT", 100.8),
+                     (3600, "RECOVERUSDT", 100.9)),
+                )
+                trader.connection.commit()
+                report = trader.post_stop_report_text(3700, 0)
+                self.assertIn(
+                    "цель +0,7% раньше нового стопа — 1/1", report
+                )
+                self.assertIn("стоп −1% раньше цели — 0/1", report)
             finally:
                 trader.close()
 
