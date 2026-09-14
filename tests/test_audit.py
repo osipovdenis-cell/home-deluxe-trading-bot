@@ -68,6 +68,30 @@ class AuditTests(unittest.TestCase):
             finally:
                 log.close()
 
+    def test_leader_funnel_shows_confirmation_ai_and_purchase_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                event = SimpleNamespace(
+                    started_at=90, resolved_at=100, symbol="ROCKETUSDT",
+                    trigger_price=1, resolution_price=1.01, accepted=True,
+                    reason="подтверждён", progress_percent=0.1,
+                    pullback_percent=0, change_5s_percent=0.05,
+                    change_10s_percent=0.1, signal_kind="аномальный лидер",
+                )
+                log.record_confirmation_event(event)
+                log.record_signal(
+                    100, "ROCKETUSDT", 1.01, "аномальный лидер", 3.1, 20,
+                    1_000_000, None, "AI недоступен",
+                )
+                report = log.leader_funnel_report_text(200, 0)
+                self.assertIn("После фильтра роста за 12 ч: 1", report)
+                self.assertIn("Выдержали 20 секунд: 1", report)
+                self.assertIn("Получили ответ AI: 0; без ответа: 1", report)
+                self.assertIn("Тестовых покупок: 0", report)
+            finally:
+                log.close()
+
     def test_rescue_report_links_shadow_ai_decision_to_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))

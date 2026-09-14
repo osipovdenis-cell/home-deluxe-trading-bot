@@ -469,7 +469,10 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(
                 chat_id,
                 audit.probability_shadow_report_text(now)
-                + "\n\n" + audit.leader_report_text(now),
+                + "\n\n" + audit.leader_report_text(now)
+                + "\n\n" + audit.leader_funnel_report_text(
+                    now, now - 86400
+                ),
             )
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -725,6 +728,10 @@ def main() -> None:
                             + audit.build_learning_report(now).telegram_text()
                             + "\n\n"
                             + audit.build_confirmation_audit(now).telegram_text()
+                            + "\n\n"
+                            + audit.leader_funnel_report_text(
+                                now, last_observer
+                            )
                             + rocket_text,
                         )
                     last_observer = now

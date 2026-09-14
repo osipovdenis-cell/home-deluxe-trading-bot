@@ -113,6 +113,7 @@ class ConfirmationEvent:
     pullback_percent: float = 0.0
     change_5s_percent: float = 0.0
     change_10s_percent: float = 0.0
+    signal_kind: str | None = None
 
 
 class MarketMonitor:
@@ -665,7 +666,7 @@ class MarketMonitor:
                     self.confirmation_events.append(ConfirmationEvent(
                         rescue.started_at, now, symbol, rescue.trigger_price,
                         price, False, reason, progress, pullback,
-                        change_5s, change_10s,
+                        change_5s, change_10s, rescue.signal_kind,
                     ))
                     self.last_alert[symbol] = now
                     continue
@@ -682,6 +683,7 @@ class MarketMonitor:
                         rescue.started_at, now, symbol, rescue.trigger_price,
                         price, True, "повторное ускорение подтверждено",
                         progress, pullback, change_5s, change_10s,
+                        rescue.signal_kind,
                     ))
                     quote_volume, change_24h = self.market_stats.get(
                         symbol, (0.0, 0.0)
@@ -708,6 +710,7 @@ class MarketMonitor:
                             pending.trigger_price, price, False, reason,
                             (price / pending.trigger_price - 1) * 100,
                             (price / pending.peak_price - 1) * 100,
+                            signal_kind=pending.signal_kind,
                         )
                     )
                     self.rescue_candidates[symbol] = PendingCandidate(
@@ -753,6 +756,7 @@ class MarketMonitor:
                         pending.started_at, now, symbol,
                         pending.trigger_price, price, False, reason,
                         progress, pullback, change_5s, change_10s,
+                        pending.signal_kind,
                     )
                 )
                 self.rescue_candidates[symbol] = PendingCandidate(
@@ -765,6 +769,7 @@ class MarketMonitor:
                     pending.started_at, now, symbol,
                     pending.trigger_price, price, True, "подтверждён",
                     progress, pullback, change_5s, change_10s,
+                    pending.signal_kind,
                 )
             )
             quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))

@@ -452,6 +452,7 @@ class AuditLog:
                 ,pullback_from_high_percent REAL
                 ,btc_change_300s_percent REAL
                 ,market_breadth_60s_percent REAL
+                ,signal_kind TEXT
             );
             CREATE INDEX IF NOT EXISTS confirmation_events_time
                 ON confirmation_events(started_at);
@@ -522,6 +523,10 @@ class AuditLog:
                 self.connection.execute(
                     f"ALTER TABLE confirmation_events ADD COLUMN {column} REAL"
                 )
+        if "signal_kind" not in confirmation_columns:
+            self.connection.execute(
+                "ALTER TABLE confirmation_events ADD COLUMN signal_kind TEXT"
+            )
         if self._metadata("period_started_at") is None:
             self._set_metadata("period_started_at", str(time.time()))
         self.connection.commit()
@@ -589,8 +594,8 @@ class AuditLog:
             "trend_change_60m_percent,trend_change_240m_percent,"
             "trend_efficiency_15m_percent,trend_efficiency_60m_percent,"
             "trend_efficiency_240m_percent,shadow_probability_percent,"
-            "shadow_model_examples) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "shadow_model_examples,signal_kind) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 event.started_at, event.resolved_at, event.symbol,
                 event.trigger_price, event.resolution_price,
@@ -625,6 +630,7 @@ class AuditLog:
                 getattr(context, "trend_efficiency_240m_percent", None),
                 probability,
                 model.examples if model else None,
+                getattr(event, "signal_kind", None),
             ),
         )
         self.connection.commit()
@@ -740,6 +746,76 @@ class AuditLog:
                 f"({rate:.1f}%)."
             )
         return "\n".join(lines)
+
+    def leader_funnel_report_text(self, now: float, since: float) -> str:
+        """Show where green-12h leader candidates disappear before a trade."""
+        confirmation = self.connection.execute(
+            "SELECT accepted,reason FROM confirmation_events "
+            "WHERE resolved_at>=? AND resolved_at<? "
+            "AND signal_kind LIKE '%лидер%'",
+            (since, now),
+        ).fetchall()
+        passed_confirmation = sum(bool(row[0]) for row in confirmation)
+        confirmation_reasons: dict[str, int] = {}
+        for accepted, reason in confirmation:
+            if accepted:
+                continue
+            category = self._rejection_category(str(reason or ""))
+            confirmation_reasons[category] = confirmation_reasons.get(category, 0) + 1
+
+        signals = self.connection.execute(
+            "SELECT timestamp,symbol,ai_score FROM signal_events "
+            "WHERE timestamp>=? AND timestamp<? AND signal_kind LIKE '%лидер%'",
+            (since, now),
+        ).fetchall()
+        post_reasons: dict[str, int] = {}
+        for timestamp, symbol, _ai_score in signals:
+            rejection = self.connection.execute(
+                "SELECT reason FROM paper_entry_rejections WHERE symbol=? "
+                "AND ABS(timestamp-?)<=0.01 ORDER BY rowid DESC LIMIT 1",
+                (symbol, timestamp),
+            ).fetchone()
+            if rejection is not None:
+                category = self._rejection_category(str(rejection[0]))
+                post_reasons[category] = post_reasons.get(category, 0) + 1
+
+        has_positions = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='paper_positions'"
+        ).fetchone() is not None
+        purchases = fallback = 0
+        if has_positions:
+            purchases, fallback = self.connection.execute(
+                "SELECT COUNT(*),SUM(CASE WHEN ai_score=0 THEN 1 ELSE 0 END) "
+                "FROM paper_positions WHERE opened_at>=? AND opened_at<? "
+                "AND signal_kind LIKE '%лидер%'",
+                (since, now),
+            ).fetchone()
+            purchases = int(purchases or 0)
+            fallback = int(fallback or 0)
+        ai_success = sum(row[2] is not None for row in signals)
+        post_text = ", ".join(
+            f"{name} {count}" for name, count in sorted(
+                post_reasons.items(), key=lambda item: -item[1]
+            )
+        ) or "нет"
+        confirmation_text = ", ".join(
+            f"{name} {count}" for name, count in sorted(
+                confirmation_reasons.items(), key=lambda item: -item[1]
+            )
+        ) or "нет"
+        return (
+            "🛰 Воронка лидеров\n"
+            f"После фильтра роста за 12 ч: {len(confirmation)}.\n"
+            f"Выдержали 20 секунд: {passed_confirmation}; отклонены: "
+            f"{len(confirmation) - passed_confirmation} ({confirmation_text}).\n"
+            f"Дошли до рыночной проверки: {len(signals)}.\n"
+            f"Получили ответ AI: {ai_success}; без ответа: "
+            f"{len(signals) - ai_success}.\n"
+            f"Отклонены после подтверждения: {sum(post_reasons.values())} "
+            f"({post_text}).\n"
+            f"Тестовых покупок: {purchases}; из них резервных без AI: {fallback}."
+        )
 
     def active_confirmation_symbols(
         self, now: float, horizon_seconds: int = 900
