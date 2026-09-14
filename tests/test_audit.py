@@ -8,6 +8,47 @@ from bot.probability import FEATURE_NAMES, train_probability_model
 
 
 class AuditTests(unittest.TestCase):
+    def test_order_flow_report_separates_targets_stops_and_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                for index, outcome in enumerate(("target", "stop", "neutral")):
+                    event = SimpleNamespace(
+                        started_at=100 + index, resolved_at=120 + index,
+                        symbol=f"LEADER{index}USDT", trigger_price=100,
+                        resolution_price=100, accepted=True, reason="подтверждён",
+                        progress_percent=0.1, pullback_percent=-0.1,
+                        change_5s_percent=0.05, change_10s_percent=0.1,
+                        signal_kind="лидер",
+                    )
+                    context = SimpleNamespace(
+                        volume_ratio_5m=2, taker_buy_ratio_percent=60,
+                        order_book_imbalance_percent=10, spread_bps=4,
+                        flow_buy_5s_usdt=1000, flow_sell_5s_usdt=200,
+                        flow_buy_15s_usdt=2000, flow_sell_15s_usdt=500,
+                        flow_buy_60s_usdt=5000, flow_sell_60s_usdt=1000,
+                        flow_cvd_60s_percent=50 if outcome == "target" else -10,
+                        flow_trade_rate_acceleration=2,
+                        flow_price_change_60s_percent=0.2 if outcome == "target" else -0.1,
+                        flow_price_efficiency_per_10k=0.5 if outcome == "target" else -0.2,
+                        flow_ask_depletion_percent=70,
+                        flow_bid_support_percent=65,
+                        flow_spread_bps=4, flow_spread_change_bps=-1,
+                    )
+                    event_id = log.record_confirmation_event(event, context)
+                    log.connection.execute(
+                        "UPDATE confirmation_events SET evaluated_at=1000,"
+                        "immediate_success=?,immediate_stopped_first=? WHERE id=?",
+                        (int(outcome == "target"), int(outcome == "stop"), event_id),
+                    )
+                log.connection.commit()
+                report = log.order_flow_report_text(1000)
+                self.assertIn("цель 1, стоп 1, нейтрально 1", report)
+                self.assertIn("CVD 60 с", report)
+                self.assertIn("эффективное продолжение", report)
+            finally:
+                log.close()
+
     def test_probability_report_keeps_validation_and_shadow_counts_separate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))

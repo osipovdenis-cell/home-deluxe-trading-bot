@@ -464,6 +464,24 @@ class AuditLog:
             );
             CREATE INDEX IF NOT EXISTS confirmation_samples_symbol_time
                 ON confirmation_samples(symbol, timestamp);
+            CREATE TABLE IF NOT EXISTS order_flow_snapshots (
+                confirmation_id INTEGER PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                symbol TEXT NOT NULL,
+                buy_5s_usdt REAL, sell_5s_usdt REAL,
+                buy_15s_usdt REAL, sell_15s_usdt REAL,
+                buy_60s_usdt REAL, sell_60s_usdt REAL,
+                cvd_60s_percent REAL,
+                trade_rate_acceleration REAL,
+                price_change_60s_percent REAL,
+                price_efficiency_per_10k REAL,
+                ask_depletion_percent REAL,
+                bid_support_percent REAL,
+                spread_bps REAL,
+                spread_change_bps REAL
+            );
+            CREATE INDEX IF NOT EXISTS order_flow_snapshots_time
+                ON order_flow_snapshots(timestamp);
             """
         )
         signal_columns = {
@@ -633,8 +651,98 @@ class AuditLog:
                 getattr(event, "signal_kind", None),
             ),
         )
+        confirmation_id = int(cursor.lastrowid)
+        if context is not None and getattr(context, "flow_cvd_60s_percent", None) is not None:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO order_flow_snapshots("
+                "confirmation_id,timestamp,symbol,buy_5s_usdt,sell_5s_usdt,"
+                "buy_15s_usdt,sell_15s_usdt,buy_60s_usdt,sell_60s_usdt,"
+                "cvd_60s_percent,trade_rate_acceleration,price_change_60s_percent,"
+                "price_efficiency_per_10k,ask_depletion_percent,bid_support_percent,"
+                "spread_bps,spread_change_bps) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    confirmation_id, event.resolved_at, event.symbol,
+                    context.flow_buy_5s_usdt, context.flow_sell_5s_usdt,
+                    context.flow_buy_15s_usdt, context.flow_sell_15s_usdt,
+                    context.flow_buy_60s_usdt, context.flow_sell_60s_usdt,
+                    context.flow_cvd_60s_percent,
+                    context.flow_trade_rate_acceleration,
+                    context.flow_price_change_60s_percent,
+                    context.flow_price_efficiency_per_10k,
+                    context.flow_ask_depletion_percent,
+                    context.flow_bid_support_percent,
+                    context.flow_spread_bps,
+                    context.flow_spread_change_bps,
+                ),
+            )
         self.connection.commit()
-        return int(cursor.lastrowid)
+        return confirmation_id
+
+    def order_flow_report_text(self, now: float, lookback_seconds: int = 604800) -> str:
+        rows = self.connection.execute(
+            "SELECT c.immediate_success,c.immediate_stopped_first,"
+            "f.cvd_60s_percent,f.trade_rate_acceleration,"
+            "f.price_change_60s_percent,f.price_efficiency_per_10k,"
+            "f.ask_depletion_percent,f.bid_support_percent,"
+            "f.spread_bps,f.spread_change_bps "
+            "FROM order_flow_snapshots f JOIN confirmation_events c "
+            "ON c.id=f.confirmation_id WHERE f.timestamp>=? "
+            "AND c.evaluated_at IS NOT NULL AND c.signal_kind LIKE '%лидер%'",
+            (now - lookback_seconds,),
+        ).fetchall()
+        if not rows:
+            return (
+                "🌊 Теневой order flow лидеров\n"
+                "Новые непрерывные снимки ещё не созрели 15 минут."
+            )
+
+        groups = {
+            "цель": [row for row in rows if row[0] == 1],
+            "стоп": [row for row in rows if row[1] == 1],
+            "нейтр.": [row for row in rows if row[0] == 0 and row[1] == 0],
+        }
+        features = (
+            ("CVD 60 с", 2, "%"),
+            ("ускорение сделок", 3, "×"),
+            ("цена 60 с", 4, "%"),
+            ("эффективность / 10k", 5, "%"),
+            ("снятие ask", 6, "%"),
+            ("поддержка bid", 7, "%"),
+            ("спред", 8, " б.п."),
+            ("изменение спреда", 9, " б.п."),
+        )
+        lines = [
+            "🌊 Теневой order flow лидеров",
+            f"Созрело снимков: {len(rows)}; цель {len(groups['цель'])}, "
+            f"стоп {len(groups['стоп'])}, нейтрально {len(groups['нейтр.'])}.",
+        ]
+        for label, index, suffix in features:
+            values = []
+            for name, group in groups.items():
+                observed = [float(row[index]) for row in group if row[index] is not None]
+                values.append(
+                    f"{name} {sum(observed) / len(observed):.2f}{suffix} (n={len(observed)})"
+                    if observed else f"{name} —"
+                )
+            lines.append(f"• {label}: " + ", ".join(values) + ".")
+
+        absorption = [
+            row for row in rows
+            if row[2] is not None and row[4] is not None
+            and row[2] >= 10 and row[4] <= 0.05
+        ]
+        continuation = [
+            row for row in rows
+            if row[2] is not None and row[4] is not None and row[5] is not None
+            and row[2] > 0 and row[4] > 0.05 and row[5] > 0
+        ]
+        for label, cohort in (("поглощение покупок", absorption),
+                              ("эффективное продолжение", continuation)):
+            successes = sum(row[0] == 1 for row in cohort)
+            rate = successes / len(cohort) * 100 if cohort else 0.0
+            lines.append(f"• {label}: {successes}/{len(cohort)} целей ({rate:.1f}%).")
+        lines.append("Пока это теневые гипотезы: на право входа не влияют.")
+        return "\n".join(lines)
 
     def _probability_samples(self, before: float) -> list[tuple[int, dict]]:
         columns = ",".join(FEATURE_NAMES)

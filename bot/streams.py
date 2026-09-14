@@ -1,12 +1,214 @@
 import json
 import threading
 import time
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from urllib.parse import quote
 
 from websockets.sync.client import connect
 
 
 BINANCE_STREAM_BASE_URL = "wss://stream.binance.com:9443"
+
+
+@dataclass(frozen=True)
+class LeaderOrderFlowSnapshot:
+    buy_5s_usdt: float
+    sell_5s_usdt: float
+    buy_15s_usdt: float
+    sell_15s_usdt: float
+    buy_60s_usdt: float
+    sell_60s_usdt: float
+    cvd_60s_percent: float
+    trade_rate_acceleration: float | None
+    price_change_60s_percent: float
+    price_efficiency_per_10k: float | None
+    ask_depletion_percent: float | None
+    bid_support_percent: float | None
+    spread_bps: float | None
+    spread_change_bps: float | None
+
+
+class LeaderOrderFlowStream:
+    """Continuously tracks trades and depth changes for active leaders."""
+
+    def __init__(self, max_symbols: int = 20) -> None:
+        self.max_symbols = max_symbols
+        self._symbols: tuple[str, ...] = ()
+        self._trades = defaultdict(deque)
+        self._quotes = defaultdict(deque)
+        self._depth_changes = defaultdict(deque)
+        self._depth = defaultdict(lambda: {"bid": {}, "ask": {}})
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._changed = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def set_symbols(self, symbols) -> None:
+        normalized = tuple(dict.fromkeys(str(s).upper() for s in symbols))[:self.max_symbols]
+        with self._lock:
+            if normalized == self._symbols:
+                return
+            removed = set(self._symbols) - set(normalized)
+            self._symbols = normalized
+            for symbol in removed:
+                self._trades.pop(symbol, None)
+                self._quotes.pop(symbol, None)
+                self._depth_changes.pop(symbol, None)
+                self._depth.pop(symbol, None)
+        self._changed.set()
+
+    def subscription_url(self) -> str | None:
+        with self._lock:
+            symbols = self._symbols
+        if not symbols:
+            return None
+        streams = []
+        for symbol in symbols:
+            lower = symbol.lower()
+            streams.extend((f"{lower}@aggTrade", f"{lower}@bookTicker", f"{lower}@depth@100ms"))
+        joined = "/".join(streams)
+        return f"{BINANCE_STREAM_BASE_URL}/stream?streams={quote(joined, safe='/@')}"
+
+    @staticmethod
+    def _trim(points: deque, cutoff: float) -> None:
+        while points and points[0][0] < cutoff:
+            points.popleft()
+
+    def ingest(self, payload: str | dict, received_at: float | None = None) -> None:
+        message = json.loads(payload) if isinstance(payload, str) else payload
+        item = message.get("data", message)
+        symbol = str(item.get("s", "")).upper()
+        if not symbol:
+            return
+        now = time.time() if received_at is None else received_at
+        with self._lock:
+            if symbol not in self._symbols:
+                return
+            event = item.get("e")
+            if event == "aggTrade":
+                price = float(item["p"])
+                notional = price * float(item["q"])
+                buyer_initiated = not bool(item.get("m"))
+                self._trades[symbol].append((now, price, notional, buyer_initiated))
+            elif event == "depthUpdate":
+                added = {"bid": 0.0, "ask": 0.0}
+                removed = {"bid": 0.0, "ask": 0.0}
+                for side, key in (("bid", "b"), ("ask", "a")):
+                    levels = self._depth[symbol][side]
+                    for price_text, quantity_text in item.get(key, []):
+                        price = float(price_text)
+                        quantity = float(quantity_text)
+                        previous = levels.get(price)
+                        if previous is not None:
+                            delta = (quantity - previous) * price
+                            if delta > 0:
+                                added[side] += delta
+                            elif delta < 0:
+                                removed[side] -= delta
+                        if quantity > 0:
+                            levels[price] = quantity
+                        else:
+                            levels.pop(price, None)
+                self._depth_changes[symbol].append((
+                    now, added["bid"], removed["bid"], added["ask"], removed["ask"]
+                ))
+            elif "b" in item and "a" in item:
+                bid = float(item["b"])
+                ask = float(item["a"])
+                if bid > 0 and ask > 0:
+                    self._quotes[symbol].append((now, bid, float(item.get("B", 0)), ask, float(item.get("A", 0))))
+            cutoff = now - 120
+            self._trim(self._trades[symbol], cutoff)
+            self._trim(self._quotes[symbol], cutoff)
+            self._trim(self._depth_changes[symbol], cutoff)
+
+    def snapshot(self, symbol: str, now: float | None = None) -> LeaderOrderFlowSnapshot | None:
+        now = time.time() if now is None else now
+        symbol = symbol.upper()
+        with self._lock:
+            trades = list(self._trades.get(symbol, ()))
+            quotes = list(self._quotes.get(symbol, ()))
+            depth = list(self._depth_changes.get(symbol, ()))
+        if not trades:
+            return None
+
+        def volume(seconds: int, buys: bool) -> float:
+            cutoff = now - seconds
+            return sum(row[2] for row in trades if row[0] >= cutoff and row[3] == buys)
+
+        buy_5, sell_5 = volume(5, True), volume(5, False)
+        buy_15, sell_15 = volume(15, True), volume(15, False)
+        buy_60, sell_60 = volume(60, True), volume(60, False)
+        total_60 = buy_60 + sell_60
+        cvd = (buy_60 - sell_60) / total_60 * 100 if total_60 else 0.0
+        count_15 = sum(row[0] >= now - 15 for row in trades)
+        count_previous_45 = sum(now - 60 <= row[0] < now - 15 for row in trades)
+        prior_rate = count_previous_45 / 45
+        acceleration = (count_15 / 15) / prior_rate if prior_rate > 0 else None
+        recent = [row for row in trades if row[0] >= now - 60]
+        price_change = (
+            (recent[-1][1] / recent[0][1] - 1) * 100 if len(recent) >= 2 else 0.0
+        )
+        net_buy = buy_60 - sell_60
+        efficiency = price_change / (abs(net_buy) / 10_000) if abs(net_buy) >= 100 else None
+
+        depth_recent = [row for row in depth if row[0] >= now - 60]
+        bid_added = sum(row[1] for row in depth_recent)
+        bid_removed = sum(row[2] for row in depth_recent)
+        ask_added = sum(row[3] for row in depth_recent)
+        ask_removed = sum(row[4] for row in depth_recent)
+        bid_total = bid_added + bid_removed
+        ask_total = ask_added + ask_removed
+        bid_support = bid_added / bid_total * 100 if bid_total else None
+        ask_depletion = ask_removed / ask_total * 100 if ask_total else None
+
+        quote_recent = [row for row in quotes if row[0] >= now - 60]
+        spread = spread_change = None
+        if quote_recent:
+            spreads = [(row[3] / row[1] - 1) * 10_000 for row in quote_recent]
+            spread = spreads[-1]
+            spread_change = spreads[-1] - spreads[0]
+        return LeaderOrderFlowSnapshot(
+            buy_5, sell_5, buy_15, sell_15, buy_60, sell_60, cvd,
+            acceleration, price_change, efficiency, ask_depletion, bid_support,
+            spread, spread_change,
+        )
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        delay = 1.0
+        while not self._stop.is_set():
+            url = self.subscription_url()
+            if url is None:
+                self._changed.wait(1)
+                self._changed.clear()
+                continue
+            try:
+                with connect(url, open_timeout=10, close_timeout=2) as websocket:
+                    delay = 1.0
+                    self._changed.clear()
+                    while not self._stop.is_set() and not self._changed.is_set():
+                        try:
+                            self.ingest(websocket.recv(timeout=1))
+                        except TimeoutError:
+                            continue
+            except Exception as error:
+                if not self._stop.is_set():
+                    print(f"Поток order flow лидеров переподключается: {error}", flush=True)
+                    self._stop.wait(delay)
+                    delay = min(delay * 2, 30.0)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._changed.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
 
 
 class AllMarketMiniTickerStream:

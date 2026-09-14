@@ -7,7 +7,11 @@ from bot.audit import AuditLog, detect_pumps
 from bot.binance_testnet import BinanceTestnetClient
 from bot.config import load_settings
 from bot.market import MarketMonitor
-from bot.streams import AllMarketMiniTickerStream, PositionBookTickerStream
+from bot.streams import (
+    AllMarketMiniTickerStream,
+    LeaderOrderFlowStream,
+    PositionBookTickerStream,
+)
 from bot.telegram import TelegramClient
 from bot.trading import PaperTrader
 
@@ -228,6 +232,19 @@ def process_signal(
                     "large_trades_60s": context.large_trade_count_60s,
                     "largest_bid_wall_share_percent": context.bid_wall_share_percent,
                     "largest_ask_wall_share_percent": context.ask_wall_share_percent,
+                    "continuous_buy_5s_usdt": context.flow_buy_5s_usdt,
+                    "continuous_sell_5s_usdt": context.flow_sell_5s_usdt,
+                    "continuous_buy_15s_usdt": context.flow_buy_15s_usdt,
+                    "continuous_sell_15s_usdt": context.flow_sell_15s_usdt,
+                    "continuous_buy_60s_usdt": context.flow_buy_60s_usdt,
+                    "continuous_sell_60s_usdt": context.flow_sell_60s_usdt,
+                    "continuous_cvd_60s_percent": context.flow_cvd_60s_percent,
+                    "trade_rate_acceleration": context.flow_trade_rate_acceleration,
+                    "price_response_60s_percent": context.flow_price_change_60s_percent,
+                    "price_efficiency_per_10k": context.flow_price_efficiency_per_10k,
+                    "ask_depletion_percent": context.flow_ask_depletion_percent,
+                    "bid_support_percent": context.flow_bid_support_percent,
+                    "continuous_spread_change_bps": context.flow_spread_change_bps,
                 } if context else None,
             )
         if analysis_error is not None:
@@ -472,7 +489,8 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
                 + "\n\n" + audit.leader_report_text(now)
                 + "\n\n" + audit.leader_funnel_report_text(
                     now, now - 86400
-                ),
+                )
+                + "\n\n" + audit.order_flow_report_text(now),
             )
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -518,6 +536,7 @@ def main() -> None:
     ai = AIAnalyst(settings.openai_api_key, settings.openai_model) if settings.openai_api_key else None
     market_stream = None
     position_stream = None
+    order_flow_stream = None
     try:
         account = binance.account()
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
@@ -530,6 +549,8 @@ def main() -> None:
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
         position_stream.set_symbols(trader.open_symbols() if trader else ())
         position_stream.start()
+        order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
+        order_flow_stream.start()
         ai_status = "не настроен"
         if ai is not None:
             try:
@@ -573,6 +594,8 @@ def main() -> None:
             "анализ только при новом ускорении.\n"
             "Крупный поток: исполненные крупные покупки/продажи за 15/60 сек "
             "и концентрация стенок стакана; пока теневой фактор.\n"
+            "Order flow лидеров: непрерывные сделки и стакан за 5/15/60 сек; "
+            "CVD, ускорение и эффективность покупок сохраняются в обучение.\n"
             "Вероятностная модель: теневой прогноз по прошлым исходам; "
             "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
             "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
@@ -629,6 +652,7 @@ def main() -> None:
                         if notices:
                             position_stream.set_symbols(trader.open_symbols())
                     signals = market.update(prices, now=now)
+                    order_flow_stream.set_symbols(market.order_flow_symbols())
                     confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
@@ -645,6 +669,12 @@ def main() -> None:
                         try:
                             confirmation_context = market.fetch_signal_context(
                                 confirmation_event.symbol
+                            )
+                            confirmation_context = market.with_order_flow(
+                                confirmation_context,
+                                order_flow_stream.snapshot(
+                                    confirmation_event.symbol, now
+                                ),
                             )
                         except (httpx.HTTPError, ValueError) as error:
                             audit.record_error(
@@ -732,6 +762,7 @@ def main() -> None:
                             + audit.leader_funnel_report_text(
                                 now, last_observer
                             )
+                            + "\n\n" + audit.order_flow_report_text(now)
                             + rocket_text,
                         )
                     last_observer = now
@@ -743,6 +774,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if order_flow_stream:
+            order_flow_stream.close()
         if position_stream:
             position_stream.close()
         if market_stream:

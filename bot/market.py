@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import time
 
@@ -47,6 +47,20 @@ class SignalMarketContext:
     trend_efficiency_15m_percent: float | None = None
     trend_efficiency_60m_percent: float | None = None
     trend_efficiency_240m_percent: float | None = None
+    flow_buy_5s_usdt: float | None = None
+    flow_sell_5s_usdt: float | None = None
+    flow_buy_15s_usdt: float | None = None
+    flow_sell_15s_usdt: float | None = None
+    flow_buy_60s_usdt: float | None = None
+    flow_sell_60s_usdt: float | None = None
+    flow_cvd_60s_percent: float | None = None
+    flow_trade_rate_acceleration: float | None = None
+    flow_price_change_60s_percent: float | None = None
+    flow_price_efficiency_per_10k: float | None = None
+    flow_ask_depletion_percent: float | None = None
+    flow_bid_support_percent: float | None = None
+    flow_spread_bps: float | None = None
+    flow_spread_change_bps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +173,41 @@ class MarketMonitor:
         self.eligible_count = 0
         self.last_symbol_refresh = 0.0
         self.client = httpx.Client(base_url=base_url, timeout=15.0)
+
+    def order_flow_symbols(self) -> tuple[str, ...]:
+        """Prioritize candidates being confirmed, then the freshest leaders."""
+        fresh_leaders = sorted(
+            self.leaders,
+            key=lambda symbol: self.leaders[symbol].last_qualified_at,
+            reverse=True,
+        )
+        return tuple(dict.fromkeys((
+            *self.pending_candidates.keys(),
+            *self.rescue_candidates.keys(),
+            *fresh_leaders,
+        )))
+
+    @staticmethod
+    def with_order_flow(context: SignalMarketContext, snapshot) -> SignalMarketContext:
+        if snapshot is None:
+            return context
+        return replace(
+            context,
+            flow_buy_5s_usdt=snapshot.buy_5s_usdt,
+            flow_sell_5s_usdt=snapshot.sell_5s_usdt,
+            flow_buy_15s_usdt=snapshot.buy_15s_usdt,
+            flow_sell_15s_usdt=snapshot.sell_15s_usdt,
+            flow_buy_60s_usdt=snapshot.buy_60s_usdt,
+            flow_sell_60s_usdt=snapshot.sell_60s_usdt,
+            flow_cvd_60s_percent=snapshot.cvd_60s_percent,
+            flow_trade_rate_acceleration=snapshot.trade_rate_acceleration,
+            flow_price_change_60s_percent=snapshot.price_change_60s_percent,
+            flow_price_efficiency_per_10k=snapshot.price_efficiency_per_10k,
+            flow_ask_depletion_percent=snapshot.ask_depletion_percent,
+            flow_bid_support_percent=snapshot.bid_support_percent,
+            flow_spread_bps=snapshot.spread_bps,
+            flow_spread_change_bps=snapshot.spread_change_bps,
+        )
 
     def refresh_symbols(self, now: float | None = None) -> None:
         if not self.scan_all_usdt:
