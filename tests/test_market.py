@@ -260,6 +260,7 @@ class MarketMonitorTests(unittest.TestCase):
             second = monitor.update({"LEADERUSDT": 104.9}, now=330)
             self.assertEqual(len(second), 1)
             self.assertIn("лидер", second[0].kind)
+            self.assertTrue(second[0].is_leader_reentry)
         finally:
             monitor.close()
 

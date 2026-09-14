@@ -20,6 +20,7 @@ class PumpSignal:
     confirmation_change_5s_percent: float | None = None
     confirmation_change_10s_percent: float | None = None
     is_rescue: bool = False
+    is_leader_reentry: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class PendingCandidate:
     peak_price: float
     samples: list[tuple[float, float]] = field(default_factory=list)
     signal_kind: str | None = None
+    is_leader_reentry: bool = False
 
 
 @dataclass
@@ -817,6 +819,7 @@ class MarketMonitor:
                 self.pending_candidates[symbol] = PendingCandidate(
                     now, price, price, [(now, price)],
                     leader.mode if leader else None,
+                    leader_reentry,
                 )
                 if leader_reentry:
                     leader.reentry_ready = False
@@ -874,6 +877,8 @@ class MarketMonitor:
                     pullback,
                     change_5s,
                     change_10s,
+                    False,
+                    pending.is_leader_reentry,
                 )
             )
         candidates.sort(key=lambda signal: signal.change_percent, reverse=True)

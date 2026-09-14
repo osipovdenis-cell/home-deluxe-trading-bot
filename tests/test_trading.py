@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bot.trading import PaperTrader
+from bot.trading import PaperTrader, TradeNotice
 
 
 def make_trader(path: str) -> PaperTrader:
@@ -262,6 +262,17 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertIn("В открытых позициях:", text)
             finally:
                 trader.close()
+
+    def test_trade_notice_identifies_first_and_repeated_rocket_entries(self) -> None:
+        first = TradeNotice(
+            "BUY", "TESTUSDT", 1, 10, 10, "лидер", ai_score=60
+        )
+        repeated = TradeNotice(
+            "BUY", "TESTUSDT", 1, 10, 10,
+            "лидер · повторный вход", ai_score=60,
+        )
+        self.assertIn("ракета — первый вход", first.telegram_text())
+        self.assertIn("ракета — повторный вход", repeated.telegram_text())
 
     def test_builds_trade_intelligence_and_control_strategies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

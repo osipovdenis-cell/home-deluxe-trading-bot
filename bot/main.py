@@ -78,6 +78,16 @@ def analyze_momentum_with_retries(ai, *args, **kwargs):
     return None, final_error, attempt
 
 
+def leader_ai_entry_policy(analysis, is_leader_reentry: bool) -> tuple[bool, str | None]:
+    """Use AI caution as a delay for a leader, never as a permanent veto."""
+    if analysis is None or analysis.decision == "BUY" or is_leader_reentry:
+        return True, None
+    return False, (
+        f"AI {analysis.decision} {analysis.score}/100: первый вход отложен "
+        "до отката и повторного ускорения"
+    )
+
+
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
@@ -190,6 +200,9 @@ def process_signal(
     dynamics_payload["leader_mode"] = (
         signal.kind if "лидер" in signal.kind else None
     )
+    dynamics_payload["leader_reentry_after_pullback"] = bool(
+        signal.is_leader_reentry
+    )
     if context is not None:
         dynamics_payload.update({
             "trend_change_15m_percent": context.trend_change_15m_percent,
@@ -294,6 +307,17 @@ def process_signal(
         )
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
+    if leader_paper_entry:
+        ai_entry_allowed, ai_delay_reason = leader_ai_entry_policy(
+            analysis, signal.is_leader_reentry
+        )
+        if not ai_entry_allowed:
+            audit.record_entry_rejection(
+                now, signal.symbol, ai_delay_reason,
+                context.spread_bps if context else None, tick_percent,
+            )
+            print(f"Вход {signal.symbol} отложен: {ai_delay_reason}", flush=True)
+            return False
     history_unfavorable = len(behavior.impulses) >= 3 and not behavior.favorable
     exceptional = exceptional_new_entry(analysis, context, dynamics)
     history_allowed, required_ai_score = history_entry_policy(
@@ -378,8 +402,11 @@ def process_signal(
             f"Обучаемый профиль: {learned.status}. {learned.explanation}\n"
         if analysis else "\nИИ-анализ временно недоступен.\n"
     )
+    trade_signal_kind = signal.kind + (
+        " · повторный вход" if signal.is_leader_reentry else ""
+    )
     notice = (
-        trader.open_on_signal(signal.symbol, signal.price, signal.kind,
+        trader.open_on_signal(signal.symbol, signal.price, trade_signal_kind,
                               analysis.score if analysis else 0, now,
                               bypass_min_score=leader_paper_entry)
         if trader else None

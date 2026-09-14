@@ -20,8 +20,16 @@ class TradeNotice:
 
     def telegram_text(self) -> str:
         if self.action == "BUY":
+            if "лидер" in self.reason:
+                entry_type = (
+                    "ракета — повторный вход"
+                    if "повторный вход" in self.reason else "ракета — первый вход"
+                )
+            else:
+                entry_type = "обычный скальпинг"
             return (
                 f"🧪 Тестовый вход {self.symbol}\n"
+                f"Тип: {entry_type}.\n"
                 f"Сумма: {self.position_usdt:.2f} USDT.\n"
                 f"Цена входа: {self.price:.10g}.\n"
                 f"ИИ-оценка: {self.ai_score}/100.\n"
@@ -431,7 +439,7 @@ class PaperTrader:
             price,
             quantity,
             trade_usdt,
-            "сигнал",
+            signal_kind,
             ai_score=ai_score,
         )
 

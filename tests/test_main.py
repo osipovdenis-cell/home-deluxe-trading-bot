@@ -7,11 +7,21 @@ from bot.main import (
     analyze_momentum_with_retries,
     exceptional_new_entry,
     history_entry_policy,
+    leader_ai_entry_policy,
     openai_error_kind,
 )
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_ai_wait_delays_only_first_leader_entry(self) -> None:
+        analysis = SimpleNamespace(decision="WAIT", score=62)
+        allowed, reason = leader_ai_entry_policy(analysis, False)
+        self.assertFalse(allowed)
+        self.assertIn("отложен", reason)
+        self.assertEqual(leader_ai_entry_policy(analysis, True), (True, None))
+        analysis.decision = "BUY"
+        self.assertEqual(leader_ai_entry_policy(analysis, False), (True, None))
+
     def test_retries_ai_twice_then_returns_analysis(self) -> None:
         expected = SimpleNamespace(decision="BUY", score=70)
 
