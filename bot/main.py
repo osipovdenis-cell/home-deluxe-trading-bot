@@ -14,6 +14,8 @@ from bot.streams import (
 )
 from bot.telegram import TelegramClient
 from bot.trading import PaperTrader
+from bot.scalp_shadow import ScalpQuoteStream
+from bot.audit import SymbolBehavior
 
 
 def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
@@ -92,6 +94,24 @@ def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
 ):
+    try:
+        return _process_signal(signal, prices, now, market, audit, trader, ai,
+                               telegram, chat_id, settings, preloaded_context)
+    finally:
+        if "лидер" not in signal.kind:
+            rejection = audit.connection.execute(
+                "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
+                "ORDER BY rowid DESC LIMIT 1", (signal.symbol, now)
+            ).fetchone()
+            audit.scalp_shadow.decision(signal.symbol, time.time(),
+                                        reason=rejection[0] if rejection else None)
+            audit.connection.commit()
+
+
+def _process_signal(
+    signal, prices, now, market, audit, trader, ai, telegram, chat_id,
+    settings, preloaded_context=None,
+):
     leader_paper_entry = "лидер" in signal.kind
     context = preloaded_context
     if context is None:
@@ -164,7 +184,7 @@ def process_signal(
         settings.paper_take_profit_1_percent,
         settings.paper_take_profit_2_percent,
         settings.paper_stop_loss_percent,
-    )
+    ) if leader_paper_entry else SymbolBehavior(signal.symbol, ())
     learned_features = {
         "confirmation_progress_percent": signal.confirmation_progress_percent,
         "confirmation_change_5s_percent": signal.confirmation_change_5s_percent,
@@ -190,7 +210,8 @@ def process_signal(
         ),
     }
     learned = audit.build_learning_profile(
-        signal.symbol, now, learned_features
+        signal.symbol, now, learned_features,
+        strategy=None if leader_paper_entry else "scalp",
     )
     dynamics_payload = dynamics.as_dict()
     dynamics_payload["second_chance_90s"] = bool(signal.is_rescue)
@@ -286,6 +307,9 @@ def process_signal(
         analysis_version=2 if analysis else 1,
         entry_dynamics=dynamics_payload,
     )
+    if not leader_paper_entry:
+        audit.scalp_shadow.decision(signal.symbol, time.time(),
+                                    decision=analysis.decision if analysis else "NO_RESPONSE")
     if analysis is None:
         if not leader_paper_entry or shadow_prefilter_reason is not None:
             kind = openai_error_kind(analysis_error) if analysis_error else "disabled"
@@ -413,6 +437,9 @@ def process_signal(
     trade_signal_kind = signal.kind + (
         " · повторный вход" if signal.is_leader_reentry else ""
     )
+    if not leader_paper_entry:
+        audit.scalp_shadow.decision(signal.symbol, time.time(), allowed=True,
+                                    reason="все фильтры пройдены; торговля скальпинга выключена")
     notice = (
         trader.open_on_signal(signal.symbol, signal.price, trade_signal_kind,
                               analysis.score if analysis else 0, now,
@@ -534,6 +561,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             )
             telegram.send(chat_id, audit.leader_path_report_text(now))
             telegram.send(chat_id, audit.rocket_comparison.report())
+            telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
                 telegram.send(chat_id, trader.post_stop_report_text(now))
@@ -581,6 +609,7 @@ def main() -> None:
     market_stream = None
     position_stream = None
     order_flow_stream = None
+    scalp_stream = None
     try:
         account = binance.account()
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
@@ -595,6 +624,10 @@ def main() -> None:
         position_stream.start()
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
+        scalp_stream = ScalpQuoteStream()
+        audit.scalp_shadow.expire(time.time())
+        scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
+        scalp_stream.start()
         ai_status = "не настроен"
         if ai is not None:
             try:
@@ -665,6 +698,15 @@ def main() -> None:
         while True:
             now = time.time()
             try:
+                scalp_quotes, overflow = scalp_stream.drain_quotes()
+                if overflow:
+                    audit.scalp_shadow.expire(now, overflow=True)
+                else:
+                    for at, symbol, bid, ask in scalp_quotes:
+                        audit.scalp_shadow.quote(at, symbol, bid, ask)
+                audit.scalp_shadow.expire(now)
+                audit.connection.commit()
+                scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
                 # Commands must not wait behind market scans and AI requests.
                 if now - last_command_poll >= 2:
                     commands = telegram.poll_commands(chat_id)
@@ -732,7 +774,10 @@ def main() -> None:
                             confirmation_event,
                             confirmation_context,
                             market.entry_dynamics(confirmation_event.symbol, now),
+                            scalp_now=time.time(),
+                            scalp_cost=settings.estimated_round_trip_cost_percent,
                         )
+                        scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
                         if confirmation_event.accepted:
                             confirmation_contexts[confirmation_event.symbol] = (
                                 confirmation_context
@@ -820,6 +865,7 @@ def main() -> None:
                         )
                     last_observer = now
                     telegram.send(chat_id, audit.rocket_comparison.report())
+                    telegram.send(chat_id, audit.scalp_shadow.report(now))
                 time.sleep(0.1)
             except httpx.HTTPError as error:
                 audit.record_error(str(error))
@@ -828,6 +874,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if scalp_stream:
+            scalp_stream.close()
         if order_flow_stream:
             order_flow_stream.close()
         if position_stream:

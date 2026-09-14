@@ -8,6 +8,7 @@ import time
 
 from bot.probability import FEATURE_NAMES, train_probability_model
 from bot.rocket_comparison import RocketComparison
+from bot.scalp_shadow import ScalpShadow
 
 
 @dataclass(frozen=True)
@@ -317,6 +318,7 @@ class AuditLog:
         self.connection = sqlite3.connect(database)
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.rocket_comparison = RocketComparison(self.connection)
+        self.scalp_shadow = ScalpShadow(self.connection)
         self._probability_cache = None
         self._probability_cache_at = 0.0
         self.connection.executescript(
@@ -580,7 +582,8 @@ class AuditLog:
         )
         self.connection.commit()
 
-    def record_confirmation_event(self, event, context=None, dynamics=None) -> int:
+    def record_confirmation_event(self, event, context=None, dynamics=None,
+                                  scalp_now=None, scalp_cost=0.2) -> int:
         dynamic_values = dynamics.as_dict() if dynamics is not None else {}
         feature_values = {
             "confirmation_progress_percent": getattr(event, "progress_percent", None),
@@ -616,6 +619,11 @@ class AuditLog:
             "flow_spread_bps": getattr(context, "flow_spread_bps", None),
             "flow_spread_change_bps": getattr(context, "flow_spread_change_bps", None),
         }
+        if scalp_now is not None:
+            self.scalp_shadow.candidate(
+                event.symbol, getattr(event, "signal_kind", None), scalp_now,
+                feature_values, event.accepted, scalp_cost,
+            )
         model = self._current_probability_model(float(event.started_at))
         probability = model.predict_percent(feature_values) if model else None
         cursor = self.connection.execute(
@@ -812,7 +820,8 @@ class AuditLog:
         self, now: float, lookback_seconds: int = 7 * 86400
     ) -> str:
         model = self._current_probability_model(now)
-        lines = ["🎯 Теневая вероятностная модель"]
+        lines = ["🎯 Теневая вероятностная модель (общая, прежняя выборка)",
+                 "Не является оценкой отдельного скальпинга v1."]
         if model is None:
             count = len(self._probability_samples(now))
             lines.append(f"Обучение накапливается: {count}/400 примеров.")
@@ -864,8 +873,9 @@ class AuditLog:
             )
             lines.append(
                 f"Прогноз 40%+: {len(strong)}; цели {successes}, стопы "
-                f"{stops}, нейтральные {neutral}; расчётный итог "
-                f"{net:+.2f}% (комиссия 0,2% + фактический спред)."
+                f"{stops}, нейтральные {neutral}; упрощённая сумма "
+                f"{net:+.2f} п.п. (не доходность банка; нейтральные условно по нулю, "
+                "комиссия 0,2% + входной спред; неизвестный спред принят за ноль)."
             )
         lines.append("Модель пока не открывает сделки — только проверяется.")
         return "\n".join(lines)
@@ -1438,7 +1448,24 @@ class AuditLog:
         now: float,
         current_features: dict,
         lookback_seconds: int = 30 * 86400,
+        strategy: str | None = None,
     ) -> LearningProfile:
+        if strategy == "scalp":
+            # Never reuse trigger-price labels or rocket PnL for ordinary entries.
+            samples = [s for symbol_, _, s, _ in self.scalp_shadow.samples(now)
+                       if symbol_ == symbol]
+            hits = sum(s["label"] for s in samples)
+            failures = 0
+            for s in reversed(samples):
+                if s["label"]:
+                    break
+                failures += 1
+            return LearningProfile(
+                symbol, len(samples), hits, 0, 0, failures, 0,
+                "SHADOW_ONLY", 0,
+                "Отдельный скальпинг: исходы от наблюдаемого ask после решения; "
+                "история ракет не используется. Новая модель пока не меняет пороги.",
+            )
         rows = self.connection.execute(
             "SELECT symbol, success_before_stop, signal_timestamp, "
             "setup_change_percent, volume_ratio_5m, taker_buy_ratio_percent, "

@@ -148,7 +148,8 @@ def _fit(samples: list[tuple[int, dict]]):
 
 
 def train_probability_model(
-    samples: list[tuple[int, dict]], minimum_examples: int = 400
+    samples: list[tuple[int, dict]], minimum_examples: int = 400,
+    purge_overlap: bool = False,
 ) -> ProbabilityModel | None:
     if len(samples) < minimum_examples:
         return None
@@ -157,6 +158,12 @@ def train_probability_model(
         return None
     training = samples[:-validation_count]
     validation = samples[-validation_count:]
+    if purge_overlap:
+        # Event time, not a fixed row gap: symbol events are irregularly spaced.
+        boundary = min(f["_observed_at"] for _, f in validation)
+        training = [(y, f) for y, f in training if f["_label_end"] < boundary]
+        if len(training) < 250:
+            return None
     medians, means, scales, weights, intercept = _fit(training)
 
     validation_predictions = []
