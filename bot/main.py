@@ -43,6 +43,37 @@ def history_entry_policy(behavior, exceptional: bool, base_score: int) -> tuple[
     return (not history_unfavorable or exceptional, max(base_score, 85 if history_unfavorable else 0))
 
 
+def openai_error_kind(error: Exception) -> str:
+    text = str(error).lower()
+    if isinstance(error, httpx.TimeoutException) or "timeout" in text or "timed out" in text:
+        return "timeout"
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"http-{error.response.status_code}"
+    if "некорректный формат" in text:
+        return "format"
+    if "не вернул текст" in text:
+        return "empty"
+    return "other"
+
+
+def analyze_momentum_with_retries(ai, *args, **kwargs):
+    """Return analysis, final error and attempts; retry transient/bad output twice."""
+    final_error = None
+    for attempt in range(1, 4):
+        try:
+            return ai.analyze_momentum(*args, **kwargs), None, attempt
+        except (httpx.HTTPError, AIError) as error:
+            final_error = error
+            if (
+                isinstance(error, httpx.HTTPStatusError)
+                and error.response.status_code in {400, 401, 403}
+            ):
+                break
+            if attempt < 3:
+                time.sleep(0.25 * attempt)
+    return None, final_error, attempt
+
+
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
@@ -166,9 +197,11 @@ def process_signal(
             ),
         })
     analysis = None
+    analysis_error = None
+    analysis_attempts = 0
     if ai is not None:
-        try:
-            analysis = ai.analyze_momentum(
+        analysis, analysis_error, analysis_attempts = analyze_momentum_with_retries(
+            ai,
                 signal.symbol, signal.price, signal.change_percent,
                 signal.window_seconds // 60, signal.quote_volume_usdt,
                 signal.change_24h_percent, signal.kind,
@@ -197,9 +230,16 @@ def process_signal(
                     "largest_ask_wall_share_percent": context.ask_wall_share_percent,
                 } if context else None,
             )
-        except (httpx.HTTPError, AIError) as error:
-            audit.record_error(f"OpenAI: {error}", now)
-            print(f"Ошибка анализа OpenAI: {error}", flush=True)
+        if analysis_error is not None:
+            kind = openai_error_kind(analysis_error)
+            audit.record_error(
+                f"OpenAI {signal.symbol} [{kind}] после "
+                f"{analysis_attempts} попыток: {analysis_error}", now,
+            )
+            print(
+                f"Ошибка анализа OpenAI {signal.symbol} [{kind}] после "
+                f"{analysis_attempts} попыток: {analysis_error}", flush=True,
+            )
     audit.record_signal(
         now, signal.symbol, signal.price, signal.kind, signal.change_percent,
         signal.change_24h_percent, signal.quote_volume_usdt,
@@ -212,12 +252,14 @@ def process_signal(
         entry_dynamics=dynamics_payload,
     )
     if analysis is None:
-        audit.record_entry_rejection(
-            now, signal.symbol, "нет полного решения AI",
-            context.spread_bps if context else None,
-            tick_percent,
-        )
-        return False
+        if not leader_paper_entry or shadow_prefilter_reason is not None:
+            kind = openai_error_kind(analysis_error) if analysis_error else "disabled"
+            audit.record_entry_rejection(
+                now, signal.symbol, f"нет полного решения AI ({kind})",
+                context.spread_bps if context else None,
+                tick_percent,
+            )
+            return False
     if shadow_prefilter_reason is not None:
         reason = (
             "теневая AI-оценка второго шанса: "
@@ -316,7 +358,7 @@ def process_signal(
     )
     notice = (
         trader.open_on_signal(signal.symbol, signal.price, signal.kind,
-                              analysis.score if analysis else None, now,
+                              analysis.score if analysis else 0, now,
                               bypass_min_score=leader_paper_entry)
         if trader else None
     )

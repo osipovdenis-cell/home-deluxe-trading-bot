@@ -5,6 +5,15 @@ import unittest
 try:
     import httpx  # noqa: F401
 except ModuleNotFoundError:
+    class DummyHTTPError(Exception):
+        pass
+
+    class DummyHTTPStatusError(DummyHTTPError):
+        pass
+
+    class DummyTimeoutException(DummyHTTPError):
+        pass
+
     class DummyClient:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -12,7 +21,13 @@ except ModuleNotFoundError:
         def close(self) -> None:
             pass
 
-    sys.modules["httpx"] = SimpleNamespace(Client=DummyClient)
+    sys.modules["httpx"] = SimpleNamespace(
+        Client=DummyClient,
+        HTTPError=DummyHTTPError,
+        HTTPStatusError=DummyHTTPStatusError,
+        TimeoutException=DummyTimeoutException,
+        Timeout=lambda *args, **kwargs: None,
+    )
 
 from bot.ai import AIAnalyst, AIError
 

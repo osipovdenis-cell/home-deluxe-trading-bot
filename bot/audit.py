@@ -1457,10 +1457,17 @@ class AuditLog:
             for name, count in sorted(categories.items(), key=lambda item: -item[1])[:5]
         ) or "нет"
         error_categories: dict[str, int] = {}
+        openai_subtypes: dict[str, int] = {}
         for row in error_rows:
             message = str(row[0] or "").lower()
             if message.startswith("openai") or "openai" in message:
                 category = "OpenAI"
+                subtype = "другое"
+                for name in ("timeout", "format", "empty", "http-429", "http-500", "http-502", "http-503"):
+                    if f"[{name}]" in message:
+                        subtype = name
+                        break
+                openai_subtypes[subtype] = openai_subtypes.get(subtype, 0) + 1
             elif "telegram" in message:
                 category = "Telegram"
             elif "binance" in message or "context" in message:
@@ -1474,6 +1481,11 @@ class AuditLog:
                 error_categories.items(), key=lambda item: -item[1]
             )
         )
+        openai_text = ", ".join(
+            f"{name} {count}" for name, count in sorted(
+                openai_subtypes.items(), key=lambda item: -item[1]
+            )
+        )
         return (
             "👁 Наблюдатель AI-бота\n"
             f"Период: {hours:.1f} ч.\n"
@@ -1482,6 +1494,7 @@ class AuditLog:
             f"Основные причины: {filters_text}.\n"
             f"Технические ошибки: {error_count}"
             + (f" ({errors_text})." if errors_text else ".")
+            + (f"\nОшибки OpenAI: {openai_text}." if openai_text else "")
         )
 
     def build_symbol_behavior(

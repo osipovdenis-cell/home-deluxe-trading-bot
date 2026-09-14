@@ -23,7 +23,8 @@ class AIAnalyst:
         self.client = httpx.Client(
             base_url="https://api.openai.com",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=45.0,
+            # A momentum decision that arrives too late is no longer useful.
+            timeout=httpx.Timeout(12.0, connect=5.0),
         )
 
     @staticmethod
@@ -80,8 +81,8 @@ class AIAnalyst:
             json={
                 "model": self.model,
                 "store": False,
-                "reasoning": {"effort": "high"},
-                "max_output_tokens": 450,
+                "reasoning": {"effort": "medium"},
+                "max_output_tokens": 900,
                 "instructions": (
                     "Ты последний защитный фильтр входа криптовалютного тестового "
                     "бота. Цель сделки: сначала +0,7%, затем +1%, стоп −0,5%, "

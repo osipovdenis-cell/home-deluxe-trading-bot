@@ -727,6 +727,7 @@ class PaperTrader:
         closed = [row for row in rows if row["status"] == "CLOSED"]
         opened = [row for row in rows if row["status"] == "OPEN"]
         protected = sum(bool(row["take_1_done"]) for row in rows)
+        without_ai = sum(int(row["ai_score"]) == 0 for row in rows)
         trailing = sum("ракета:" in str(row["close_reason"] or "") for row in closed)
         stops = sum(str(row["close_reason"] or "") == "стоп-лосс" for row in closed)
         realized = sum(float(row["realized_pnl_usdt"]) for row in closed)
@@ -742,6 +743,7 @@ class PaperTrader:
         return (
             "🚀 Сделки по ракетам\n"
             f"Входов: {len(rows)}; закрыто {len(closed)}, открыто {len(opened)}.\n"
+            f"Резервных входов без ответа AI: {without_ai}.\n"
             f"Защита +1% включалась: {protected}; выходов по откату: {trailing}; "
             f"стопов: {stops}.\n"
             f"Реализованный результат: {realized:+.3f} USDT; "

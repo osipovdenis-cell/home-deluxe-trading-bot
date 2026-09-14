@@ -1,10 +1,37 @@
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
-from bot.main import exceptional_new_entry, history_entry_policy
+from bot.ai import AIError
+from bot.main import (
+    analyze_momentum_with_retries,
+    exceptional_new_entry,
+    history_entry_policy,
+    openai_error_kind,
+)
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_retries_ai_twice_then_returns_analysis(self) -> None:
+        expected = SimpleNamespace(decision="BUY", score=70)
+
+        class FlakyAI:
+            calls = 0
+
+            def analyze_momentum(self):
+                self.calls += 1
+                if self.calls < 3:
+                    raise AIError("Некорректный формат ответа OpenAI")
+                return expected
+
+        ai = FlakyAI()
+        with patch("bot.main.time.sleep"):
+            analysis, error, attempts = analyze_momentum_with_retries(ai)
+        self.assertIs(analysis, expected)
+        self.assertIsNone(error)
+        self.assertEqual(attempts, 3)
+        self.assertEqual(openai_error_kind(AIError("Некорректный формат ответа OpenAI")), "format")
+
     def _objects(self):
         analysis = SimpleNamespace(decision="BUY", score=85)
         context = SimpleNamespace(
