@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import sqlite3
+from statistics import median
 import time
 
 from bot.probability import FEATURE_NAMES, train_probability_model
@@ -891,6 +892,106 @@ class AuditLog:
                 f"созрело {matured}, цель раньше стопа {successes} "
                 f"({rate:.1f}%)."
             )
+        return "\n".join(lines)
+
+    def leader_path_report_text(
+        self, now: float, lookback_seconds: int = 86400,
+        horizon_seconds: int = 3600,
+    ) -> str:
+        """Report the full price path after every detected leader candidate."""
+        rows = self.connection.execute(
+            "SELECT id,started_at,resolved_at,symbol,trigger_price,accepted "
+            "FROM confirmation_events WHERE started_at>=? AND started_at<=? "
+            "AND signal_kind LIKE '%лидер%' ORDER BY started_at",
+            (now - lookback_seconds, now - horizon_seconds),
+        ).fetchall()
+        observations = []
+        for event_id, started_at, resolved_at, symbol, trigger_price, accepted in rows:
+            points = self.connection.execute(
+                "SELECT timestamp,price FROM samples WHERE symbol=? "
+                "AND timestamp>=? AND timestamp<=? ORDER BY timestamp",
+                (symbol, started_at, float(started_at) + horizon_seconds),
+            ).fetchall()
+            if not points or float(points[-1][0]) < float(started_at) + horizon_seconds * 0.8:
+                continue
+            changes = [
+                (float(price) / float(trigger_price) - 1) * 100
+                for _timestamp, price in points
+            ]
+            success, stopped, maximum, minimum = self._path_outcome(
+                [float(price) for _timestamp, price in points],
+                float(trigger_price), 0.7, 0.5,
+            )
+            running_peak = changes[0]
+            deepest_retracement = 0.0
+            for change in changes:
+                running_peak = max(running_peak, change)
+                deepest_retracement = min(deepest_retracement, change - running_peak)
+            signal = self.connection.execute(
+                "SELECT id,ai_decision FROM signal_events WHERE symbol=? "
+                "AND timestamp>=? AND timestamp<=? "
+                "ORDER BY ABS(timestamp-?) LIMIT 1",
+                (symbol, resolved_at, float(resolved_at) + 120, resolved_at),
+            ).fetchone()
+            ai_decision = str(signal[1]) if signal and signal[1] else None
+            ai_blocked = False
+            if signal is not None and ai_decision in {"WAIT", "SKIP"}:
+                rejection = self.connection.execute(
+                    "SELECT 1 FROM paper_entry_rejections WHERE symbol=? "
+                    "AND timestamp>=? AND timestamp<=? AND reason LIKE 'AI решил %' LIMIT 1",
+                    (symbol, resolved_at, float(resolved_at) + 120),
+                ).fetchone()
+                ai_blocked = rejection is not None
+            observations.append({
+                "accepted": bool(accepted), "success": bool(success),
+                "stopped": bool(stopped), "maximum": maximum, "minimum": minimum,
+                "end": changes[-1], "retracement": deepest_retracement,
+                "ai_avoid": ai_decision in {"WAIT", "SKIP"},
+                "ai_blocked": ai_blocked,
+            })
+
+        title = f"📈 Путь всех лидеров за {horizon_seconds // 60} минут"
+        if not observations:
+            return title + "\nСозревших наблюдений пока нет."
+
+        def summary(label: str, items: list[dict]) -> str:
+            if not items:
+                return f"• {label}: пока нет."
+            targets = sum(item["success"] for item in items)
+            stops = sum(item["stopped"] for item in items)
+            neutral = len(items) - targets - stops
+            maxima = [float(item["maximum"]) for item in items]
+            minima = [float(item["minimum"]) for item in items]
+            reached_1 = sum(value >= 1 for value in maxima)
+            reached_3 = sum(value >= 3 for value in maxima)
+            reached_5 = sum(value >= 5 for value in maxima)
+            average_end = sum(float(item["end"]) for item in items) / len(items)
+            average_retracement = sum(
+                float(item["retracement"]) for item in items
+            ) / len(items)
+            return (
+                f"• {label}: {len(items)}; цель/стоп/нейтр. "
+                f"{targets}/{stops}/{neutral}; максимум в среднем "
+                f"{sum(maxima) / len(maxima):+.2f}% (медиана {median(maxima):+.2f}%); "
+                f"минимум {sum(minima) / len(minima):+.2f}% "
+                f"(медиана {median(minima):+.2f}%); достигли +1/+3/+5%: "
+                f"{reached_1}/{reached_3}/{reached_5}; через час "
+                f"{average_end:+.2f}%; откат от вершины {average_retracement:.2f} п.п."
+            )
+
+        lines = [title, summary("все", observations)]
+        lines.append(summary(
+            "прошли 20 секунд", [item for item in observations if item["accepted"]]
+        ))
+        lines.append(summary(
+            "не прошли 20 секунд", [item for item in observations if not item["accepted"]]
+        ))
+        lines.append(summary(
+            "AI WAIT/SKIP", [item for item in observations if item["ai_avoid"]]
+        ))
+        blocked = [item for item in observations if item["ai_blocked"]]
+        if blocked:
+            lines.append(summary("раньше заблокированы AI", blocked))
         return "\n".join(lines)
 
     def leader_funnel_report_text(self, now: float, since: float) -> str:

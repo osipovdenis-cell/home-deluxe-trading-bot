@@ -497,6 +497,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
                 )
                 + "\n\n" + audit.order_flow_report_text(now),
             )
+            telegram.send(chat_id, audit.leader_path_report_text(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
                 telegram.send(chat_id, trader.post_stop_report_text(now))
@@ -774,6 +775,9 @@ def main() -> None:
                                 now, last_observer
                             )
                             + "\n\n" + audit.order_flow_report_text(now)
+                            + "\n\n" + audit.leader_path_report_text(
+                                now, now - last_observer
+                            )
                             + rocket_text,
                         )
                     last_observer = now

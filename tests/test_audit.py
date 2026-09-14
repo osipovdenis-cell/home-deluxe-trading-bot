@@ -8,6 +8,39 @@ from bot.probability import FEATURE_NAMES, train_probability_model
 
 
 class AuditTests(unittest.TestCase):
+    def test_reports_full_path_for_all_leaders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = AuditLog(str(Path(directory) / "audit.db"))
+            try:
+                events = (
+                    ("WINUSDT", True, ((1, 100), (30, 101), (61, 100.4))),
+                    ("STOPUSDT", False, ((2, 100), (30, 99.4), (62, 99.6))),
+                )
+                for index, (symbol, accepted, points) in enumerate(events):
+                    event = SimpleNamespace(
+                        started_at=1 + index, resolved_at=21 + index,
+                        symbol=symbol, trigger_price=100, resolution_price=100,
+                        accepted=accepted, reason="тест", progress_percent=0,
+                        pullback_percent=0, change_5s_percent=0,
+                        change_10s_percent=0, signal_kind="лидер",
+                    )
+                    log.record_confirmation_event(event)
+                    log.connection.executemany(
+                        "INSERT INTO samples(timestamp,symbol,price) VALUES(?,?,?)",
+                        ((timestamp, symbol, price) for timestamp, price in points),
+                    )
+                log.connection.commit()
+                text = log.leader_path_report_text(
+                    100, lookback_seconds=200, horizon_seconds=60
+                )
+                self.assertIn("Путь всех лидеров за 1 минут", text)
+                self.assertIn("цель/стоп/нейтр. 1/1/0", text)
+                self.assertIn("прошли 20 секунд: 1", text)
+                self.assertIn("не прошли 20 секунд: 1", text)
+                self.assertIn("достигли +1/+3/+5%: 1/0/0", text)
+            finally:
+                log.close()
+
     def test_order_flow_report_separates_targets_stops_and_neutral(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = AuditLog(str(Path(directory) / "audit.db"))
