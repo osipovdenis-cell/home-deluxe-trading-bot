@@ -7,6 +7,7 @@ from statistics import median
 import time
 
 from bot.probability import FEATURE_NAMES, train_probability_model
+from bot.rocket_comparison import RocketComparison
 
 
 @dataclass(frozen=True)
@@ -315,6 +316,7 @@ class AuditLog:
         database.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(database)
         self.connection.execute("PRAGMA journal_mode=WAL")
+        self.rocket_comparison = RocketComparison(self.connection)
         self._probability_cache = None
         self._probability_cache_at = 0.0
         self.connection.executescript(

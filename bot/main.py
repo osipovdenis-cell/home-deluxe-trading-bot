@@ -308,6 +308,14 @@ def process_signal(
         print(f"Вход {signal.symbol} отклонён: {reason}", flush=True)
         return False
     if leader_paper_entry:
+        # Independent paired experiment: use completion time, not signal time.
+        audit.rocket_comparison.candidate(
+            signal.symbol, analysis.decision if analysis else None,
+            signal.is_leader_reentry, time.time(),
+            context.spread_bps if context else None,
+            settings.paper_stop_loss_percent,
+            settings.estimated_round_trip_cost_percent,
+        )
         ai_entry_allowed, ai_delay_reason = leader_ai_entry_policy(
             analysis, signal.is_leader_reentry
         )
@@ -525,6 +533,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
                 + "\n\n" + audit.order_flow_report_text(now),
             )
             telegram.send(chat_id, audit.leader_path_report_text(now))
+            telegram.send(chat_id, audit.rocket_comparison.report())
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
                 telegram.send(chat_id, trader.post_stop_report_text(now))
@@ -675,9 +684,11 @@ def main() -> None:
                 if now - last_market >= 1:
                     if market_stream.healthy(now):
                         prices, market.market_stats = market_stream.snapshot()
+                        audit.rocket_comparison.tick(prices, now)
                         market.eligible_count = len(prices)
                     elif now - last_fallback >= 5:
                         prices = market.fetch_prices()
+                        audit.rocket_comparison.tick(prices, time.time())
                         market_stream.set_symbols(market.symbols)
                         market_stream.seed(prices, market.market_stats)
                         last_fallback = now
@@ -808,6 +819,7 @@ def main() -> None:
                             + rocket_text,
                         )
                     last_observer = now
+                    telegram.send(chat_id, audit.rocket_comparison.report())
                 time.sleep(0.1)
             except httpx.HTTPError as error:
                 audit.record_error(str(error))

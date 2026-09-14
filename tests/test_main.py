@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from bot.ai import AIError
@@ -9,10 +9,47 @@ from bot.main import (
     history_entry_policy,
     leader_ai_entry_policy,
     openai_error_kind,
+    process_signal,
 )
+from bot.market import PumpSignal, SignalMarketContext, EntryDynamics
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_shadow_pair_records_wait_without_opening_actual_trade(self):
+        context = SignalMarketContext(1000, 2, 100, 60, spread_bps=10)
+        market, audit, trader = Mock(), Mock(), Mock()
+        market.execution_safety.return_value = (True, None, 0.01)
+        market.leader_entry_quality.return_value = (True, None)
+        market.entry_dynamics.return_value = EntryDynamics(.1, .1, .2, .3, .5, -.1, 0, 0, 50)
+        settings = SimpleNamespace(
+            early_threshold_percent=.5, paper_take_profit_1_percent=.7,
+            paper_take_profit_2_percent=1, paper_stop_loss_percent=.5,
+            estimated_round_trip_cost_percent=.2,
+        )
+        signal = PumpSignal("TEST", 100, 3, 300, "лидер")
+        analysis = SimpleNamespace(decision="WAIT", score=60, verdict="wait", reason="test", risk="test")
+        with patch("bot.main.analyze_momentum_with_retries", return_value=(analysis, None, 1)), \
+                patch("bot.main.time.time", return_value=150), patch("builtins.print"):
+            opened = process_signal(signal, {}, 100, market, audit, trader, Mock(),
+                                    Mock(), "chat", settings, context)
+        self.assertFalse(opened)
+        trader.open_on_signal.assert_not_called()
+        audit.rocket_comparison.candidate.assert_called_once_with(
+            "TEST", "WAIT", False, 150, 10, .5, .2
+        )
+
+    def test_failed_execution_cannot_enter_shadow_comparison(self):
+        market, audit, trader = Mock(), Mock(), Mock()
+        market.execution_safety.return_value = (False, "спред", .01)
+        signal = PumpSignal("TEST", 100, 3, 300, "лидер")
+        context = SignalMarketContext(1000, 2, 100, 60, spread_bps=100)
+        with patch("builtins.print"):
+            opened = process_signal(signal, {}, 100, market, audit, trader, Mock(),
+                                    Mock(), "chat", Mock(), context)
+        self.assertFalse(opened)
+        audit.rocket_comparison.candidate.assert_not_called()
+        trader.open_on_signal.assert_not_called()
+
     def test_ai_wait_delays_only_first_leader_entry(self) -> None:
         analysis = SimpleNamespace(decision="WAIT", score=62)
         allowed, reason = leader_ai_entry_policy(analysis, False)
