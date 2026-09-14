@@ -98,7 +98,8 @@ def process_signal(
         if context else (None,) * 8
     )
     execution_safe, rejection_reason, tick_percent = market.execution_safety(
-        signal.symbol, signal.price, context
+        signal.symbol, signal.price, context,
+        max_spread_percent=0.25 if leader_paper_entry else 0.1,
     )
     dynamics = market.entry_dynamics(signal.symbol, now)
     shadow_prefilter_reason = None
@@ -123,7 +124,11 @@ def process_signal(
             )
             return False
     if execution_safe:
-        quality_safe, quality_reason = market.entry_quality(context, dynamics)
+        quality_safe, quality_reason = (
+            market.leader_entry_quality(context, dynamics)
+            if leader_paper_entry
+            else market.entry_quality(context, dynamics)
+        )
     else:
         quality_safe, quality_reason = False, shadow_prefilter_reason
     if not quality_safe and shadow_prefilter_reason is None:
@@ -533,6 +538,7 @@ def main() -> None:
         settings.estimated_round_trip_cost_percent,
         settings.paper_stagnation_after_seconds,
         settings.paper_stagnation_window_seconds,
+        0,
     ) if settings.paper_trading_enabled else None
     ai = AIAnalyst(settings.openai_api_key, settings.openai_model) if settings.openai_api_key else None
     market_stream = None
@@ -605,7 +611,8 @@ def main() -> None:
             f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
-               f"до {settings.paper_max_open_positions} позиций, вход от "
+               f"до {settings.paper_max_open_positions} позиций: обычный "
+               "скальпинг только собирает аналитику, все слоты отданы лидерам; вход от "
                f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
                "Обычный выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%. "
                "Лидер: держим 100%; после +1% защищаем минимум +1% и "

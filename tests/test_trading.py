@@ -15,6 +15,32 @@ def make_trader(path: str) -> PaperTrader:
 
 
 class PaperTraderTests(unittest.TestCase):
+    def test_disables_scalp_trading_and_reserves_all_slots_for_rockets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trader = PaperTrader(
+                str(Path(directory) / "trades.db"),
+                200, 50, 4, 55, 0.5, 0.7, 1, 1.5, 1, 0, 0.2,
+                ordinary_max_open_positions=0,
+            )
+            try:
+                self.assertIsNone(
+                    trader.open_on_signal("SCALP1USDT", 1, "ранний", 60, 0)
+                )
+                self.assertIsNone(
+                    trader.open_on_signal("SCALP2USDT", 1, "ранний", 60, 1)
+                )
+                for index in range(4):
+                    self.assertIsNotNone(trader.open_on_signal(
+                        f"ROCKET{index}USDT", 1, "лидер", 0, index + 2,
+                        bypass_min_score=True,
+                    ))
+                self.assertIsNone(trader.open_on_signal(
+                    "ROCKET5USDT", 1, "лидер", 0, 9,
+                    bypass_min_score=True,
+                ))
+            finally:
+                trader.close()
+
     def test_post_stop_report_tracks_further_fall_and_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))

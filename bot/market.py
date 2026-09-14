@@ -604,6 +604,42 @@ class MarketMonitor:
             return False, "рынок падает, относительной силы монеты недостаточно"
         return True, None
 
+    @staticmethod
+    def leader_entry_quality(
+        context: SignalMarketContext, dynamics: EntryDynamics
+    ) -> tuple[bool, str | None]:
+        """Use continuation efficiency instead of generic scalp filters."""
+        if context.flow_cvd_60s_percent is None:
+            return False, "order flow лидера ещё не накоплен"
+        if context.flow_cvd_60s_percent <= 0:
+            return False, (
+                f"крупный поток не подтверждает рост: CVD "
+                f"{context.flow_cvd_60s_percent:+.1f}%"
+            )
+        if (
+            context.flow_trade_rate_acceleration is not None
+            and context.flow_trade_rate_acceleration <= 1
+        ):
+            return False, "частота исполненных сделок не ускоряется"
+        if (
+            context.flow_price_change_60s_percent is None
+            or context.flow_price_change_60s_percent <= 0.05
+        ):
+            return False, "покупки не вызывают продолжения роста цены"
+        if (
+            context.flow_price_efficiency_per_10k is None
+            or context.flow_price_efficiency_per_10k <= 0
+        ):
+            return False, "поток покупателей поглощается продавцами"
+        if (
+            context.flow_spread_change_bps is not None
+            and context.flow_spread_change_bps >= 0
+        ):
+            return False, "спред лидера не сокращается"
+        if dynamics.change_15s_percent < -0.05:
+            return False, "последние 15 секунд лидер уже снижается"
+        return True, None
+
     def drain_confirmation_rejections(self) -> list[tuple[float, str, str]]:
         rejected = list(self.confirmation_rejections)
         self.confirmation_rejections.clear()

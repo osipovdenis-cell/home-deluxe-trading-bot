@@ -250,6 +250,7 @@ class PaperTrader:
         round_trip_cost_percent: float,
         stagnation_after_seconds: int = 900,
         stagnation_window_seconds: int = 300,
+        ordinary_max_open_positions: int | None = None,
     ) -> None:
         database = Path(database_path)
         database.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +270,7 @@ class PaperTrader:
         self.round_trip_cost_percent = round_trip_cost_percent
         self.stagnation_after_seconds = stagnation_after_seconds
         self.stagnation_window_seconds = stagnation_window_seconds
+        self.ordinary_max_open_positions = ordinary_max_open_positions
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS paper_positions (
@@ -368,6 +370,22 @@ class PaperTrader:
         )
         if active_count >= self.max_open_positions:
             return None
+        if self.ordinary_max_open_positions is not None:
+            is_rocket = "лидер" in signal_kind
+            category_rows = self.connection.execute(
+                "SELECT signal_kind FROM paper_positions WHERE status='OPEN'"
+            ).fetchall()
+            ordinary_count = sum(
+                "лидер" not in str(row[0]) for row in category_rows
+            )
+            rocket_count = len(category_rows) - ordinary_count
+            rocket_limit = max(
+                0, self.max_open_positions - self.ordinary_max_open_positions
+            )
+            if is_rocket and rocket_count >= rocket_limit:
+                return None
+            if not is_rocket and ordinary_count >= self.ordinary_max_open_positions:
+                return None
         cash_balance = float(
             self.connection.execute(
                 "SELECT cash_balance_usdt FROM paper_account WHERE id = 1"

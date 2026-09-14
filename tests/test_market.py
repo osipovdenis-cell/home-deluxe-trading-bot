@@ -1,6 +1,7 @@
 import unittest
 import sys
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -26,10 +27,32 @@ except ModuleNotFoundError:
         HTTPStatusError=DummyHTTPStatusError,
     )
 
-from bot.market import MarketMonitor, SignalMarketContext
+from bot.market import EntryDynamics, MarketMonitor, SignalMarketContext
 
 
 class MarketMonitorTests(unittest.TestCase):
+    def test_leader_quality_requires_effective_order_flow(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("LEADERUSDT",), 300, 3, 1800
+        )
+        try:
+            context = SignalMarketContext(
+                100000, 2, 100, 60, 10, 1000, 900, 5,
+                flow_cvd_60s_percent=20,
+                flow_trade_rate_acceleration=2,
+                flow_price_change_60s_percent=0.3,
+                flow_price_efficiency_per_10k=1.5,
+                flow_spread_change_bps=-2,
+            )
+            dynamics = EntryDynamics(0.1, 0.2, 0.3, 1, 2, -0.05, 0, 0, 40)
+            self.assertEqual(monitor.leader_entry_quality(context, dynamics), (True, None))
+            absorbed = replace(context, flow_price_change_60s_percent=0.0)
+            safe, reason = monitor.leader_entry_quality(absorbed, dynamics)
+            self.assertFalse(safe)
+            self.assertIn("роста цены", reason)
+        finally:
+            monitor.close()
+
     def test_bad_rolling_ticker_symbol_does_not_crash_refresh(self) -> None:
         import httpx
 
