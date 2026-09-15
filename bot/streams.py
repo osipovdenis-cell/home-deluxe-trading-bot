@@ -188,7 +188,16 @@ class LeaderOrderFlowStream:
                 if trades and anchor and now-seconds-anchor[0] <= 5 else None)
         fresh = bool(trades and quotes and now-trades[-1][0] <= 2
                      and now-quotes[-1][0] <= 2 and all(v is not None for v in changes.values()))
+        missing_windows = [key for key, value in changes.items() if value is None]
+        freshness_reasons = []
+        if not trades or now-trades[-1][0] > 2:
+            freshness_reasons.append('нет свежей сделки за 2 секунды')
+        if not quotes or now-quotes[-1][0] > 2:
+            freshness_reasons.append('нет свежей котировки за 2 секунды')
+        if missing_windows:
+            freshness_reasons.append('нет опорной цены для окон: ' + ','.join(missing_windows))
         return dict(at=now, fresh=fresh, changes=changes,
+                    freshness_reasons=freshness_reasons, missing_windows=missing_windows,
                     trade_age=now-trades[-1][0] if trades else None,
                     quote_age=now-quotes[-1][0] if quotes else None,
                     snapshot=self.snapshot(symbol, now) if fresh else None)

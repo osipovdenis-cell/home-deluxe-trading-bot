@@ -9,6 +9,16 @@ from bot.streams import (
 
 
 class LeaderOrderFlowStreamTests(unittest.TestCase):
+    def test_probe_reports_missing_windows_without_fabricating_prices(self):
+        stream = LeaderOrderFlowStream()
+        stream.ingest({"e":"aggTrade", "s":"TEST", "p":"100", "q":"1", "m":False}, 99)
+        stream.ingest({"s":"TEST", "b":"99", "B":"1", "a":"100", "A":"1"}, 99)
+        probe = stream.entry_probe("TEST", 100)
+        self.assertFalse(probe['fresh'])
+        self.assertEqual(probe['missing_windows'], ['5','10','15','20','60'])
+        self.assertTrue(probe['freshness_reasons'])
+        self.assertIsNone(probe['snapshot'])
+
     def test_tracks_aggressive_flow_price_response_and_depth_changes(self) -> None:
         stream = LeaderOrderFlowStream()
         stream.set_symbols(("LEADERUSDT",))

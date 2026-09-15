@@ -240,3 +240,6 @@ Binance и рассматривает только монеты с положи�
 
 Если `TELEGRAM_CHAT_ID` пуст, программа возьмёт chat ID из последнего сообщения,
 отправленного боту, и покажет его в терминале.
+
+### Rocket volume admission (15 September 2026)
+Virtual leader entries, including repeat/rescue entries, require analysis volume_ratio_5m >= 1 before AI or purchase. Missing/non-finite volume is rejected with a recorded reason. Exit and stop rules are unchanged. Fresh momentum remains shadow-only; missing windows and stale trade/quote reasons are persisted rather than treating gaps as valid data. The four-variant cohort starts a new version after this admission change; it contains only admitted actual entries and cannot estimate the returns of volume-rejected candidates.

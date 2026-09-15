@@ -1,4 +1,5 @@
 import time
+import math
 from queue import Empty
 
 import httpx
@@ -168,6 +169,16 @@ def _process_signal(
         except (httpx.HTTPError, ValueError) as error:
             audit.record_error(f"Signal context {signal.symbol}: {error}", now)
             print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
+    if leader_paper_entry:
+        volume = context.volume_ratio_5m if context is not None else None
+        if (not isinstance(volume, (int, float)) or isinstance(volume, bool)
+                or not math.isfinite(volume) or volume < 1):
+            reason = (f"объём лидера ниже ×1: ×{volume:.3f}"
+                      if isinstance(volume, (int, float)) and math.isfinite(volume)
+                      else "объём лидера неизвестен; вход отложен")
+            audit.record_entry_rejection(now, signal.symbol, reason,
+                                         context.spread_bps if context else None, None)
+            return False
     context_values = (
         (context.quote_volume_5m_usdt, context.volume_ratio_5m,
          context.trades_5m, context.taker_buy_ratio_percent,

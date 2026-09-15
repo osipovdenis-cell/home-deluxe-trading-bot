@@ -50,6 +50,8 @@ def entry_probe(market, signal, context, dynamics, started):
         snapshot=probe.pop('snapshot')
         probe.update(signal_at=started, allowed=None, reason='поток устарел или окно ещё не накоплено',
                      before_context=asdict(context), before_dynamics=asdict(dynamics))
+        if probe.get('freshness_reasons'):
+            probe['reason'] = '; '.join(probe['freshness_reasons'])
         if snapshot is not None and probe['fresh']:
             fresh_context=market.with_order_flow(context,snapshot)
             fresh_dynamics=replace(dynamics,change_15s_percent=probe['changes']['15'])

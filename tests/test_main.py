@@ -15,6 +15,29 @@ from bot.market import PumpSignal, SignalMarketContext, EntryDynamics
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_leader_volume_gate_prevents_purchase_before_ai(self):
+        for volume in (.99, float('nan'), float('inf')):
+            with self.subTest(volume=volume):
+                market, audit, trader, ai = Mock(), Mock(), Mock(), Mock()
+                context = SignalMarketContext(1000, volume, 100, 60, spread_bps=10)
+                signal = PumpSignal("TEST", 100, 3, 300, "лидер")
+                self.assertFalse(process_signal(signal, {}, 100, market, audit,
+                    trader, ai, Mock(), "chat", SimpleNamespace(), context))
+                trader.open_on_signal.assert_not_called()
+                ai.analyze.assert_not_called()
+                market.execution_safety.assert_not_called()
+                audit.record_entry_rejection.assert_called_once()
+
+    def test_volume_boundary_continues_to_existing_execution_gate(self):
+        market, audit, trader = Mock(), Mock(), Mock()
+        market.execution_safety.return_value = (False, "test spread", .01)
+        context = SignalMarketContext(1000, 1, 100, 60, spread_bps=10)
+        signal = PumpSignal("TEST", 100, 3, 300, "лидер")
+        self.assertFalse(process_signal(signal, {}, 100, market, audit,
+            trader, Mock(), Mock(), "chat", SimpleNamespace(), context))
+        market.execution_safety.assert_called_once()
+        trader.open_on_signal.assert_not_called()
+
     def test_shadow_pair_records_wait_without_opening_actual_trade(self):
         context = SignalMarketContext(1000, 2, 100, 60, spread_bps=10)
         market, audit, trader = Mock(), Mock(), Mock()
