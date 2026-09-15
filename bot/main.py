@@ -22,6 +22,8 @@ from bot.reporting import rocket_totals, scalp_totals
 def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
     if trader is not None:
         telegram.send(chat_id, rocket_totals(trader, prices, now))
+        for stop_text in trader.stop_audit.report_texts(now):
+            telegram.send(chat_id, stop_text)
     telegram.send(chat_id, scalp_totals(audit.scalp_shadow, now))
     telegram.send(chat_id, audit.model_status_text(now) + '\n\n'
                   + audit.scalp_shadow.learning_status(now))

@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 import time
 from bot.reporting import period_label
+from bot.rocket_stops import RocketStopAudit
 
 
 @dataclass(frozen=True)
@@ -353,6 +354,8 @@ class PaperTrader:
         )
         self.connection.commit()
 
+        self.stop_audit = RocketStopAudit(self.connection)
+
     def open_on_signal(
         self,
         symbol: str,
@@ -433,6 +436,8 @@ class PaperTrader:
             "cash_balance_usdt - ? WHERE id = 1",
             (trade_usdt,),
         )
+        if "лидер" in signal_kind:
+            self.stop_audit.snapshot_cost(cursor.lastrowid, self.round_trip_cost_percent)
         self.connection.commit()
         return TradeNotice(
             "BUY",
