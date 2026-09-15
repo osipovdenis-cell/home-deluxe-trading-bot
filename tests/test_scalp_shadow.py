@@ -9,6 +9,47 @@ from bot.probability import train_probability_model
 
 
 class ScalpShadowTests(unittest.TestCase):
+    def test_monitor_events_reach_scalp_audit_without_manual_kind(self):
+        from bot.market import MarketMonitor
+        # Exercise the production producer -> audit -> shadow chain. Hand-made
+        # events with kind='ранний' missed the nullable-kind contract previously.
+        for name, prices, expected_accepted, leader in (
+            ('accepted', [(321, 100.7)], True, False),
+            ('flat', [(321, 100.61)], False, False),
+            ('disappeared', [(321, 100.4)], False, False),
+            ('rescue', [(321, 100.5), (326, 100.51), (331, 100.62)], True, False),
+            ('rescue_expired', [(321, 100.5), (412, 100.51)], False, False),
+            ('leader', [(321, 100.7)], True, True),
+        ):
+            with self.subTest(name=name):
+                monitor = MarketMonitor('https://api.binance.com', ('AAAUSDT',),
+                                        300, 3, 1800, early_threshold_percent=.5)
+                audit = AuditLog(':memory:')
+                try:
+                    if leader:
+                        monitor.market_stats['AAAUSDT'] = (2_000_000, 10)
+                    for at in range(0, 301, 15):
+                        monitor.update({'AAAUSDT':100 if at < 300 else 100.6}, now=at)
+                    for at, price in prices:
+                        monitor.update({'AAAUSDT':price}, now=at)
+                    event = monitor.drain_confirmation_events()[-1]
+                    self.assertEqual(event.accepted, expected_accepted)
+                    if leader:
+                        self.assertIn('лидер', event.signal_kind)
+                    else:
+                        self.assertEqual(event.signal_kind, 'скальпинг')
+                    audit.record_confirmation_event(
+                        event, scalp_now=event.resolved_at, scalp_cost=.2)
+                    self.assertEqual(audit.scalp_shadow.active_symbols(),
+                                     () if leader else ('AAAUSDT',))
+                    if not leader:
+                        audit.scalp_shadow.quote(event.resolved_at + 1,'AAAUSDT',100,100.01)
+                        state=json.loads(audit.connection.execute('SELECT state FROM scalp_shadow').fetchone()[0])
+                        self.assertEqual(state['entered'], event.resolved_at + 1)
+                finally:
+                    monitor.close()
+                    audit.close()
+
     def setUp(self):
         self.db = sqlite3.connect(':memory:')
         self.s = ScalpShadow(self.db)
