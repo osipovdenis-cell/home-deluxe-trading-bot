@@ -16,6 +16,15 @@ from bot.telegram import TelegramClient
 from bot.trading import PaperTrader
 from bot.scalp_shadow import ScalpQuoteStream
 from bot.audit import SymbolBehavior
+from bot.reporting import rocket_totals, scalp_totals
+
+
+def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
+    if trader is not None:
+        telegram.send(chat_id, rocket_totals(trader, prices, now))
+    telegram.send(chat_id, scalp_totals(audit.scalp_shadow, now))
+    telegram.send(chat_id, audit.model_status_text(now) + '\n\n'
+                  + audit.scalp_shadow.learning_status(now))
 
 
 def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
@@ -537,13 +546,14 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
         if command == "/status":
             text = (
                 trader.summary(prices, now).telegram_text()
-                + "\n\n" + trader.rocket_report_text(prices, now)
+                + "\n\n" + rocket_totals(trader, prices, now)
                 if trader is not None else "🧪 Тестовая торговля выключена."
             )
         elif command == "/ai":
             text = audit.recent_ai_decisions_text()
         elif command == "/learning":
             telegram.send(chat_id, "⏳ Команда /learning принята, формирую отчёт…")
+            send_overall_reports(now, prices, audit, trader, telegram, chat_id)
             telegram.send(
                 chat_id,
                 audit.build_learning_report(now).telegram_text()
@@ -835,6 +845,7 @@ def main() -> None:
                     send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id)
                     last_report = now
                 if now - last_observer >= settings.observer_report_interval_seconds:
+                    send_overall_reports(now, prices, audit, trader, telegram, chat_id)
                     observer_text = audit.observer_report_text(
                         now, last_observer
                     )

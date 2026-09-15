@@ -153,6 +153,7 @@ class RocketComparison:
             "WHERE e.version=? ORDER BY e.id,l.variant", (self.VERSION,)
         ).fetchall()
         lines = ["⚖️ Входы ракет A/B — теневая проверка",
+                 f"Период: вся сохранённая история версии {self.VERSION}; не только последние 2 часа.",
                  "A: после проверок; B: WAIT/SKIP ждёт повторного сигнала."]
         if not rows:
             return "\n".join(lines + ["Новых пар пока нет. Торговля не изменена."])

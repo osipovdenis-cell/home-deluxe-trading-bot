@@ -5,10 +5,12 @@ from pathlib import Path
 import sqlite3
 from statistics import median
 import time
+import json
 
 from bot.probability import FEATURE_NAMES, train_probability_model
 from bot.rocket_comparison import RocketComparison
 from bot.scalp_shadow import ScalpShadow
+from bot.reporting import ModelJournal, period_label
 
 
 @dataclass(frozen=True)
@@ -221,7 +223,8 @@ class LearningReport:
     def telegram_text(self) -> str:
         rate = self.successes / self.examples * 100 if self.examples else 0.0
         lines = [
-            "🧠 Чему научился бот",
+            "🧠 Накопленная статистика импульсов",
+            "Период: последние 30 дней. Общая история, не оценка новой модели скальпинга.",
             f"Размеченных импульсов: {self.examples}.",
             f"Цель +0,7% раньше стопа: {rate:.1f}%.",
             f"Монет с накопленной историей: {self.learned_symbols}.",
@@ -237,7 +240,7 @@ class LearningReport:
             )
         if self.blocked_symbols:
             lines.append(
-                "Повторные входы ограничены: "
+                "Низкая доля достижения цели: "
                 + ", ".join(
                     f"{symbol} — {rate:.0f}% ({count})"
                     for symbol, count, rate in self.blocked_symbols
@@ -259,10 +262,11 @@ class ConfirmationAudit:
     prevented_stops: int
     missed_winners: int
     rejected_neutral: int
+    lookback_seconds: int = 86400
 
     def telegram_text(self) -> str:
         if not self.evaluated:
-            return "⏱ Проверка 20 секунд: результаты пока накапливаются."
+            return f"⏱ Проверка 20 секунд (последние {self.lookback_seconds/3600:g} ч): результаты пока накапливаются."
         immediate_rate = self.immediate_winners / self.evaluated * 100
         delayed_rate = (
             self.accepted_delayed_winners / self.accepted * 100
@@ -270,6 +274,7 @@ class ConfirmationAudit:
         )
         return (
             "⏱ Аудит ожидания 20 секунд\n"
+            f"Период: последние {self.lookback_seconds/3600:g} ч.\n"
             f"Проверено кандидатов: {self.evaluated}.\n"
             f"Прошли/отклонены: {self.accepted}/{self.rejected}.\n"
             f"Вход сразу достиг бы +0,7% раньше стопа: "
@@ -319,6 +324,8 @@ class AuditLog:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.rocket_comparison = RocketComparison(self.connection)
         self.scalp_shadow = ScalpShadow(self.connection)
+        self.model_journal = ModelJournal(self.connection)
+        self._probability_model_id = None
         self._probability_cache = None
         self._probability_cache_at = 0.0
         self.connection.executescript(
@@ -562,6 +569,8 @@ class AuditLog:
             self.connection.execute(
                 "ALTER TABLE confirmation_events ADD COLUMN signal_kind TEXT"
             )
+        if "shadow_model_meta" not in confirmation_columns:
+            self.connection.execute("ALTER TABLE confirmation_events ADD COLUMN shadow_model_meta TEXT")
         if self._metadata("period_started_at") is None:
             self._set_metadata("period_started_at", str(time.time()))
         self.connection.commit()
@@ -683,6 +692,13 @@ class AuditLog:
             ),
         )
         confirmation_id = int(cursor.lastrowid)
+        if model and self._probability_model_id:
+            metadata = self.model_journal.forecast(
+                self._probability_model_id, feature_values,
+                scalp_now if scalp_now is not None else float(event.resolved_at),
+            )
+            self.connection.execute('UPDATE confirmation_events SET shadow_model_meta=? WHERE id=?',
+                                    (json.dumps(metadata), confirmation_id))
         if context is not None and getattr(context, "flow_cvd_60s_percent", None) is not None:
             self.connection.execute(
                 "UPDATE confirmation_events SET flow_cvd_60s_percent=?,"
@@ -742,6 +758,7 @@ class AuditLog:
         if not rows:
             return (
                 "🌊 Теневой order flow лидеров\n"
+                f"Период снимков: последние {lookback_seconds/86400:g} дн.\n"
                 "Новые непрерывные снимки ещё не созрели 15 минут."
             )
 
@@ -762,6 +779,7 @@ class AuditLog:
         )
         lines = [
             "🌊 Теневой order flow лидеров",
+            f"Период снимков: последние {lookback_seconds/86400:g} дн.",
             f"Созрело снимков: {len(rows)}; цель {len(groups['цель'])}, "
             f"стоп {len(groups['стоп'])}, нейтрально {len(groups['нейтр.'])}.",
         ]
@@ -790,7 +808,7 @@ class AuditLog:
             successes = sum(row[0] == 1 for row in cohort)
             rate = successes / len(cohort) * 100 if cohort else 0.0
             lines.append(f"• {label}: {successes}/{len(cohort)} целей ({rate:.1f}%).")
-        lines.append("Пока это теневые гипотезы: на право входа не влияют.")
+        lines.append("Это статистическое сравнение групп; оно не подбирает и не меняет пороги автоматически.")
         return "\n".join(lines)
 
     def _probability_samples(self, before: float) -> list[tuple[int, dict]]:
@@ -810,11 +828,28 @@ class AuditLog:
 
     def _current_probability_model(self, now: float):
         if self._probability_cache is None or now - self._probability_cache_at >= 300:
+            samples = self._probability_samples(now)
             self._probability_cache = train_probability_model(
-                self._probability_samples(now)
+                samples
             )
+            self._probability_model_id = (self.model_journal.register(
+                'mixed-legacy', now, self._probability_cache, sum(y for y,_ in samples)/len(samples)
+            ) if self._probability_cache else None)
             self._probability_cache_at = now
         return self._probability_cache
+
+    def model_status_text(self, now):
+        self._current_probability_model(now)
+        observations = [(int(y), json.loads(meta)) for y,meta in self.connection.execute(
+            'SELECT delayed_success,shadow_model_meta FROM confirmation_events '
+            'WHERE shadow_model_meta IS NOT NULL AND delayed_success IS NOT NULL '
+            'AND evaluated_at<=? ORDER BY started_at DESC LIMIT 5000', (now,))]
+        return ('🎯 Общая прежняя модель: состояние обучения\n'
+                + self.model_journal.report('mixed-legacy', observations, now)
+                + '\nКонтроль этой модели без временного зазора; общая смешанная выборка. '
+                'Новые прогнозы: последние 5000 оценённых событий. '
+                'GPT получает историю в запросе, но его веса бот не переобучает. '
+                'A/B и послестоповый аудит сами не меняют настройки ракет.')
 
     def probability_shadow_report_text(
         self, now: float, lookback_seconds: int = 7 * 86400
@@ -893,7 +928,8 @@ class AuditLog:
             "GROUP BY s.signal_kind ORDER BY s.signal_kind",
             (now - lookback_seconds,),
         ).fetchall()
-        lines = ["🚀 Усиленное наблюдение за лидерами"]
+        lines = ["🚀 Усиленное наблюдение за лидерами",
+                 f"Период: последние {lookback_seconds/3600:g} ч."]
         if not rows:
             lines.append("Сигналы лидеров пока не сформированы.")
             return "\n".join(lines)
@@ -962,7 +998,9 @@ class AuditLog:
                 "ai_blocked": ai_blocked,
             })
 
-        title = f"📈 Путь всех лидеров за {horizon_seconds // 60} минут"
+        title = (f"📈 Путь всех лидеров за {horizon_seconds // 60} минут\n"
+                 f"Сигналы за последние {lookback_seconds/3600:g} ч; "
+                 f"горизонт каждого — {horizon_seconds//60} мин.")
         if not observations:
             return title + "\nСозревших наблюдений пока нет."
 
@@ -1065,6 +1103,7 @@ class AuditLog:
         ) or "нет"
         return (
             "🛰 Воронка лидеров\n"
+            f"{period_label(now, since)}\n"
             f"После фильтра роста за 12 ч: {len(confirmation)}.\n"
             f"Выдержали 20 секунд: {passed_confirmation}; отклонены: "
             f"{len(confirmation) - passed_confirmation} ({confirmation_text}).\n"
@@ -1188,6 +1227,7 @@ class AuditLog:
             sum(int(row[2]) for row in rejected_rows),
             sum(int(row[1]) for row in rejected_rows),
             sum(not int(row[1]) and not int(row[2]) for row in rejected_rows),
+            lookback_seconds,
         )
 
     def _metadata(self, key: str) -> str | None:
@@ -1672,7 +1712,8 @@ class AuditLog:
             ("эффективность тренда 1 ч", 24, "%"),
             ("эффективность тренда 4 ч", 25, "%"),
         )
-        lines = ["🔬 Победители против остальных"]
+        lines = ["🔬 Победители против остальных",
+                 f"Период: последние {lookback_seconds/86400:g} дн."]
         if rows:
             lines.append(
                 f"Расширенных снимков: {len(rows)}; цель достигли {len(winners)} "
@@ -1840,7 +1881,7 @@ class AuditLog:
         )
         return (
             "👁 Наблюдатель AI-бота\n"
-            f"Период: {hours:.1f} ч.\n"
+            f"{period_label(now, since)}\n"
             f"Решения AI: {decisions_text}.\n"
             f"Отклонено до покупки: {len(rejection_rows)}.\n"
             f"Основные причины: {filters_text}.\n"

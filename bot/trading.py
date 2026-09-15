@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import time
+from bot.reporting import period_label
 
 
 @dataclass(frozen=True)
@@ -749,7 +750,7 @@ class PaperTrader:
             (since, now),
         ).fetchall()
         if not rows:
-            return "🚀 Сделки по ракетам: входов за период пока нет."
+            return f"🚀 Сделки по ракетам: входов за период пока нет.\n{period_label(now, since)}"
         closed = [row for row in rows if row["status"] == "CLOSED"]
         opened = [row for row in rows if row["status"] == "OPEN"]
         protected = sum(bool(row["take_1_done"]) for row in rows)
@@ -768,6 +769,8 @@ class PaperTrader:
                 unrealized += float(row["position_usdt"]) * change / 100
         return (
             "🚀 Сделки по ракетам\n"
+            f"{period_label(now, since)}\n"
+            "Ниже — позиции, открытые в этом периоде. Итог по времени закрытия приведён в общем отчёте.\n"
             f"Входов: {len(rows)}; закрыто {len(closed)}, открыто {len(opened)}.\n"
             f"Резервных входов без ответа AI: {without_ai}.\n"
             f"Защита +1% включалась: {protected}; выходов по откату: {trailing}; "
@@ -779,6 +782,17 @@ class PaperTrader:
         )
 
     def post_stop_report_text(
+        self, now: float, since: float | None = None, horizon_seconds: int = 3600,
+    ) -> str:
+        if since is None:
+            since = float(self.connection.execute(
+                "SELECT report_started_at FROM paper_account WHERE id=1"
+            ).fetchone()[0])
+        return (self._post_stop_report_text(now, since, horizon_seconds)
+                + f"\nСтопы за период: {period_label(now, since)} "
+                + f"Горизонт после каждого стопа: {horizon_seconds//60} мин.")
+
+    def _post_stop_report_text(
         self,
         now: float,
         since: float | None = None,

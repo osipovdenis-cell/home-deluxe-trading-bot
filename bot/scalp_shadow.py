@@ -11,6 +11,7 @@ import time
 
 from bot.probability import train_probability_model
 from bot.streams import PositionBookTickerStream
+from bot.reporting import ModelJournal
 
 
 class ScalpQuoteStream(PositionBookTickerStream):
@@ -56,6 +57,8 @@ class ScalpShadow:
         self.db = db
         self.cache = None
         self.cache_at = -math.inf
+        self.journal = ModelJournal(db)
+        self.model_id = None
         db.executescript("""
             CREATE TABLE IF NOT EXISTS scalp_shadow (
                 id INTEGER PRIMARY KEY, version TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -168,6 +171,7 @@ class ScalpShadow:
             s.update(entered=now, entry=ask, last=now, peak=(bid/ask-1)*100,
                      trough=(bid/ask-1)*100)
             s["probability"] = self.predict(now, self.features(key))
+            s["model_evaluation"] = self.journal.forecast(self.model_id, self.features(key), now) if self.model_id else None
             for policy in self.POLICIES:
                 selected = s["baseline"] if policy == "current" else s[policy]
                 if selected:
@@ -221,13 +225,26 @@ class ScalpShadow:
                 (s["label"], dict(f, _observed_at=s["ready"], _label_end=end))
                 for _, f, s, end in rows
             ], purge_overlap=True)
+            self.model_id = (self.journal.register(
+                'scalp-v1', now, self.cache, sum(s['label'] for _,_,s,_ in rows)/len(rows)
+            ) if self.cache else None)
             self.cache_at = now
         return self.cache.predict_percent(features) if self.cache else None
+
+    def learning_status(self, now):
+        self.predict(now, {})
+        observations = [(s['label'], s.get('model_evaluation')) for _,_,s,_ in self.samples(now)]
+        return ('🎯 Обучение отдельного скальпинга\n'
+                + self.journal.report('scalp-v1', observations, now)
+                + '\nПроверка новых прогнозов: последние 5000 полных эпизодов. '
+                'Контроль обучения отделён по времени с исключением пересекающихся событий. '
+                'Модель не включает покупки и не меняет пороги.')
 
     def report(self, now):
         counts = dict(self.db.execute(
             "SELECT status,COUNT(*) FROM scalp_shadow WHERE version=? GROUP BY status", (self.VERSION,)))
         lines = ["🧪 Скальпинг отдельно — только тень (v1)",
+                 "Счётчики: с запуска этой версии; сравнение ниже — последние 5000 полных эпизодов.",
                  f"Завершено: {counts.get('DONE',0)}; наблюдаются: {counts.get('ACTIVE',0)}; "
                  f"неполные: {counts.get('INCOMPLETE',0)}; спред: {counts.get('NO_ENTRY',0)}; "
                  f"лимит наблюдения: {counts.get('CAPACITY',0)}."]
