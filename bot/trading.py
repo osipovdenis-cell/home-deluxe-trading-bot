@@ -326,6 +326,10 @@ class PaperTrader:
             str(row[1])
             for row in self.connection.execute("PRAGMA table_info(paper_account)")
         }
+        position_columns = {str(row[1]) for row in self.connection.execute(
+            'PRAGMA table_info(paper_positions)')}
+        if 'signal_timestamp' not in position_columns:
+            self.connection.execute('ALTER TABLE paper_positions ADD COLUMN signal_timestamp REAL')
         if "report_started_at" not in account_columns:
             self.connection.execute(
                 "ALTER TABLE paper_account ADD COLUMN report_started_at REAL"
@@ -355,6 +359,7 @@ class PaperTrader:
         self.connection.commit()
 
         self.stop_audit = RocketStopAudit(self.connection)
+        self.exit_monitor_healthy = None
 
     def open_on_signal(
         self,
@@ -364,6 +369,7 @@ class PaperTrader:
         ai_score: int | None,
         now: float,
         bypass_min_score: bool = False,
+        signal_timestamp: float | None = None,
     ) -> TradeNotice | None:
         if not bypass_min_score and (
             ai_score is None or ai_score < self.min_ai_score
@@ -436,6 +442,8 @@ class PaperTrader:
             "cash_balance_usdt - ? WHERE id = 1",
             (trade_usdt,),
         )
+        self.connection.execute('UPDATE paper_positions SET signal_timestamp=? WHERE id=?',
+                                (now if signal_timestamp is None else signal_timestamp, cursor.lastrowid))
         if "лидер" in signal_kind:
             self.stop_audit.snapshot_cost(cursor.lastrowid, self.round_trip_cost_percent)
         self.connection.commit()
@@ -938,7 +946,7 @@ class PaperTrader:
         entry_change_sql = (
             "(SELECT change_percent FROM signal_events "
             "WHERE signal_events.symbol = paper_positions.symbol "
-            "AND signal_events.timestamp = paper_positions.opened_at "
+            "AND signal_events.timestamp = COALESCE(paper_positions.signal_timestamp, paper_positions.opened_at) "
             "ORDER BY signal_events.id DESC LIMIT 1) AS entry_change_percent "
             if signal_events_table is not None
             else "NULL AS entry_change_percent "

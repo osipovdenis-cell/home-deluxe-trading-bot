@@ -1,4 +1,5 @@
 import json
+import math
 import threading
 import time
 from collections import defaultdict, deque
@@ -316,8 +317,10 @@ class PositionBookTickerStream:
     def __init__(self, max_symbols: int = 3) -> None:
         self.max_symbols = max_symbols
         self._symbols: tuple[str, ...] = ()
-        self._pending: dict[str, dict[str, tuple[float, float]]] = {}
+        self._pending = deque(maxlen=100000)
+        self._overflow = False
         self._latest: dict[str, float] = {}
+        self._latest_at: dict[str, float] = {}
         self._last_message_at = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -333,13 +336,12 @@ class PositionBookTickerStream:
                 return
             self._symbols = normalized
             allowed = set(normalized)
-            self._pending = {
-                symbol: points for symbol, points in self._pending.items() if symbol in allowed
-            }
+            self._pending = deque((e for e in self._pending if e[1] in allowed),
+                                  maxlen=self._pending.maxlen)
             self._latest = {
                 symbol: price for symbol, price in self._latest.items() if symbol in allowed
             }
-            self._last_message_at = 0.0
+            self._latest_at = {s:t for s,t in self._latest_at.items() if s in allowed}
         self._changed.set()
 
     def subscription_url(self) -> str | None:
@@ -354,43 +356,45 @@ class PositionBookTickerStream:
         message = json.loads(payload) if isinstance(payload, str) else payload
         item = message.get("data", message)
         symbol = str(item.get("s", ""))
-        best_bid = float(item.get("b", 0))
-        if not symbol or best_bid <= 0:
+        try:
+            best_bid = float(item.get("b", 0))
+        except (ValueError, TypeError):
+            return
+        if not symbol or not math.isfinite(best_bid) or best_bid <= 0:
             return
         with self._lock:
             if symbol not in self._symbols:
                 return
             received_at = time.time()
-            points = self._pending.setdefault(symbol, {})
-            current_low = points.get("low")
-            current_high = points.get("high")
-            if current_low is None or best_bid < current_low[0]:
-                points["low"] = (best_bid, received_at)
-            if current_high is None or best_bid > current_high[0]:
-                points["high"] = (best_bid, received_at)
-            points["latest"] = (best_bid, received_at)
+            if len(self._pending) == self._pending.maxlen:
+                self._overflow = True
+            self._pending.append((received_at, symbol, best_bid))
             self._latest[symbol] = best_bid
+            self._latest_at[symbol] = received_at
             self._last_message_at = received_at
 
     def drain(self) -> dict[str, float]:
         with self._lock:
-            result = {
-                symbol: points["latest"][0]
-                for symbol, points in self._pending.items()
-            }
+            result = {symbol:price for _,symbol,price in self._pending}
             self._pending.clear()
+            self._overflow = False
             return result
 
     def drain_events(self) -> list[tuple[float, str, float]]:
-        """Returns low/high/latest observations in their actual time order."""
+        """Retain every observation: extrema alone lose the first stop crossing."""
+        return self.drain_batch()[0]
+
+    def drain_batch(self):
         with self._lock:
-            events = {
-                (timestamp, symbol, price)
-                for symbol, points in self._pending.items()
-                for price, timestamp in points.values()
-            }
+            events, overflow = list(self._pending), self._overflow
             self._pending.clear()
-        return sorted(events)
+            self._overflow = False
+        return events, overflow
+
+    def stale_symbols(self, now, max_age_seconds=5.0):
+        with self._lock:
+            return tuple(s for s in self._symbols
+                         if now-self._latest_at.get(s, 0) > max_age_seconds)
 
     def latest(self) -> dict[str, float]:
         with self._lock:
@@ -401,7 +405,8 @@ class PositionBookTickerStream:
         with self._lock:
             if not self._symbols:
                 return True
-            return self._last_message_at > 0 and now - self._last_message_at <= max_age_seconds
+            return all(now-self._latest_at.get(s, 0) <= max_age_seconds
+                       for s in self._symbols)
 
     def start(self) -> None:
         if self._thread is not None:

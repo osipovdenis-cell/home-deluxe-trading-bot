@@ -17,6 +17,21 @@ from bot.trading import PaperTrader
 from bot.scalp_shadow import ScalpQuoteStream
 from bot.audit import SymbolBehavior
 from bot.reporting import rocket_totals, scalp_totals
+from bot.execution import PositionExitWorker, fresh_entry
+
+
+def make_paper_trader(settings):
+    return PaperTrader(
+        settings.audit_db_path, settings.paper_starting_balance_usdt,
+        settings.paper_position_usdt, settings.paper_max_open_positions,
+        settings.paper_min_ai_score, settings.paper_stop_loss_percent,
+        settings.paper_take_profit_1_percent, settings.paper_take_profit_2_percent,
+        settings.paper_take_profit_3_percent,
+        settings.paper_trailing_drawdown_percent, settings.paper_max_hold_seconds,
+        settings.estimated_round_trip_cost_percent,
+        settings.paper_stagnation_after_seconds,
+        settings.paper_stagnation_window_seconds, 0,
+    )
 
 
 def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
@@ -451,10 +466,26 @@ def _process_signal(
     if not leader_paper_entry:
         audit.scalp_shadow.decision(signal.symbol, time.time(), allowed=True,
                                     reason="все фильтры пройдены; торговля скальпинга выключена")
+    entry_at, entry_price = now, signal.price
+    if trader is not None and leader_paper_entry:
+        try:
+            if trader.exit_monitor_healthy is not None and not trader.exit_monitor_healthy():
+                raise ValueError('обработчик выходов недоступен; покупка отложена')
+            entry_at, bid, entry_price = fresh_entry(
+                market.client, signal.symbol, signal.price,
+                settings.paper_stop_loss_percent, .25,
+            )
+            if trader.exit_monitor_healthy is not None and not trader.exit_monitor_healthy():
+                raise ValueError('обработчик выходов недоступен; покупка отложена')
+            prices[signal.symbol] = bid
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            audit.record_entry_rejection(time.time(), signal.symbol,
+                f'Свежесть входа: {error}', None, None)
+            return False
     notice = (
-        trader.open_on_signal(signal.symbol, signal.price, trade_signal_kind,
-                              analysis.score if analysis else 0, now,
-                              bypass_min_score=leader_paper_entry)
+        trader.open_on_signal(signal.symbol, entry_price, trade_signal_kind,
+                              analysis.score if analysis else 0, entry_at,
+                              bypass_min_score=leader_paper_entry, signal_timestamp=now)
         if trader else None
     )
     signal_text = (
@@ -478,7 +509,7 @@ def _process_signal(
         audit.record_alert(signal.symbol, True, now)
     if notice is not None:
         try:
-            telegram.send(chat_id, trader.notice_telegram_text(notice, prices, now))
+            telegram.send(chat_id, trader.notice_telegram_text(notice, prices, entry_at))
         except httpx.HTTPError as error:
             audit.record_error(f"Telegram trade notice: {error}", now)
     return notice is not None
@@ -605,24 +636,25 @@ def main() -> None:
         settings.max_signals_per_cycle, settings.entry_confirmation_seconds,
     )
     audit = AuditLog(settings.audit_db_path)
-    trader = PaperTrader(
-        settings.audit_db_path, settings.paper_starting_balance_usdt,
-        settings.paper_position_usdt, settings.paper_max_open_positions,
-        settings.paper_min_ai_score, settings.paper_stop_loss_percent,
-        settings.paper_take_profit_1_percent, settings.paper_take_profit_2_percent,
-        settings.paper_take_profit_3_percent,
-        settings.paper_trailing_drawdown_percent, settings.paper_max_hold_seconds,
-        settings.estimated_round_trip_cost_percent,
-        settings.paper_stagnation_after_seconds,
-        settings.paper_stagnation_window_seconds,
-        0,
-    ) if settings.paper_trading_enabled else None
+    trader = make_paper_trader(settings) if settings.paper_trading_enabled else None
     ai = AIAnalyst(settings.openai_api_key, settings.openai_model) if settings.openai_api_key else None
     market_stream = None
     position_stream = None
     order_flow_stream = None
     scalp_stream = None
+    position_worker = None
     try:
+        # Start protection before slow account checks, market history and AI checks.
+        position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
+        position_stream.set_symbols(trader.open_symbols() if trader else ())
+        position_stream.start()
+        if trader is not None:
+            position_worker = PositionExitWorker(
+                lambda: make_paper_trader(settings), position_stream,
+                settings.market_data_base_url,
+            )
+            position_worker.start()
+            trader.exit_monitor_healthy = position_worker.healthy
         account = binance.account()
         chat_id = settings.telegram_chat_id or telegram.latest_chat_id()
         telegram.discard_pending_updates()
@@ -631,9 +663,6 @@ def main() -> None:
         market_stream = AllMarketMiniTickerStream(market.symbols, settings.min_quote_volume_usdt)
         market_stream.seed(prices, market.market_stats)
         market_stream.start()
-        position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
-        position_stream.set_symbols(trader.open_symbols() if trader else ())
-        position_stream.start()
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
         scalp_stream = ScalpQuoteStream()
@@ -710,6 +739,12 @@ def main() -> None:
         while True:
             now = time.time()
             try:
+                if position_worker is not None:
+                    exit_texts, exit_errors = position_worker.drain()
+                    for error in exit_errors:
+                        audit.record_error('Exit worker: '+error, now)
+                    for text in exit_texts:
+                        telegram.send(chat_id, text)
                 scalp_quotes, overflow = scalp_stream.drain_quotes()
                 if overflow:
                     audit.scalp_shadow.expire(now, overflow=True)
@@ -726,15 +761,6 @@ def main() -> None:
                         commands, now, prices, audit, trader, telegram, chat_id
                     )
                     last_command_poll = now
-                if trader:
-                    for event_at, symbol, bid in position_stream.drain_events():
-                        prices[symbol] = bid
-                        notices = trader.update_positions({symbol: bid}, event_at)
-                        valuation = dict(prices)
-                        valuation.update(position_stream.latest())
-                        send_trade_notices(trader, telegram, chat_id, notices, valuation, event_at)
-                        if notices:
-                            position_stream.set_symbols(trader.open_symbols())
                 if now - last_market >= 1:
                     if market_stream.healthy(now):
                         prices, market.market_stats = market_stream.snapshot()
@@ -746,12 +772,6 @@ def main() -> None:
                         market_stream.set_symbols(market.symbols)
                         market_stream.seed(prices, market.market_stats)
                         last_fallback = now
-                    if trader and not position_stream.healthy(now):
-                        fallback = {s: prices[s] for s in trader.open_symbols() if s in prices}
-                        notices = trader.update_positions(fallback, now)
-                        send_trade_notices(trader, telegram, chat_id, notices, prices, now)
-                        if notices:
-                            position_stream.set_symbols(trader.open_symbols())
                     signals = market.update(prices, now=now)
                     order_flow_stream.set_symbols(market.order_flow_symbols())
                     confirmation_contexts = {}
@@ -812,8 +832,6 @@ def main() -> None:
                             telegram, chat_id, settings,
                             confirmation_contexts.pop(signal.symbol, None),
                         )
-                        if opened:
-                            position_stream.set_symbols(trader.open_symbols())
                     last_market = now
                 if now - last_audit >= settings.poll_interval_seconds:
                     audit.record_prices(prices, now)
@@ -829,11 +847,6 @@ def main() -> None:
                         settings.paper_take_profit_1_percent,
                         settings.paper_stop_loss_percent,
                     )
-                    if trader:
-                        notices = trader.update_positions(prices, now)
-                        send_trade_notices(trader, telegram, chat_id, notices, prices, now)
-                        if notices:
-                            position_stream.set_symbols(trader.open_symbols())
                     last_audit = now
                 if settings.scan_all_usdt and now - market.last_symbol_refresh >= 3600:
                     refreshed = market.fetch_prices()
@@ -887,6 +900,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if position_worker:
+            position_worker.close()
         if scalp_stream:
             scalp_stream.close()
         if order_flow_stream:
