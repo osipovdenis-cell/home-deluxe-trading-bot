@@ -24,8 +24,8 @@ class ReportCollector:
             self.messages.append(text)
 
 
-def query_rows(connection, sql):
-    cursor = connection.execute(sql)
+def query_rows(connection, sql, parameters=()):
+    cursor = connection.execute(sql, parameters)
     names = [column[0] for column in cursor.description]
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
@@ -44,10 +44,39 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
         bundle['rocket_cards']=cards(trader.connection, now, 100)
         # Explicit allow-list: no environment, raw logs, account keys or full DB dump.
         bundle['positions'] = query_rows(trader.connection, '''
-            SELECT id,opened_at,closed_at,symbol,entry_price,highest_price,
+            SELECT id,opened_at,closed_at,signal_timestamp,symbol,entry_price,highest_price,
                    initial_quantity,remaining_quantity,position_usdt,
                    realized_pnl_usdt,ai_score,signal_kind,status,close_reason
             FROM paper_positions ORDER BY id DESC LIMIT 100''')
+        # Exact signal linkage; nearby confirmations are explicitly candidates,
+        # not invented foreign keys. Export only numeric market features/decisions.
+        signal_fields = '''id,timestamp,symbol,entry_price,signal_kind,change_percent,
+            change_24h_percent,quote_volume_usdt,ai_score,ai_decision,
+            quote_volume_5m_usdt,volume_ratio_5m,trades_5m,taker_buy_ratio_percent,
+            spread_bps,bid_depth_usdt,ask_depth_usdt,order_book_imbalance_percent,
+            change_15s_percent,change_30s_percent,change_60s_percent,
+            change_180s_percent,change_300s_percent,pullback_from_high_percent,
+            btc_change_300s_percent,market_breadth_60s_percent'''
+        confirmation_fields = '''id,started_at,resolved_at,symbol,accepted,signal_kind,
+            confirmation_progress_percent,confirmation_change_5s_percent,
+            confirmation_change_10s_percent,volume_ratio_5m,taker_buy_ratio_percent,
+            spread_bps,change_60s_percent,pullback_from_high_percent,
+            large_buy_volume_15s_usdt,large_sell_volume_15s_usdt,
+            large_buy_volume_60s_usdt,large_sell_volume_60s_usdt,
+            trend_change_15m_percent,trend_change_60m_percent,trend_change_240m_percent,
+            flow_cvd_60s_percent,flow_trade_rate_acceleration,
+            flow_price_change_60s_percent,flow_price_efficiency_per_10k,
+            flow_spread_bps,flow_spread_change_bps'''
+        for position in bundle['positions']:
+            stamp = position['signal_timestamp'] or position['opened_at']
+            position['entry_signals'] = query_rows(audit.connection,
+                f'SELECT {signal_fields} FROM signal_events WHERE symbol=? AND timestamp=? ORDER BY id',
+                (position['symbol'], stamp))
+            position['confirmation_candidates'] = query_rows(audit.connection,
+                f'''SELECT {confirmation_fields} FROM confirmation_events
+                    WHERE symbol=? AND resolved_at<=? AND resolved_at>=?
+                    ORDER BY resolved_at DESC LIMIT 5''',
+                (position['symbol'], stamp, stamp - 120))
         bundle['fills'] = query_rows(trader.connection, '''
             SELECT id,position_id,timestamp,side,price,quantity,pnl_usdt,reason
             FROM paper_fills ORDER BY id DESC LIMIT 200''')

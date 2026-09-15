@@ -54,6 +54,11 @@ class ReportExportTests(unittest.TestCase):
         try:
             trader.open_on_signal('LSKUSDT', 100, 'лидер', 80, 1)
             trader.update_positions({'LSKUSDT': 96.27}, 2)
+            audit.record_signal(1, 'LSKUSDT', 100, 'лидер', 3, 20, 1000000,
+                                80, 'ok', volume_ratio_5m=2.5, ai_decision='BUY',
+                                ai_reason='PRIVATE_FREE_TEXT')
+            audit.record_signal(3, 'LSKUSDT', 105, 'лидер', 8, 25, 1000000,
+                                95, 'future', volume_ratio_5m=9)
             trader.connection.execute('CREATE TABLE secrets(token TEXT)')
             trader.connection.execute("INSERT INTO secrets VALUES('DO_NOT_EXPORT')")
             with (patch('bot.telegram.TelegramClient.send', side_effect=AssertionError('network')),
@@ -65,6 +70,10 @@ class ReportExportTests(unittest.TestCase):
             self.assertEqual(bundle['positions'][0]['symbol'], 'LSKUSDT')
             self.assertAlmostEqual(bundle['positions'][0]['realized_pnl_usdt'], -1.965)
             self.assertEqual(len(bundle['fills']), 2)
+            self.assertEqual(len(bundle['positions'][0]['entry_signals']), 1)
+            self.assertEqual(bundle['positions'][0]['entry_signals'][0]['volume_ratio_5m'], 2.5)
+            self.assertEqual(bundle['positions'][0]['confirmation_candidates'], [])
+            self.assertNotIn('PRIVATE_FREE_TEXT', json.dumps(bundle))
             self.assertNotIn('DO_NOT_EXPORT', json.dumps(bundle))
             self.assertEqual(trader.connection.execute('SELECT COUNT(*) FROM paper_positions').fetchone()[0], 1)
             self.assertTrue(bundle['exit_monitor_healthy'])
