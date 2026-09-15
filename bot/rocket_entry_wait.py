@@ -7,7 +7,7 @@ import httpx
 
 from bot.execution import fresh_entry
 from bot.rocket_cards import entry_probe
-from bot.rocket_entry_guard import finite
+from bot.rocket_entry_guard import finite, fresh_quality_guard
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class RocketEntryWaitWorker:
 
     @staticmethod
     def recovered(probe):
-        if not isinstance(probe, dict) or probe.get('fresh') is not True:
+        if not fresh_quality_guard(probe)[0]:
             return False
         r5 = (probe.get('changes') or {}).get('5')
         flow = probe.get('after_flow') or {}
@@ -118,7 +118,7 @@ class RocketEntryWaitWorker:
                 # No available slot/balance: keep observing until expiry.
                 continue
             # Remove before diagnostic/notification work so failures cannot repeat a buy.
-            self.finish(trader,job,'OPENED','восстановился рост за 5с; покупки выше продаж',at)
+            self.finish(trader,job,'OPENED','восстановился рост за 5с; покупки выше продаж; свежее рыночное качество подтверждено',at)
             row=trader.connection.execute('SELECT id FROM paper_positions WHERE symbol=? AND opened_at=? ORDER BY id DESC LIMIT 1',
                                          (symbol,at)).fetchone()
             sink=self.market.__dict__.get('rocket_shadow_sink')

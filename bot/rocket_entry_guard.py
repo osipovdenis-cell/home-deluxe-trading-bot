@@ -6,6 +6,15 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def fresh_quality_guard(probe):
+    """Reuse the existing leader-quality verdict computed from fresh order flow."""
+    if not isinstance(probe, dict) or probe.get('fresh') is not True:
+        return False, 'нет свежих данных рыночного качества'
+    if probe.get('allowed') is not True:
+        return False, str(probe.get('reason') or 'рыночное качество не подтверждено')
+    return True, None
+
+
 def fading_buy_guard(probe):
     if not isinstance(probe, dict) or probe.get('fresh') is not True:
         detail = probe.get('reason', 'нет снимка') if isinstance(probe, dict) else 'нет снимка'
@@ -21,4 +30,7 @@ def fading_buy_guard(probe):
     if after < before and r10 < 0:
         return False, (f'ослабление покупок: 5с {before:.2f}→{after:.2f} USDT; '
                        f'цена 5с {r5:+.4f}%, 10с {r10:+.4f}%; вход отложен')
+    quality_ok, quality_reason = fresh_quality_guard(probe)
+    if not quality_ok:
+        return False, 'свежее рыночное качество: ' + quality_reason
     return True, None

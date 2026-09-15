@@ -4,7 +4,7 @@ from bot.rocket_entry_guard import fading_buy_guard
 
 class FadingBuyTests(unittest.TestCase):
     def probe(self, before=6500, after=431, r5=0, r10=-.046):
-        return dict(fresh=True, before_context={'flow_buy_5s_usdt':before},
+        return dict(fresh=True,allowed=True, before_context={'flow_buy_5s_usdt':before},
                     after_flow={'buy_5s_usdt':after}, changes={'5':r5,'10':r10})
 
     def test_buys_fall_and_stall_or_decline_defers(self):
@@ -20,3 +20,11 @@ class FadingBuyTests(unittest.TestCase):
         for p in [None,{},dict(fresh=False), self.probe(after=float('nan')),
                   self.probe(before=None),self.probe(r10=None),self.probe(after=-1)]:
             self.assertFalse(fading_buy_guard(p)[0])
+
+    def test_fresh_quality_veto_is_mandatory_for_direct_entry(self):
+        for verdict in (False,None):
+            probe=self.probe(r5=.1,r10=.1)
+            probe.update(allowed=verdict,reason='частота исполненных сделок не ускоряется')
+            allowed,reason=fading_buy_guard(probe)
+            self.assertFalse(allowed)
+            self.assertIn('частота',reason)

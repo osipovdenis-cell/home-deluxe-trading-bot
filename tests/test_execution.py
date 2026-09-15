@@ -194,7 +194,7 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':False,'reason':'fresh impulse faded',
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':True,'reason':None,
                               'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,
@@ -204,8 +204,8 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(row['entry_price'],100.05)
                 self.assertEqual((row['opened_at'],row['signal_timestamp']),(200,100))
                 self.assertEqual(audit.connection.execute('SELECT timestamp FROM signal_events').fetchone()[0],100)
-                # A negative shadow verdict must not veto the existing trading decision.
-                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':False,'reason':'fresh impulse faded',
+                # Other experimental shadow verdicts do not override approved fresh quality.
+                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':True,'reason':None,
                     'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}},
                     'entry_bid':99.95,'entry_quote_at':200})
             finally:
@@ -236,7 +236,7 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':6500},'after_flow':{'buy_5s_usdt':431},'changes':{'5':.01,'10':-.046},'allowed':False,'reason':'fresh impulse faded',
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':6500},'after_flow':{'buy_5s_usdt':431},'changes':{'5':.01,'10':-.046},'allowed':True,'reason':None,
                               'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,

@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from statistics import median
 
-VERSION = 'rocket-entry-four-v4-short-wait'
+VERSION = 'rocket-entry-four-v5-fresh-quality'
 FIRST_REVIEW = 50
 
 

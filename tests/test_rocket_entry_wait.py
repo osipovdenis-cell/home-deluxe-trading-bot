@@ -20,7 +20,7 @@ class ShortWaitTests(unittest.TestCase):
         self.worker.prepare(self.trader)
         with patch('bot.rocket_entry_wait.time.time',return_value=100):
             self.worker.submit(PumpSignal('R',100,3,300,'лидер'),None,None,80,80)
-        self.good=dict(fresh=True,changes={'5':.1},after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10})
+        self.good=dict(fresh=True,allowed=True,changes={'5':.1},after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10})
 
     def tearDown(self):
         self.trader.close()
@@ -101,3 +101,30 @@ class ShortWaitTests(unittest.TestCase):
         self.assertFalse(any(t.is_alive() for t in threads))
         self.assertEqual(errors,[])
         self.assertEqual(self.trader.connection.execute('SELECT count(*) FROM paper_positions').fetchone()[0],1)
+
+    def test_fresh_quality_rejection_blocks_before_quote_then_can_recover(self):
+        bad={**self.good,'allowed':False,'reason':'частота исполненных сделок не ускоряется'}
+        self.assertEqual(self.tick([bad]),0)
+        self.assertEqual(self.trader.open_symbols(),())
+        self.assertEqual(self.worker.symbols(),('R',))
+        self.tick([self.good,self.good],102)
+        self.assertEqual(self.trader.open_symbols(),('R',))
+
+    def test_quality_deterioration_during_quote_blocks_purchase(self):
+        bad={**self.good,'allowed':False,'reason':'спред лидера не сокращается'}
+        self.assertEqual(self.tick([self.good,bad]),1)
+        self.assertEqual(self.trader.open_symbols(),())
+        self.assertEqual(self.worker.symbols(),('R',))
+
+    def test_slow_trade_frequency_rejected_despite_price_and_buy_recovery(self):
+        from bot.market import MarketMonitor, SignalMarketContext, EntryDynamics
+        context=SignalMarketContext(100000,1.45,100,60,10,1000,900,5,
+            flow_cvd_60s_percent=49,flow_trade_rate_acceleration=.735,
+            flow_price_change_60s_percent=.74,flow_price_efficiency_per_10k=.54,
+            flow_spread_change_bps=-.07)
+        dynamics=EntryDynamics(.41,.4,.74,1,2,-.05,0,0,40)
+        allowed,reason=MarketMonitor.leader_entry_quality(context,dynamics)
+        probe={**self.good,'allowed':allowed,'reason':reason}
+        self.assertFalse(allowed)
+        self.assertEqual(self.tick([probe]),0)
+        self.assertEqual(self.trader.open_symbols(),())
