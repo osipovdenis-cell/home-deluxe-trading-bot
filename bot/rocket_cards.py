@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.streams import PositionBookTickerStream
+from bot.rocket_entry_variants import evaluate as evaluate_variants, report_text as variants_report
 
 WINDOWS = (5, 10, 20, 60)
 MAX_GAP = 5
@@ -41,6 +42,8 @@ def entry_probe(market, signal, context, dynamics, started):
     callback = market.__dict__.get('rocket_probe')
     if callback is None:
         return None
+    calculation_started = time.perf_counter()
+    probe = {}
     try:
         at=time.time()
         probe=callback(signal.symbol, at)
@@ -52,9 +55,11 @@ def entry_probe(market, signal, context, dynamics, started):
             fresh_dynamics=replace(dynamics,change_15s_percent=probe['changes']['15'])
             probe['allowed'],probe['reason']=market.leader_entry_quality(fresh_context,fresh_dynamics)
             probe['after_flow']=asdict(snapshot)
-        return probe
     except Exception:
-        return dict(at=time.time(),allowed=None,reason='ошибка теневого снимка; сделка не изменена')
+        probe = dict(at=time.time(),allowed=None,reason='ошибка теневого снимка; сделка не изменена')
+    probe['entry_variants'] = evaluate_variants(probe)
+    probe['calculation_ms'] = (time.perf_counter() - calculation_started) * 1000
+    return probe
 
 
 def shadow_summary(db):
@@ -70,7 +75,8 @@ def shadow_summary(db):
             f'B, только свежий импульс: входов {len(kept)}, результат {sum(kept):+.3f} USDT; пропущено {len(skipped)}.\n'
             f'Среди пропущенных прибыльных {sum(p>0 for p in skipped)}, убыточных {sum(p<0 for p in skipped)}.\n'
             'В обеих ветках одинаковые фактические выходы и издержки; отказ = без сделки. '
-            'Нет оценки замещающих сделок и свободного банка. Неизвестные оценки исключены. На торговлю не влияет.')
+            'Нет оценки замещающих сделок и свободного банка. Неизвестные оценки исключены. На торговлю не влияет.'
+            '\n\n' + variants_report(db))
 
 
 def window_result(points, entry, exit_at, exit_price, minutes, now, cost):

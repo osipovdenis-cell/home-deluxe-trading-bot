@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 from bot.rocket_cards import cards
+from bot.rocket_entry_variants import report_data as entry_variants_report
 
 
 REPORT_PATH = Path('/var/lib/home-deluxe-bot/reports/latest.p7m')
@@ -42,6 +43,7 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
     if trader is not None:
         bundle['rocket_cards']=cards(trader.connection, now, 100)
+        bundle['rocket_entry_variants'] = entry_variants_report(trader.connection)
         # Explicit allow-list: no environment, raw logs, account keys or full DB dump.
         bundle['positions'] = query_rows(trader.connection, '''
             SELECT id,opened_at,closed_at,signal_timestamp,symbol,entry_price,highest_price,

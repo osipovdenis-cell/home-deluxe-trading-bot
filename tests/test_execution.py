@@ -194,7 +194,8 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'allowed':False,'reason':'fresh impulse faded'}):
+                        patch('bot.main.entry_probe',return_value={'allowed':False,'reason':'fresh impulse faded',
+                              'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,
                         SignalMarketContext(1000,2,100,60,spread_bps=10))
@@ -204,7 +205,9 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual((row['opened_at'],row['signal_timestamp']),(200,100))
                 self.assertEqual(audit.connection.execute('SELECT timestamp FROM signal_events').fetchone()[0],100)
                 # A negative shadow verdict must not veto the existing trading decision.
-                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'allowed':False,'reason':'fresh impulse faded','entry_bid':99.95,'entry_quote_at':200})
+                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'allowed':False,'reason':'fresh impulse faded',
+                    'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}},
+                    'entry_bid':99.95,'entry_quote_at':200})
             finally:
                 trader.close()
                 audit.close()

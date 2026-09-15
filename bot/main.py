@@ -961,6 +961,8 @@ def main() -> None:
                         )
                     last_observer = now
                     telegram.send(chat_id, audit.rocket_comparison.report())
+                    if trader is not None:
+                        telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))
                 time.sleep(0.1)
             except httpx.HTTPError as error:
