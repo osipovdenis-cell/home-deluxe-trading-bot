@@ -1,4 +1,5 @@
 import time
+from queue import Empty
 
 import httpx
 
@@ -19,6 +20,7 @@ from bot.audit import SymbolBehavior
 from bot.reporting import rocket_totals, scalp_totals
 from bot.execution import PositionExitWorker, fresh_entry
 from bot.report_export import ReportExportWorker, collect_reports
+from bot.rocket_cards import RocketPathWorker, entry_probe, cards, format_card, shadow_summary
 
 
 def make_paper_trader(settings):
@@ -502,12 +504,23 @@ def _process_signal(
             audit.record_entry_rejection(time.time(), signal.symbol,
                 f'Свежесть входа: {error}', None, None)
             return False
+    diagnostic_probe = entry_probe(market, signal, context, dynamics, now) if leader_paper_entry else None
     notice = (
         trader.open_on_signal(signal.symbol, entry_price, trade_signal_kind,
                               analysis.score if analysis else 0, entry_at,
                               bypass_min_score=leader_paper_entry, signal_timestamp=now)
         if trader else None
     )
+    if notice is not None and diagnostic_probe is not None:
+        # Read-only shadow result: never used in any branch authorizing a trade.
+        try:
+            sink=market.__dict__.get('rocket_shadow_sink')
+            row=trader.connection.execute('SELECT id FROM paper_positions WHERE symbol=? AND opened_at=? ORDER BY id DESC LIMIT 1',
+                                          (signal.symbol,entry_at)).fetchone()
+            if sink is not None and row is not None:
+                sink(row[0],{**diagnostic_probe,'entry_bid':bid,'entry_quote_at':entry_at})
+        except Exception:
+            print('Rocket shadow entry could not be recorded',flush=True)
     signal_text = (
             f"{'🚀' if signal.kind == 'сильный' or 'лидер' in signal.kind else '⚡️'} "
             f"{signal.kind.capitalize()} сигнал {signal.symbol}\n"
@@ -628,13 +641,24 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
                 telegram.send(chat_id, trader.post_stop_report_text(now))
+                telegram.send(chat_id, shadow_summary(trader.connection))
+                for card in cards(trader.connection, now, 5):
+                    telegram.send(chat_id, format_card(card))
+            continue
+        elif command == "/rockets":
+            if trader is not None:
+                telegram.send(chat_id, rocket_totals(trader, prices, now))
+                telegram.send(chat_id, shadow_summary(trader.connection))
+                for card in cards(trader.connection, now, 10):
+                    telegram.send(chat_id, format_card(card))
             continue
         elif command in {"/help", "/start"}:
             text = (
                 "👁 Команды наблюдателя\n"
                 "/status — банк и позиции\n"
                 "/ai — последние решения AI\n"
-                "/learning — накопленное обучение"
+                "/learning — накопленное обучение\n"
+                "/rockets — карточки последних 10 сделок ракет"
             )
         else:
             continue
@@ -664,6 +688,7 @@ def main() -> None:
     scalp_stream = None
     position_worker = None
     report_worker = None
+    rocket_path_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -686,6 +711,11 @@ def main() -> None:
         market_stream.start()
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
+        if trader is not None:
+            rocket_path_worker=RocketPathWorker(settings.audit_db_path)
+            rocket_path_worker.start()
+            market.rocket_probe=order_flow_stream.entry_probe
+            market.rocket_shadow_sink=rocket_path_worker.record_shadow
         scalp_stream = ScalpQuoteStream()
         audit.scalp_shadow.expire(time.time())
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
@@ -769,6 +799,16 @@ def main() -> None:
             now = time.time()
             try:
                 report_worker.set_prices(prices)
+                if rocket_path_worker is not None:
+                    while True:
+                        try: key,card_text=rocket_path_worker.notifications.get_nowait()
+                        except Empty: break
+                        try:
+                            telegram.send(chat_id,card_text)
+                            rocket_path_worker.acknowledge(*key)
+                        except httpx.HTTPError:
+                            rocket_path_worker.notifications.put((key,card_text))
+                            break
                 if position_worker is not None:
                     exit_texts, exit_errors = position_worker.drain()
                     for error in exit_errors:
@@ -930,6 +970,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if rocket_path_worker:
+            rocket_path_worker.close()
         if report_worker:
             report_worker.close()
         if position_worker:

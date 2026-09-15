@@ -176,6 +176,23 @@ class LeaderOrderFlowStream:
             spread, spread_change,
         )
 
+    def entry_probe(self, symbol, now):
+        """Read-only fresh windows for diagnostic comparison, no REST or trading."""
+        with self._lock:
+            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now]
+            quotes = [r for r in self._quotes.get(symbol, ()) if r[0] <= now]
+        changes = {}
+        for seconds in (5, 10, 15, 20, 60):
+            anchor = next((r for r in reversed(trades) if r[0] <= now-seconds), None)
+            changes[str(seconds)] = ((trades[-1][1]/anchor[1]-1)*100
+                if trades and anchor and now-seconds-anchor[0] <= 5 else None)
+        fresh = bool(trades and quotes and now-trades[-1][0] <= 2
+                     and now-quotes[-1][0] <= 2 and all(v is not None for v in changes.values()))
+        return dict(at=now, fresh=fresh, changes=changes,
+                    trade_age=now-trades[-1][0] if trades else None,
+                    quote_age=now-quotes[-1][0] if quotes else None,
+                    snapshot=self.snapshot(symbol, now) if fresh else None)
+
     def start(self) -> None:
         if self._thread is not None:
             return

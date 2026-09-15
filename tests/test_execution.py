@@ -186,13 +186,15 @@ class ExecutionTests(unittest.TestCase):
             market.leader_entry_quality.return_value=(True,None)
             market.entry_dynamics.return_value=EntryDynamics(.1,.1,.2,.3,.5,-.1,0,0,50)
             market.change_12h_percent={'R':10}
+            market.rocket_shadow_sink=Mock()
             settings=SimpleNamespace(early_threshold_percent=.5,paper_take_profit_1_percent=.7,
                 paper_take_profit_2_percent=1,paper_stop_loss_percent=.5,paper_min_ai_score=70,
                 estimated_round_trip_cost_percent=.2,telegram_signal_alerts_enabled=False)
             analysis=SimpleNamespace(decision='BUY',score=80,verdict='ok',reason='test',risk='test')
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
-                        patch('bot.main.time.time',return_value=200):
+                        patch('bot.main.time.time',return_value=200), \
+                        patch('bot.main.entry_probe',return_value={'allowed':False,'reason':'fresh impulse faded'}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,
                         SignalMarketContext(1000,2,100,60,spread_bps=10))
@@ -201,6 +203,8 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(row['entry_price'],100.05)
                 self.assertEqual((row['opened_at'],row['signal_timestamp']),(200,100))
                 self.assertEqual(audit.connection.execute('SELECT timestamp FROM signal_events').fetchone()[0],100)
+                # A negative shadow verdict must not veto the existing trading decision.
+                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'allowed':False,'reason':'fresh impulse faded','entry_bid':99.95,'entry_quote_at':200})
             finally:
                 trader.close()
                 audit.close()
