@@ -18,6 +18,7 @@ from bot.scalp_shadow import ScalpQuoteStream
 from bot.audit import SymbolBehavior
 from bot.reporting import rocket_totals, scalp_totals
 from bot.execution import PositionExitWorker, fresh_entry
+from bot.report_export import ReportExportWorker, collect_reports
 
 
 def make_paper_trader(settings):
@@ -42,6 +43,25 @@ def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
     telegram.send(chat_id, scalp_totals(audit.scalp_shadow, now))
     telegram.send(chat_id, audit.model_status_text(now) + '\n\n'
                   + audit.scalp_shadow.learning_status(now))
+
+
+def build_report_snapshot(settings, prices, now, exit_healthy):
+    # Created and closed in the export thread, never shared with entry/exit workers.
+    export_audit = AuditLog(settings.audit_db_path)
+    export_trader = None
+    try:
+        if settings.paper_trading_enabled:
+            export_trader = make_paper_trader(settings)
+        bundle = collect_reports(export_audit, export_trader, prices, now,
+                                 handle_observer_commands, exit_healthy)
+        bundle['runtime'] = dict(paper_trading_enabled=settings.paper_trading_enabled,
+                                 stop_loss_percent=settings.paper_stop_loss_percent,
+                                 round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
+        return bundle
+    finally:
+        export_audit.close()
+        if export_trader is not None:
+            export_trader.close()
 
 
 def send_trade_notices(trader, telegram, chat_id, notices, prices, now):
@@ -643,6 +663,7 @@ def main() -> None:
     order_flow_stream = None
     scalp_stream = None
     position_worker = None
+    report_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -669,6 +690,14 @@ def main() -> None:
         audit.scalp_shadow.expire(time.time())
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
         scalp_stream.start()
+        report_worker = ReportExportWorker(
+            lambda snapshot_prices, snapshot_now: build_report_snapshot(
+                settings, snapshot_prices, snapshot_now,
+                position_worker.healthy() if position_worker else None,
+            )
+        )
+        report_worker.set_prices(prices)
+        report_worker.start()
         ai_status = "не настроен"
         if ai is not None:
             try:
@@ -739,6 +768,7 @@ def main() -> None:
         while True:
             now = time.time()
             try:
+                report_worker.set_prices(prices)
                 if position_worker is not None:
                     exit_texts, exit_errors = position_worker.drain()
                     for error in exit_errors:
@@ -900,6 +930,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if report_worker:
+            report_worker.close()
         if position_worker:
             position_worker.close()
         if scalp_stream:

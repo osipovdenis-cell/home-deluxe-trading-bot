@@ -1,0 +1,45 @@
+name: Encrypted bot reports
+
+on:
+  workflow_run:
+    workflows: [Deploy bot]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: home-deluxe-report-export
+  cancel-in-progress: false
+
+jobs:
+  reports:
+    if: >-
+      github.repository == 'osipovdenis-cell/home-deluxe-trading-bot' &&
+      (github.event_name == 'workflow_dispatch' && github.actor == 'osipovdenis-cell' ||
+       github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 6
+    steps:
+      - name: Wait for encrypted snapshot
+        shell: bash
+        run: |
+          for attempt in {1..48}; do
+            if test -s /var/lib/home-deluxe-bot/reports/latest.p7m; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Encrypted snapshot unavailable; inspect bot locally.'
+          exit 1
+      - name: Upload ciphertext only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bot-report-encrypted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /var/lib/home-deluxe-bot/reports/latest.p7m
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

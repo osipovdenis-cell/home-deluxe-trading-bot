@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 data/
+*Private_Key*.pem
+*.p7m
+decrypted-report*.json
