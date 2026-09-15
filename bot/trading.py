@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
+import threading
+
+_ENTRY_LOCK = threading.RLock()
 import time
 from bot.reporting import period_label
 from bot.rocket_stops import RocketStopAudit
@@ -361,7 +364,12 @@ class PaperTrader:
         self.stop_audit = RocketStopAudit(self.connection)
         self.exit_monitor_healthy = None
 
-    def open_on_signal(
+    def open_on_signal(self, *args, **kwargs):
+        # Serialize paper admissions across main and short-observation workers.
+        with _ENTRY_LOCK:
+            return self._open_on_signal(*args, **kwargs)
+
+    def _open_on_signal(
         self,
         symbol: str,
         price: float,

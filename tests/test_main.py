@@ -15,6 +15,16 @@ from bot.market import PumpSignal, SignalMarketContext, EntryDynamics
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_pending_approved_entry_does_not_repeat_ai(self):
+        market, audit, trader, ai = Mock(), Mock(), Mock(), Mock()
+        market.rocket_entry_waiter=Mock()
+        market.rocket_entry_waiter.symbols.return_value=('TEST',)
+        self.assertFalse(process_signal(PumpSignal('TEST',100,3,300,'лидер'),{},100,
+            market,audit,trader,ai,Mock(),'owner',SimpleNamespace()))
+        market.fetch_signal_context.assert_not_called()
+        trader.open_on_signal.assert_not_called()
+        self.assertEqual(ai.mock_calls,[])
+
     def test_leader_volume_gate_prevents_purchase_before_ai(self):
         for volume in (.99, float('nan'), float('inf')):
             with self.subTest(volume=volume):

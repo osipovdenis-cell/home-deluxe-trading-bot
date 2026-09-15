@@ -4,6 +4,7 @@ from queue import Empty
 
 import httpx
 
+from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.ai import AIAnalyst, AIError
 from bot.audit import AuditLog, detect_pumps
@@ -163,6 +164,9 @@ def _process_signal(
     settings, preloaded_context=None,
 ):
     leader_paper_entry = "лидер" in signal.kind
+    waiter = market.__dict__.get('rocket_entry_waiter')
+    if leader_paper_entry and waiter is not None and signal.symbol in waiter.symbols():
+        return False  # The approved entry is already observed without another AI call.
     context = preloaded_context
     if context is None:
         try:
@@ -520,6 +524,10 @@ def _process_signal(
     if trader is not None and leader_paper_entry:
         entry_allowed, entry_reason = fading_buy_guard(diagnostic_probe)
         if not entry_allowed:
+            if waiter is not None:
+                queued = waiter.submit(signal,context,dynamics,analysis.score if analysis else 0,now)
+                entry_reason += ('; короткое наблюдение без нового AI/20с' if queued
+                                 else '; очередь короткого наблюдения заполнена')
             audit.record_entry_rejection(time.time(), signal.symbol, entry_reason,
                                          context.spread_bps if context else None, None)
             return False
@@ -707,6 +715,7 @@ def main() -> None:
     position_worker = None
     report_worker = None
     rocket_path_worker = None
+    entry_wait_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -734,6 +743,11 @@ def main() -> None:
             rocket_path_worker.start()
             market.rocket_probe=order_flow_stream.entry_probe
             market.rocket_shadow_sink=rocket_path_worker.record_shadow
+            entry_wait_worker=RocketEntryWaitWorker(
+                lambda: make_paper_trader(settings), market, position_worker.healthy,
+                settings.market_data_base_url)
+            market.rocket_entry_waiter=entry_wait_worker
+            entry_wait_worker.start()
         scalp_stream = ScalpQuoteStream()
         audit.scalp_shadow.expire(time.time())
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
@@ -817,6 +831,11 @@ def main() -> None:
             now = time.time()
             try:
                 report_worker.set_prices(prices)
+                if entry_wait_worker is not None:
+                    while not entry_wait_worker.errors.empty():
+                        audit.record_error(entry_wait_worker.errors.get(),now)
+                    while not entry_wait_worker.messages.empty():
+                        telegram.send(chat_id,entry_wait_worker.messages.get())
                 if rocket_path_worker is not None:
                     while True:
                         try: key,card_text=rocket_path_worker.notifications.get_nowait()
@@ -861,7 +880,7 @@ def main() -> None:
                         market_stream.seed(prices, market.market_stats)
                         last_fallback = now
                     signals = market.update(prices, now=now)
-                    order_flow_stream.set_symbols(market.order_flow_symbols())
+                    order_flow_stream.set_symbols((*entry_wait_worker.symbols(), *market.order_flow_symbols()) if entry_wait_worker else market.order_flow_symbols())
                     confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
@@ -990,6 +1009,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if entry_wait_worker:
+            entry_wait_worker.close()
         if rocket_path_worker:
             rocket_path_worker.close()
         if report_worker:

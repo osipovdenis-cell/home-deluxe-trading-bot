@@ -13,8 +13,8 @@ class FadingBuyTests(unittest.TestCase):
 
     def test_buy_fall_alone_does_not_veto_and_recovery_can_pass(self):
         self.assertTrue(fading_buy_guard(self.probe(r5=.1,r10=.2))[0])
-        self.assertTrue(fading_buy_guard(self.probe(after=6500))[0])
-        self.assertTrue(fading_buy_guard(self.probe(after=7000))[0])
+        self.assertTrue(fading_buy_guard(self.probe(after=6500,r5=.1))[0])
+        self.assertTrue(fading_buy_guard(self.probe(after=7000,r5=.1))[0])
 
     def test_unknown_data_defer(self):
         for p in [None,{},dict(fresh=False), self.probe(after=float('nan')),

@@ -16,7 +16,9 @@ def fading_buy_guard(probe):
     r5, r10 = changes.get('5'), changes.get('10')
     if not all(finite(v) for v in (before, after, r5, r10)) or min(before, after) < 0:
         return False, 'перепроверка ракет: неполные данные покупок/цены; вход отложен'
-    if after < before and (r5 <= 0 or r10 < 0):
+    if r5 <= 0:
+        return False, f'рост за последние 5с не подтверждён ({r5:+.4f}%); вход отложен'
+    if after < before and r10 < 0:
         return False, (f'ослабление покупок: 5с {before:.2f}→{after:.2f} USDT; '
                        f'цена 5с {r5:+.4f}%, 10с {r10:+.4f}%; вход отложен')
     return True, None

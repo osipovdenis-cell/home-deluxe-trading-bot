@@ -236,7 +236,7 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':6500},'after_flow':{'buy_5s_usdt':431},'changes':{'5':0,'10':-.046},'allowed':False,'reason':'fresh impulse faded',
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':6500},'after_flow':{'buy_5s_usdt':431},'changes':{'5':.01,'10':-.046},'allowed':False,'reason':'fresh impulse faded',
                               'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,

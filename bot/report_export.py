@@ -42,6 +42,9 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   generated_at_unix=now, exit_monitor_healthy=exit_healthy,
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
     if trader is not None:
+        if trader.connection.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_entry_waits'").fetchone():
+            bundle['rocket_entry_waits'] = query_rows(trader.connection,
+                'SELECT * FROM rocket_entry_waits ORDER BY id DESC LIMIT 100')
         bundle['rocket_cards']=cards(trader.connection, now, 100)
         bundle['rocket_entry_variants'] = entry_variants_report(trader.connection)
         # Explicit allow-list: no environment, raw logs, account keys or full DB dump.
