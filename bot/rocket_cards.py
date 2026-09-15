@@ -125,11 +125,17 @@ def build_card(db, row, now):
             'SELECT timestamp,bid FROM rocket_bid_path WHERE symbol=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp',
             (row['symbol'],opened,min(now,closed+3600)))]
     card['source']='bid'
-    if not points and exists(db,'samples'):
-        points = [(float(t),float(p)) for t,p in db.execute(
+    recorder_start=db.execute("SELECT value FROM rocket_path_meta WHERE key='started'").fetchone() if exists(db,'rocket_path_meta') else None
+    predates_recorder=recorder_start is not None and opened<float(recorder_start[0])
+    if (not points or predates_recorder) and exists(db,'samples'):
+        legacy = [(float(t),float(p)) for t,p in db.execute(
             'SELECT timestamp,price FROM samples WHERE symbol=? AND timestamp>? AND timestamp<=? ORDER BY timestamp',
             (row['symbol'],opened,min(now,closed+3600)))]
-        card['source']='legacy_last_trade'
+        if legacy:
+            card['source']='mixed_legacy_bid' if points else 'legacy_last_trade'
+            merged=dict(legacy)
+            merged.update(points)  # Preserve recorded bid where both sources have the same time.
+            points=sorted(merged.items())
     saved_cost=db.execute('SELECT cost_percent FROM rocket_stop_costs WHERE position_id=?',(row['id'],)).fetchone() if exists(db,'rocket_stop_costs') else None
     cost=float(saved_cost[0]) if saved_cost else None
     if cost is None:

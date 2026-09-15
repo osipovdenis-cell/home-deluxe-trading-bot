@@ -94,6 +94,17 @@ class RocketCardsTests(unittest.TestCase):
         self.db.execute('UPDATE rocket_entry_probes SET payload=?',(json.dumps({'allowed':None}),))
         self.assertIn('закрытых с известной оценкой 0',shadow_summary(self.db))
 
+    def test_new_recording_preserves_earlier_legacy_path_without_certifying_it(self):
+        self.db.execute('CREATE TABLE samples(symbol TEXT,timestamp REAL,price REAL)')
+        self.db.executemany('INSERT INTO samples VALUES(?,?,?)',[('R',t,98) for t in range(1,901)])
+        self.db.execute("INSERT INTO rocket_path_meta VALUES('started',900)")
+        self.db.executemany('INSERT INTO rocket_bid_path VALUES(?,?,?)',[('R',t,101) for t in range(900,3611)])
+        card=build_card(self.db,self.row,3610)
+        self.assertEqual(card['source'],'mixed_legacy_bid')
+        self.assertAlmostEqual(card['windows']['5']['low_from_entry'],-2)
+        self.assertEqual(card['windows']['5']['status'],'incomplete')
+        self.assertFalse(card['comparisons'])
+
     def test_fresh_probe_requires_recent_data_and_full_windows(self):
         stream=LeaderOrderFlowStream()
         stream.set_symbols(('R',))
