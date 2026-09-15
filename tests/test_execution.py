@@ -194,7 +194,7 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'allowed':False,'reason':'fresh impulse faded',
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':False,'reason':'fresh impulse faded',
                               'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,
@@ -205,9 +205,48 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual((row['opened_at'],row['signal_timestamp']),(200,100))
                 self.assertEqual(audit.connection.execute('SELECT timestamp FROM signal_events').fetchone()[0],100)
                 # A negative shadow verdict must not veto the existing trading decision.
-                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'allowed':False,'reason':'fresh impulse faded',
+                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':False,'reason':'fresh impulse faded',
                     'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}},
                     'entry_bid':99.95,'entry_quote_at':200})
+            finally:
+                trader.close()
+                audit.close()
+
+    def test_fading_buy_guard_blocks_even_ai_buy_before_position_created(self):
+        from types import SimpleNamespace
+        from bot.audit import AuditLog
+        from bot.main import process_signal
+        from bot.market import PumpSignal, SignalMarketContext, EntryDynamics
+        with tempfile.TemporaryDirectory() as directory:
+            path=str(Path(directory)/'bot.db')
+            audit=AuditLog(path)
+            trader=make_trader(path)
+            trader.exit_monitor_healthy=lambda:True
+            market=Mock()
+            market.client=self.client()
+            market.execution_safety.return_value=(True,None,.01)
+            market.leader_entry_quality.return_value=(True,None)
+            market.entry_dynamics.return_value=EntryDynamics(.1,.1,.2,.3,.5,-.1,0,0,50)
+            market.change_12h_percent={'R':10}
+            market.rocket_shadow_sink=Mock()
+            settings=SimpleNamespace(early_threshold_percent=.5,paper_take_profit_1_percent=.7,
+                paper_take_profit_2_percent=1,paper_stop_loss_percent=.5,paper_min_ai_score=70,
+                estimated_round_trip_cost_percent=.2,telegram_signal_alerts_enabled=False)
+            analysis=SimpleNamespace(decision='BUY',score=80,verdict='ok',reason='test',risk='test')
+            try:
+                with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
+                        patch('bot.main.time.time',return_value=200), \
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':6500},'after_flow':{'buy_5s_usdt':431},'changes':{'5':0,'10':-.046},'allowed':False,'reason':'fresh impulse faded',
+                              'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
+                    opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
+                        market,audit,trader,Mock(),Mock(),'owner',settings,
+                        SignalMarketContext(1000,2,100,60,spread_bps=10))
+                self.assertFalse(opened)
+                self.assertEqual(trader.connection.execute('SELECT COUNT(*) FROM paper_positions').fetchone()[0],0)
+                reason=audit.connection.execute('SELECT reason FROM paper_entry_rejections ORDER BY rowid DESC LIMIT 1').fetchone()[0]
+                self.assertIn('ослабление покупок',reason)
+                self.assertIn('431.00',reason)
+                market.rocket_shadow_sink.assert_not_called()
             finally:
                 trader.close()
                 audit.close()

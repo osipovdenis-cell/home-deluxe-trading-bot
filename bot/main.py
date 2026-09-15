@@ -4,6 +4,7 @@ from queue import Empty
 
 import httpx
 
+from bot.rocket_entry_guard import fading_buy_guard
 from bot.ai import AIAnalyst, AIError
 from bot.audit import AuditLog, detect_pumps
 from bot.binance_testnet import BinanceTestnetClient
@@ -516,6 +517,12 @@ def _process_signal(
                 f'Свежесть входа: {error}', None, None)
             return False
     diagnostic_probe = entry_probe(market, signal, context, dynamics, now) if leader_paper_entry else None
+    if trader is not None and leader_paper_entry:
+        entry_allowed, entry_reason = fading_buy_guard(diagnostic_probe)
+        if not entry_allowed:
+            audit.record_entry_rejection(time.time(), signal.symbol, entry_reason,
+                                         context.spread_bps if context else None, None)
+            return False
     notice = (
         trader.open_on_signal(signal.symbol, entry_price, trade_signal_kind,
                               analysis.score if analysis else 0, entry_at,
@@ -523,7 +530,7 @@ def _process_signal(
         if trader else None
     )
     if notice is not None and diagnostic_probe is not None:
-        # Read-only shadow result: never used in any branch authorizing a trade.
+        # Preserve the probe; the final fading-buy guard has already passed.
         try:
             sink=market.__dict__.get('rocket_shadow_sink')
             row=trader.connection.execute('SELECT id FROM paper_positions WHERE symbol=? AND opened_at=? ORDER BY id DESC LIMIT 1',

@@ -243,3 +243,6 @@ Binance и рассматривает только монеты с положи�
 
 ### Rocket volume admission (15 September 2026)
 Virtual leader entries, including repeat/rescue entries, require analysis volume_ratio_5m >= 1 before AI or purchase. Missing/non-finite volume is rejected with a recorded reason. Exit and stop rules are unchanged. Fresh momentum remains shadow-only; missing windows and stale trade/quote reasons are persisted rather than treating gaps as valid data. The four-variant cohort starts a new version after this admission change; it contains only admitted actual entries and cannot estimate the returns of volume-rejected candidates.
+
+### Final fading-buy guard
+Paper leader/repeat entries now veto purchase immediately before open_on_signal when fresh 5-second aggressive buy notional is below its analysis snapshot AND price change over 5 seconds is <= 0 or over 10 seconds is < 0. Parentheses: buys_fell AND (price5 <= 0 OR price10 < 0). Missing/stale probe data defer entry. No sleep or additional REST/AI request is added. Rejected symbols remain under existing leader monitoring and must generate a new qualifying signal; no automatic delayed purchase is queued. Rejection logs include both buy amounts and both price changes. Stops/exits are unchanged. Shadow cohort v3 separates subsequent admitted trades from earlier versions; it is not a replay of rejected entries.
