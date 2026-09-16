@@ -13,6 +13,8 @@ from bot.reporting import utc_stamp
 from bot.streams import PositionBookTickerStream
 from bot.rocket_entry_variants import evaluate as evaluate_variants, report_text as variants_report
 
+from bot.rocket_recovery_shadow import RecoveryShadow, report_text as recovery_report
+
 WINDOWS = (5, 10, 20, 60)
 MAX_GAP = 5
 
@@ -49,6 +51,7 @@ def entry_probe(market, signal, context, dynamics, started):
         probe=callback(signal.symbol, at)
         snapshot=probe.pop('snapshot')
         probe.update(signal_at=started, allowed=None, reason='поток устарел или окно ещё не накоплено',
+                     signal_price=getattr(signal,'price',None),
                      before_context=asdict(context), before_dynamics=asdict(dynamics))
         if probe.get('freshness_reasons'):
             probe['reason'] = '; '.join(probe['freshness_reasons'])
@@ -78,7 +81,7 @@ def shadow_summary(db):
             f'Среди пропущенных прибыльных {sum(p>0 for p in skipped)}, убыточных {sum(p<0 for p in skipped)}.\n'
             'В обеих ветках одинаковые фактические выходы и издержки; отказ = без сделки. '
             'Нет оценки замещающих сделок и свободного банка. Неизвестные оценки исключены. На торговлю не влияет.'
-            '\n\n' + variants_report(db))
+            '\n\n' + variants_report(db) + '\n\n' + recovery_report(db))
 
 
 def window_result(points, entry, exit_at, exit_price, minutes, now, cost):
@@ -240,8 +243,9 @@ def cards(db, now, limit=20):
 
 class RocketPathWorker:
     """Never calls trading methods; only writes dedicated diagnostic tables."""
-    def __init__(self, database, stream=None):
+    def __init__(self, database, stream=None, recovery_probe=None, recovery_stop=.5):
         self.database=database
+        self.recovery_probe,self.recovery_stop=recovery_probe,recovery_stop
         self.stream=stream or PositionBookTickerStream(max_symbols=128)
         self._stop=threading.Event()
         self._queue=SimpleQueue()
@@ -264,6 +268,7 @@ class RocketPathWorker:
         db=sqlite3.connect(self.database,timeout=.25)
         db.row_factory=sqlite3.Row
         schema(db)
+        recovery=RecoveryShadow(db,self.recovery_probe,self.recovery_stop)
         db.execute("INSERT OR IGNORE INTO rocket_path_meta VALUES('started',?)",(time.time(),))
         started=db.execute("SELECT value FROM rocket_path_meta WHERE key='started'").fetchone()[0]
         db.commit()
@@ -302,6 +307,7 @@ class RocketPathWorker:
                     db.executemany('INSERT OR REPLACE INTO rocket_entry_probes VALUES(?,?)',pending_probes)
                     for position_id,payload in pending_probes:
                         probe=json.loads(payload)
+                        recovery.seed(position_id,probe)
                         if probe.get('entry_bid') is not None and probe.get('entry_quote_at') is not None:
                             symbol=db.execute('SELECT symbol FROM paper_positions WHERE id=?',(position_id,)).fetchone()
                             if symbol:
@@ -312,6 +318,7 @@ class RocketPathWorker:
                         except Empty: break
                         pending_acks.append((position_id,minutes,now))
                     db.executemany('INSERT OR REPLACE INTO rocket_card_deliveries VALUES(?,?,?)',pending_acks)
+                    recovery.tick(now)
                     db.commit()
                     pending_probes.clear(); pending_acks.clear()
                     lost_since=None; previous_drain=now

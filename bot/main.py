@@ -1,6 +1,7 @@
 import time
 import math
 from queue import Empty
+from types import SimpleNamespace
 
 import httpx
 
@@ -10,7 +11,7 @@ from bot.ai import AIAnalyst, AIError
 from bot.audit import AuditLog, detect_pumps
 from bot.binance_testnet import BinanceTestnetClient
 from bot.config import load_settings
-from bot.market import MarketMonitor
+from bot.market import MarketMonitor, SignalMarketContext, EntryDynamics
 from bot.streams import (
     AllMarketMiniTickerStream,
     LeaderOrderFlowStream,
@@ -739,9 +740,16 @@ def main() -> None:
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
         if trader is not None:
-            rocket_path_worker=RocketPathWorker(settings.audit_db_path)
-            rocket_path_worker.start()
             market.rocket_probe=order_flow_stream.entry_probe
+            def recovery_probe(symbol, original):
+                probe=entry_probe(market,SimpleNamespace(symbol=symbol,price=original['signal_price']),
+                    SignalMarketContext(**original['before_context']),
+                    EntryDynamics(**original['before_dynamics']),original['signal_at'])
+                probe['allowed']=fading_buy_guard(probe)[0] and market.change_12h_percent.get(symbol,0)>0
+                return probe
+            rocket_path_worker=RocketPathWorker(settings.audit_db_path,
+                recovery_probe=recovery_probe,recovery_stop=settings.paper_stop_loss_percent)
+            rocket_path_worker.start()
             market.rocket_shadow_sink=rocket_path_worker.record_shadow
             entry_wait_worker=RocketEntryWaitWorker(
                 lambda: make_paper_trader(settings), market, position_worker.healthy,

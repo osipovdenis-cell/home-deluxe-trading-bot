@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from urllib.parse import quote
+from bot.rocket_recovery_shadow import window_snapshot
 
 from websockets.sync.client import connect
 
@@ -197,6 +198,7 @@ class LeaderOrderFlowStream:
         if missing_windows:
             freshness_reasons.append('нет опорной цены для окон: ' + ','.join(missing_windows))
         return dict(at=now, fresh=fresh, changes=changes,
+                    recovery_windows=window_snapshot(trades, quotes, now),
                     freshness_reasons=freshness_reasons, missing_windows=missing_windows,
                     trade_age=now-trades[-1][0] if trades else None,
                     quote_age=now-quotes[-1][0] if quotes else None,

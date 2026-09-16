@@ -1,0 +1,16 @@
+name: Recovery shadow tests
+on:
+  push:
+    branches: [analysis/recovery-two-windows]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test isolated checkout
+        run: python -m unittest discover -s tests -q
