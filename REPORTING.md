@@ -84,3 +84,35 @@ its deduplication state only after commit. Quote commits precede recovery/report
 Real overflow and missing timestamps still make paths incomplete; existing incomplete history
 is not reclassified. `rocket_recorder_health` in encrypted exports exposes successful recording,
 retry counts, overflow counts and the last exception type, without raw error text or credentials.
+
+## Rocket entry timing (rocket-timing-v1)
+
+Prospective paper-only A/B on candidate processing events (before volume/quality/AI
+vetoes). Common vetoes are recorded as NO_ENTRY in both arms. Approved candidates
+start both arms from the same decision time; A models the existing final guard and
+90-second recovery, B additionally requires last-5s executed buys > preceding-5s
+buys and sells, and bid > bid 5 seconds ago. This is not a replay of actual fills:
+AI/common gates are shared and frozen, account capacity is not modelled. Approval
+occurs before the synchronous fresh-entry REST quote; the independent shadow uses
+observed streaming ask/bid and the same price drift and spread limits instead.
+
+A separate websocket and worker keep ordered bid events while main blocks on
+AI/REST. Existing trading/scalp streams, exits and permissions are unchanged.
+Candidate-to-approval timing, pre-approval snapshots (last 60), one-second waiting
+snapshots, entry probes and final rejection reasons are available through the
+encrypted export; latest 100 pairs. /learning and scheduled observer include the
+new summary with all-history paired PnL and exclusions. No automatic activation.
+
+One episode per symbol/hour, max 20 active episodes; stream capacity 40 with active
+episodes first and watched leaders for warmup. This covers processed candidate
+signals, not every Binance coin or every rejected 20-second confirmation.
+Unwarmed/missing windows, checks >2s, bid gaps >5s, buffer overflow, restart or
+recorder failure mark affected pairs incomplete; excluded from both PnLs. Startup
+may initially produce incomplete pairs while windows accumulate. NO_ENTRY is never
+substituted for missing data. Health exposes last tick, errors and dropped commands.
+
+Each leg uses 50 USDT, initial stop and round-trip fee frozen at approval; whole
+position +1% activation/floor and 1pp trailing drawdown; common 60-minute horizon
+from approval with open valuation separately reported. Gaps/overshoots use observed
+bid, never ideal threshold fill. Depth, slippage and portfolio slot contention are
+not simulated. This version does not fix or replace older shadow recorders.

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 
+from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.ai import AIAnalyst, AIError
@@ -147,6 +148,11 @@ def process_signal(
     settings, preloaded_context=None,
 ):
     opened = False
+    timing = market.__dict__.get('rocket_timing_worker') if "лидер" in signal.kind else None
+    token = (signal.symbol, now)
+    if timing is not None:
+        timing.send('begin', token, signal, now, time.time(),
+                    settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
     try:
         opened = _process_signal(signal, prices, now, market, audit, trader, ai,
                                  telegram, chat_id, settings, preloaded_context)
@@ -157,8 +163,10 @@ def process_signal(
                 row = audit.connection.execute(
                     "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
                     "ORDER BY rowid DESC LIMIT 1", (signal.symbol, now)).fetchone()
-                audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа",
-                    "покупка" if opened else row[0] if row else "ожидание/пропуск без записанной причины")
+                reason = "покупка" if opened else row[0] if row else "ожидание/пропуск без записанной причины"
+                audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа", reason)
+                if timing is not None:
+                    timing.send('decision', token, time.time(), reason, opened)
             except Exception as error:
                 print("Rocket gate diagnostics: " + type(error).__name__, flush=True)
         if "лидер" not in signal.kind:
@@ -523,6 +531,9 @@ def _process_signal(
         audit.scalp_shadow.decision(signal.symbol, time.time(), allowed=True,
                                     reason="все фильтры пройдены; торговля скальпинга выключена")
     entry_at, entry_price = now, signal.price
+    timing = market.__dict__.get('rocket_timing_worker')
+    if timing is not None and leader_paper_entry:
+        timing.send('approve', (signal.symbol, now), time.time(), context, dynamics)
     if trader is not None and leader_paper_entry:
         try:
             if trader.exit_monitor_healthy is not None and not trader.exit_monitor_healthy():
@@ -682,6 +693,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(chat_id, audit.leader_path_report_text(now))
             telegram.send(chat_id, audit.rocket_comparison.report())
             telegram.send(chat_id, audit.rocket_spread.report(now))
+            telegram.send(chat_id, timing_report(audit.connection))
             telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -735,6 +747,7 @@ def main() -> None:
     report_worker = None
     rocket_path_worker = None
     entry_wait_worker = None
+    timing_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -757,6 +770,9 @@ def main() -> None:
         market_stream.start()
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
+        timing_worker = TimingWorker(settings.audit_db_path, market)
+        timing_worker.start()
+        market.rocket_timing_worker = timing_worker
         if trader is not None:
             market.rocket_probe=order_flow_stream.entry_probe
             def recovery_probe(symbol, original):
@@ -909,6 +925,7 @@ def main() -> None:
                         last_fallback = now
                     signals = market.update(prices, now=now)
                     order_flow_stream.set_symbols((*entry_wait_worker.symbols(), *market.order_flow_symbols()) if entry_wait_worker else market.order_flow_symbols())
+                    timing_worker.watch_symbols(market.order_flow_symbols())
                     confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
@@ -1030,6 +1047,7 @@ def main() -> None:
                     last_observer = now
                     telegram.send(chat_id, audit.rocket_comparison.report())
                     telegram.send(chat_id, audit.rocket_spread.report(now))
+                    telegram.send(chat_id, timing_report(audit.connection))
                     if trader is not None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))
@@ -1041,6 +1059,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if timing_worker:
+            timing_worker.close()
         if entry_wait_worker:
             entry_wait_worker.close()
         if rocket_path_worker:
