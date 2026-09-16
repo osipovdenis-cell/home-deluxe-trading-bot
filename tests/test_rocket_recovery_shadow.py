@@ -140,6 +140,13 @@ class RecoveryTests(unittest.TestCase):
         self.model.tick(103)
         self.assertEqual(self.state()['B']['status'],'WAIT')
 
+    def test_known_recorder_gap_excludes_even_with_dense_quote_suffix(self):
+        self.model.seed(1,probe(passed=True))
+        self.db.executescript('CREATE TABLE rocket_path_gaps(started REAL,ended REAL); INSERT INTO rocket_path_gaps VALUES(100.2,100.3);')
+        self.tick(101,99.4)
+        self.assertEqual(report_data(self.db)['complete'],0)
+        self.assertEqual(report_data(self.db)['incomplete'],1)
+
     def test_legacy_probe_is_not_backfilled(self):
         self.model.seed(1,{})
         self.assertEqual(report_data(self.db)['recorded'],0)

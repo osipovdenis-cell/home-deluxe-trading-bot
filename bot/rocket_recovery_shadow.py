@@ -102,6 +102,17 @@ class RecoveryShadow:
         for ident,payload in rows:
             s=json.loads(payload)
             b,end=s['B'],s['start']+HORIZON
+            gaps=[]
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_path_gaps'").fetchone():
+                gaps=self.db.execute('SELECT started,ended FROM rocket_path_gaps WHERE ended>=? AND started<=?',
+                                     (s['start'],min(now,end))).fetchall()
+            if gaps:
+                if b['status']=='WAIT':
+                    s['missing']=True
+                for key in ('A','B'):
+                    leg=s[key]
+                    if leg['status']=='OPEN' and any(finish>=leg['entered'] for begin,finish in gaps):
+                        leg.update(status='INCOMPLETE',reason='зафиксирован пропуск регистратора')
             if b['status']=='WAIT':
                 if now-s['last_check']>2:
                     s['missing']=True
