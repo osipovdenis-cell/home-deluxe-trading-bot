@@ -241,6 +241,39 @@ def cards(db, now, limit=20):
     return result
 
 
+class RetainedBidBatch:
+    """A drained batch is acknowledged only after SQLite commits it."""
+    LIMIT = 100000
+
+    def __init__(self):
+        self.events = []
+        self.gaps = []
+        self.last = {}
+
+    def append(self, events, overflow, previous, now):
+        self.events.extend(events)
+        if overflow or len(self.events) > self.LIMIT:
+            starts = [previous] + [e[0] for e in self.events]
+            self.gaps.append((min(starts), now))
+            self.events.clear()
+
+    def write(self, db):
+        # Do not mutate deduplication state until the transaction succeeds.
+        last = dict(self.last)
+        values = []
+        for at, symbol, bid in self.events:
+            previous = last.get(symbol)
+            if previous is None or bid != previous[1] or at-previous[0] >= 1:
+                values.append((symbol, at, bid))
+                last[symbol] = (at, bid)
+        db.executemany('INSERT OR IGNORE INTO rocket_bid_path VALUES(?,?,?)', values)
+        db.executemany('INSERT INTO rocket_path_gaps VALUES(?,?)', self.gaps)
+        db.commit()
+        self.last = last
+        self.events.clear()
+        self.gaps.clear()
+
+
 class RocketPathWorker:
     """Never calls trading methods; only writes dedicated diagnostic tables."""
     def __init__(self, database, stream=None, recovery_probe=None, recovery_stop=.5):
@@ -265,17 +298,23 @@ class RocketPathWorker:
         self._thread.start()
 
     def _run(self):
-        db=sqlite3.connect(self.database,timeout=.25)
+        db=sqlite3.connect(self.database,timeout=5)
         db.row_factory=sqlite3.Row
         schema(db)
+        db.execute("""CREATE TABLE IF NOT EXISTS rocket_recorder_health (
+            id INTEGER PRIMARY KEY CHECK(id=1), started REAL, last_success REAL,
+            retry_errors INTEGER, overflow_batches INTEGER, last_error_type TEXT,
+            pending_quotes INTEGER)""")
+        health_started = time.time()
+        retry_errors = overflow_batches = 0
+        last_error_type = None
         recovery=RecoveryShadow(db,self.recovery_probe,self.recovery_stop)
         db.execute("INSERT OR IGNORE INTO rocket_path_meta VALUES('started',?)",(time.time(),))
         started=db.execute("SELECT value FROM rocket_path_meta WHERE key='started'").fetchone()[0]
         db.commit()
         last_refresh=last_cards=0
-        last={}
+        batch=RetainedBidBatch()
         enqueued=set()
-        lost_since=None
         previous_drain=time.time()
         pending_probes=[]
         pending_acks=[]
@@ -283,23 +322,18 @@ class RocketPathWorker:
             while not self._stop.wait(.2):
                 try:
                     now=time.time()
-                    if lost_since is not None:
-                        db.execute('INSERT INTO rocket_path_gaps VALUES(?,?)',(lost_since,now))
                     if now-last_refresh>=1:
                         rows=db.execute("SELECT symbol FROM paper_positions WHERE signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=?) ORDER BY id DESC",(now-3605,)).fetchall()
                         self.stream.set_symbols(tuple(dict.fromkeys(r[0] for r in rows))[:128])
                         last_refresh=now
                     events,overflow=self.stream.drain_batch()
-                    # On overflow retain no suffix as a complete path; gap stays visible.
-                    if overflow:
-                        db.execute('INSERT INTO rocket_path_gaps VALUES(?,?)',(previous_drain,now))
-                        events=[]
-                    values=[]
-                    for at,symbol,bid in events:
-                        previous=last.get(symbol)
-                        if previous is None or bid!=previous[1] or at-previous[0]>=1:
-                            values.append((symbol,at,bid)); last[symbol]=(at,bid)
-                    db.executemany('INSERT OR IGNORE INTO rocket_bid_path VALUES(?,?,?)',values)
+                    batch.append(events, overflow, previous_drain, now)
+                    overflow_batches += int(overflow)
+                    batch.write(db)
+                    previous_drain=now
+                    # Reporting/recovery failures must not roll back recorded bids.
+                    db.execute('INSERT OR REPLACE INTO rocket_recorder_health VALUES(1,?,?,?,?,?,?)',
+                        (health_started, now, retry_errors, overflow_batches, last_error_type, len(batch.events)))
                     while True:
                         try: position_id,probe=self._queue.get_nowait()
                         except Empty: break
@@ -321,7 +355,6 @@ class RocketPathWorker:
                     recovery.tick(now)
                     db.commit()
                     pending_probes.clear(); pending_acks.clear()
-                    lost_since=None; previous_drain=now
                     if now-last_cards>=60:
                         for card in cards(db,now,100):
                             db.execute('INSERT OR REPLACE INTO rocket_trade_cards VALUES(?,?,?)',(card['position_id'],now,json.dumps(card)))
@@ -337,7 +370,8 @@ class RocketPathWorker:
                         db.commit(); last_cards=now
                 except Exception as error:
                     db.rollback()
-                    lost_since=previous_drain if lost_since is None else lost_since
+                    retry_errors += 1
+                    last_error_type = type(error).__name__
                     print('Rocket diagnostics: '+type(error).__name__,flush=True)
                     self._stop.wait(1)
         finally:

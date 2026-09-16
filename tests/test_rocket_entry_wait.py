@@ -33,6 +33,14 @@ class ShortWaitTests(unittest.TestCase):
             self.worker.step(self.trader,Mock(),at)
             return quote.call_count
 
+    def test_expiry_reports_last_block_without_changing_buy_rules(self):
+        weak = dict(self.good, after_flow={'buy_5s_usdt':5,'sell_5s_usdt':10})
+        self.assertEqual(self.tick([weak]), 0)
+        self.tick([],191)
+        detail = self.trader.connection.execute('SELECT detail FROM rocket_entry_waits').fetchone()[0]
+        self.assertIn('покупки за 5с не превышают продажи', detail)
+        self.assertEqual(self.trader.open_symbols(), ())
+
     def test_recovers_and_buys_without_new_signal_or_ai(self):
         self.assertEqual(self.tick([dict(fresh=False)]),0)
         self.assertEqual(self.worker.symbols(),('R',))

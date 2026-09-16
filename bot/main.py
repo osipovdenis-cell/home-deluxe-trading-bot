@@ -146,10 +146,21 @@ def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
 ):
+    opened = False
     try:
-        return _process_signal(signal, prices, now, market, audit, trader, ai,
-                               telegram, chat_id, settings, preloaded_context)
+        opened = _process_signal(signal, prices, now, market, audit, trader, ai,
+                                 telegram, chat_id, settings, preloaded_context)
+        return opened
     finally:
+        if "лидер" in signal.kind and isinstance(audit, AuditLog):
+            try:
+                row = audit.connection.execute(
+                    "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
+                    "ORDER BY rowid DESC LIMIT 1", (signal.symbol, now)).fetchone()
+                audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа",
+                    "покупка" if opened else row[0] if row else "ожидание/пропуск без записанной причины")
+            except Exception as error:
+                print("Rocket gate diagnostics: " + type(error).__name__, flush=True)
         if "лидер" not in signal.kind:
             rejection = audit.connection.execute(
                 "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
@@ -218,6 +229,12 @@ def _process_signal(
                 f"Вход {signal.symbol} отклонён: {rejection_reason}", flush=True
             )
             return False
+    if execution_safe and leader_paper_entry and isinstance(audit, AuditLog):
+        try:
+            audit.rocket_spread.observe(signal, context, dynamics, market, time.time(),
+                settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
+        except Exception as error:
+            print("Rocket spread shadow: " + type(error).__name__, flush=True)
     if execution_safe:
         quality_safe, quality_reason = (
             market.leader_entry_quality(context, dynamics)
@@ -664,6 +681,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             )
             telegram.send(chat_id, audit.leader_path_report_text(now))
             telegram.send(chat_id, audit.rocket_comparison.report())
+            telegram.send(chat_id, audit.rocket_spread.report(now))
             telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -880,10 +898,12 @@ def main() -> None:
                     if market_stream.healthy(now):
                         prices, market.market_stats = market_stream.snapshot()
                         audit.rocket_comparison.tick(prices, now)
+                        audit.rocket_spread.tick(prices, now)
                         market.eligible_count = len(prices)
                     elif now - last_fallback >= 5:
                         prices = market.fetch_prices()
                         audit.rocket_comparison.tick(prices, time.time())
+                        audit.rocket_spread.tick(prices, time.time())
                         market_stream.set_symbols(market.symbols)
                         market_stream.seed(prices, market.market_stats)
                         last_fallback = now
@@ -901,6 +921,9 @@ def main() -> None:
                             flush=True,
                         )
                     for confirmation_event in market.drain_confirmation_events():
+                        if "лидер" in (confirmation_event.signal_kind or "") and not confirmation_event.accepted:
+                            audit.rocket_spread.record_gate(now, confirmation_event.symbol,
+                                "подтверждение", confirmation_event.reason)
                         confirmation_context = None
                         try:
                             confirmation_context = market.fetch_signal_context(
@@ -1006,6 +1029,7 @@ def main() -> None:
                         )
                     last_observer = now
                     telegram.send(chat_id, audit.rocket_comparison.report())
+                    telegram.send(chat_id, audit.rocket_spread.report(now))
                     if trader is not None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))

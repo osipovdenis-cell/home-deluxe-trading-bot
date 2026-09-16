@@ -608,7 +608,8 @@ class MarketMonitor:
 
     @staticmethod
     def leader_entry_quality(
-        context: SignalMarketContext, dynamics: EntryDynamics
+        context: SignalMarketContext, dynamics: EntryDynamics,
+        *, allow_stable_spread: bool = False,
     ) -> tuple[bool, str | None]:
         """Use continuation efficiency instead of generic scalp filters."""
         if context.flow_cvd_60s_percent is None:
@@ -635,7 +636,8 @@ class MarketMonitor:
             return False, "поток покупателей поглощается продавцами"
         if (
             context.flow_spread_change_bps is not None
-            and context.flow_spread_change_bps >= 0
+            and (context.flow_spread_change_bps > 0 if allow_stable_spread
+                 else context.flow_spread_change_bps >= 0)
         ):
             return False, "спред лидера не сокращается"
         if dynamics.change_15s_percent < -0.05:
