@@ -27,6 +27,7 @@ class RocketEntryWaitWorker:
         self.client_factory = client_factory or (lambda: httpx.Client(base_url=base_url, timeout=2))
         self.ttl, self.max_pending = ttl, max_pending
         self._pending, self._lock = {}, threading.Lock()
+        self._last_block = {}
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread = None
@@ -47,16 +48,29 @@ class RocketEntryWaitWorker:
         return True
 
     @staticmethod
-    def recovered(probe):
-        if not fresh_quality_guard(probe)[0]:
-            return False
+    def recovery_reason(probe):
+        allowed, reason = fresh_quality_guard(probe)
+        if not allowed:
+            return reason
         r5 = (probe.get('changes') or {}).get('5')
         flow = probe.get('after_flow') or {}
         buy, sell = flow.get('buy_5s_usdt'), flow.get('sell_5s_usdt')
-        return (all(finite(v) for v in (r5,buy,sell)) and r5 > 0
-                and buy > sell >= 0)
+        if not all(finite(v) for v in (r5, buy, sell)):
+            return 'неполные данные цены/покупок за 5с'
+        if r5 <= 0:
+            return 'цена за 5с не растёт'
+        if not buy > sell >= 0:
+            return 'покупки за 5с не превышают продажи'
+        return None
+
+    @staticmethod
+    def recovered(probe):
+        return RocketEntryWaitWorker.recovery_reason(probe) is None
 
     def finish(self, trader, job, state, detail, now):
+        blocked = self._last_block.get(job.signal.symbol)
+        if state == 'EXPIRED' and blocked:
+            detail += '; последняя причина: ' + blocked
         trader.connection.execute('''INSERT INTO rocket_entry_waits
             (symbol,signal_at,queued_at,finished_at,state,detail) VALUES(?,?,?,?,?,?)''',
             (job.signal.symbol,job.signal_at,job.queued_at,now,state,detail))
@@ -64,6 +78,7 @@ class RocketEntryWaitWorker:
         with self._lock:
             if self._pending.get(job.signal.symbol) is job:
                 del self._pending[job.signal.symbol]
+                self._last_block.pop(job.signal.symbol, None)
 
     @staticmethod
     def prepare(trader):
@@ -84,12 +99,14 @@ class RocketEntryWaitWorker:
                 self.finish(trader,job,'CANCELLED','позиция уже открыта',now)
                 continue
             if not self.healthy():
+                self._last_block[symbol] = "обработчик выходов недоступен"
                 continue
             if self.market.change_12h_percent.get(symbol, 0) <= 0:
                 self.finish(trader,job,'CANCELLED','рост за 12ч больше не подтверждён',now)
                 continue
             probe = entry_probe(self.market,job.signal,job.context,job.dynamics,job.signal_at)
             if not self.recovered(probe):
+                self._last_block[symbol] = self.recovery_reason(probe)
                 continue
             try:
                 at,bid,ask = fresh_entry(client,symbol,job.signal.price,trader.stop_loss_percent,.25)
@@ -98,14 +115,17 @@ class RocketEntryWaitWorker:
                 self.finish(trader,job,'CANCELLED','цена/спред вышли за границы свежего входа',time.time())
                 continue
             except httpx.HTTPError:
+                self._last_block[symbol] = "ошибка получения свежей цены"
                 continue
             # The market may change during the quote request. Recheck without AI/REST.
             probe = entry_probe(self.market,job.signal,job.context,job.dynamics,job.signal_at)
             if not self.recovered(probe) or not self.healthy():
+                self._last_block[symbol] = self.recovery_reason(probe) or "обработчик выходов недоступен"
                 continue
             if self._stop.is_set():
                 return
             if time.time()-at > 2:
+                self._last_block[symbol] = "свежая цена устарела за время проверки"
                 continue
             if time.time()-job.queued_at >= self.ttl:
                 self.finish(trader,job,'EXPIRED','срок наблюдения истёк',time.time())
@@ -115,6 +135,7 @@ class RocketEntryWaitWorker:
             notice = trader.open_on_signal(symbol,ask,kind,job.score,at,
                                            bypass_min_score=True,signal_timestamp=job.signal_at)
             if notice is None:
+                self._last_block[symbol] = "нет доступного слота/баланса или ограничение исполнения"
                 # No available slot/balance: keep observing until expiry.
                 continue
             # Remove before diagnostic/notification work so failures cannot repeat a buy.

@@ -42,7 +42,17 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   generated_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
                   generated_at_unix=now, exit_monitor_healthy=exit_healthy,
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
+    bundle['rocket_gate_decisions'] = query_rows(audit.connection,
+        'SELECT timestamp,symbol,stage,reason FROM rocket_gate_decisions WHERE timestamp>=? ORDER BY id DESC LIMIT 500',
+        (now-86400,))
+    bundle['rocket_spread_pairs'] = query_rows(audit.connection,
+        'SELECT * FROM rocket_spread_episodes ORDER BY id DESC LIMIT 100')
+    bundle['rocket_spread_legs'] = query_rows(audit.connection,
+        'SELECT * FROM rocket_spread_legs WHERE episode IN (SELECT id FROM rocket_spread_episodes ORDER BY id DESC LIMIT 100)')
     if trader is not None:
+        if trader.connection.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_recorder_health'").fetchone():
+            bundle['rocket_recorder_health'] = query_rows(trader.connection,
+                'SELECT * FROM rocket_recorder_health')
         if trader.connection.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_entry_waits'").fetchone():
             bundle['rocket_entry_waits'] = query_rows(trader.connection,
                 'SELECT * FROM rocket_entry_waits ORDER BY id DESC LIMIT 100')

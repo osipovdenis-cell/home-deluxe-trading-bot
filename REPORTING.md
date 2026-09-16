@@ -60,3 +60,27 @@ trade. No version promotion, entry threshold or stop adjustment is performed.
 The legacy mixed model still has no purged validation gap, and says so. The
 separate scalp model uses purged temporal validation. LLM parameters are not
 fine-tuned by sending the coin's history as context.
+
+
+## Stable spread experiment (stable-spread-v1)
+
+This prospective shadow comparison starts after the 20-second, volume and execution gates,
+before the leader-quality rejection. Both legs require the same remaining quality checks.
+A requires spread contraction; B additionally accepts an exactly unchanged spread, with
+the existing 25 bps ceiling. Widening or unknown spread does not qualify. Contracting and
+stable cohorts are reported separately. No live entry rule changes or automatic promotion.
+AI, final fresh-entry approval and bank limits are excluded equally from both legs: this
+isolates one quality gate, not the entire executable trading strategy. Entry and exit quotes
+are estimates from the market price and frozen signal spread; fees and stop are frozen at
+creation. Each symbol contributes at most one episode/hour; incomplete pairs are excluded.
+The model does not account for order depth or slippage.
+
+`/learning` and the periodic report include this comparison and specific rocket rejection
+reasons. Encrypted exports include up to 500 recent reason events, 100 spread pairs and their
+legs. Ninety-second entry waits retain their last blocking reason on expiry.
+
+The independent bid recorder retains drained events across transaction rollback, updating
+its deduplication state only after commit. Quote commits precede recovery/report calculations.
+Real overflow and missing timestamps still make paths incomplete; existing incomplete history
+is not reclassified. `rocket_recorder_health` in encrypted exports exposes successful recording,
+retry counts, overflow counts and the last exception type, without raw error text or credentials.

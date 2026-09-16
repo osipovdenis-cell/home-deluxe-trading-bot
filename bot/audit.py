@@ -9,6 +9,7 @@ import json
 
 from bot.probability import FEATURE_NAMES, train_probability_model
 from bot.rocket_comparison import RocketComparison
+from bot.rocket_spread_shadow import SpreadShadow
 from bot.scalp_shadow import ScalpShadow
 from bot.reporting import ModelJournal, period_label
 
@@ -323,6 +324,7 @@ class AuditLog:
         self.connection = sqlite3.connect(database)
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.rocket_comparison = RocketComparison(self.connection)
+        self.rocket_spread = SpreadShadow(self.connection)
         self.scalp_shadow = ScalpShadow(self.connection)
         self.model_journal = ModelJournal(self.connection)
         self._probability_model_id = None

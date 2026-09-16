@@ -8,9 +8,12 @@ class RocketComparison:
     HORIZON = 3600
     MAX_GAP = 30
 
-    def __init__(self, connection: sqlite3.Connection):
+    def __init__(self, connection: sqlite3.Connection, namespace="rocket_ab"):
+        if namespace not in {"rocket_ab", "rocket_spread"}:
+            raise ValueError("Unknown comparison namespace")
+        self.namespace = namespace
         self.db = connection
-        self.db.executescript("""
+        self._script("""
             CREATE TABLE IF NOT EXISTS rocket_ab_episodes (
                 id INTEGER PRIMARY KEY, version TEXT NOT NULL, symbol TEXT NOT NULL,
                 started REAL NOT NULL, decision TEXT NOT NULL, phase TEXT NOT NULL,
@@ -28,6 +31,12 @@ class RocketComparison:
             );
         """)
 
+    def _execute(self, sql, parameters=()):
+        return self.db.execute(sql.replace("rocket_ab_", self.namespace + "_"), parameters)
+
+    def _script(self, sql):
+        return self.db.executescript(sql.replace("rocket_ab_", self.namespace + "_"))
+
     def candidate(self, symbol, decision, reentry, now, spread_bps, stop, cost):
         """Call ONLY after quality/execution checks, using actual AI completion time."""
         if decision not in {"BUY", "WAIT", "SKIP"}:
@@ -36,21 +45,21 @@ class RocketComparison:
             return
         if not all(math.isfinite(v) for v in (now, stop, cost)) or stop <= 0 or cost < 0:
             return
-        active = self.db.execute(
+        active = self._execute(
             "SELECT id,started FROM rocket_ab_episodes WHERE symbol=? "
             "AND finished IS NULL AND version=?", (symbol, self.VERSION)
         ).fetchone()
         if active:
             episode, started = active
             if now < started + self.HORIZON and reentry:
-                self.db.execute(
+                self._execute(
                     "UPDATE rocket_ab_legs SET status='READY',ready=?,spread=? "
                     "WHERE episode=? AND variant='B' AND status='WAIT'",
                     (now, spread_bps, episode),
                 )
                 self.db.commit()
             return
-        episode = self.db.execute(
+        episode = self._execute(
             "INSERT INTO rocket_ab_episodes(version,symbol,started,decision,phase,stop,cost) "
             "VALUES(?,?,?,?,?,?,?)",
             (self.VERSION, symbol, now, decision,
@@ -58,7 +67,7 @@ class RocketComparison:
         ).lastrowid
         for variant in ("A", "B"):
             ready = variant == "A" or decision == "BUY" or reentry
-            self.db.execute(
+            self._execute(
                 "INSERT INTO rocket_ab_legs(episode,variant,status,ready,spread) VALUES(?,?,?,?,?)",
                 (episode, variant, "READY" if ready else "WAIT", now if ready else None, spread_bps),
             )
@@ -66,12 +75,12 @@ class RocketComparison:
 
     def tick(self, prices, now):
         """Fresh market snapshots only; no replay or retrospective entries."""
-        episodes = self.db.execute(
+        episodes = self._execute(
             "SELECT id,symbol,started,stop,cost FROM rocket_ab_episodes "
             "WHERE finished IS NULL AND version=?", (self.VERSION,)
         ).fetchall()
         for episode, symbol, started, stop, cost in episodes:
-            legs = self.db.execute(
+            legs = self._execute(
                 "SELECT variant,status,ready,spread,entry,peak,trough,last_at "
                 "FROM rocket_ab_legs WHERE episode=?", (episode,)
             ).fetchall()
@@ -94,7 +103,7 @@ class RocketComparison:
                     elif valid and now - deadline <= self.MAX_GAP:
                         bid = raw * (1 - spread / 20000)
                         net = (bid / entry - 1) * 100 - cost
-                        self.db.execute(
+                        self._execute(
                             "UPDATE rocket_ab_legs SET status='MARKED',net=?,last_price=?,last_at=?,"
                             "reason='оценка открытой позиции на горизонте' WHERE episode=? AND variant=?",
                             (net, bid, now, episode, variant),
@@ -108,7 +117,7 @@ class RocketComparison:
                     if now <= ready:
                         continue
                     ask = raw * (1 + spread / 20000)
-                    self.db.execute(
+                    self._execute(
                         "UPDATE rocket_ab_legs SET status='OPEN',entered=?,entry=?,peak=?,trough=?,"
                         "last_at=?,last_price=? WHERE episode=? AND variant=?",
                         (now, ask, ask, ask, now, raw * (1 - spread / 20000), episode, variant),
@@ -125,29 +134,29 @@ class RocketComparison:
                     reason = "стоп"
                 elif highest >= 1 and change + 1e-9 < highest and change <= max(1, highest - 1):
                     reason = "трейлинг"
-                self.db.execute(
+                self._execute(
                     "UPDATE rocket_ab_legs SET peak=?,trough=?,last_at=?,last_price=? "
                     "WHERE episode=? AND variant=?", (peak, trough, now, bid, episode, variant),
                 )
                 if reason:
-                    self.db.execute(
+                    self._execute(
                         "UPDATE rocket_ab_legs SET status='CLOSED',exited=?,exit_price=?,net=?,reason=? "
                         "WHERE episode=? AND variant=?",
                         (now, bid, change - cost, reason, episode, variant),
                     )
             # Keep the paired cohort open for the same hour even if A exits early.
             if now >= deadline:
-                self.db.execute("UPDATE rocket_ab_episodes SET finished=? WHERE id=?", (now, episode))
+                self._execute("UPDATE rocket_ab_episodes SET finished=? WHERE id=?", (now, episode))
         self.db.commit()
 
     def _status(self, episode, variant, status, reason):
-        self.db.execute(
+        self._execute(
             "UPDATE rocket_ab_legs SET status=?,reason=? WHERE episode=? AND variant=?",
             (status, reason, episode, variant),
         )
 
     def report(self):
-        rows = self.db.execute(
+        rows = self._execute(
             "SELECT e.id,e.phase,e.finished,l.variant,l.status,l.net,l.reason,l.entry,l.trough "
             "FROM rocket_ab_episodes e JOIN rocket_ab_legs l ON l.episode=e.id "
             "WHERE e.version=? ORDER BY e.id,l.variant", (self.VERSION,)
