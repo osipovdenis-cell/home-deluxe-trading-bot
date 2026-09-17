@@ -102,7 +102,9 @@ def load_settings() -> Settings:
         paper_position_usdt=float(os.getenv("PAPER_POSITION_USDT", "50")),
         paper_max_open_positions=int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "4")),
         paper_min_ai_score=int(os.getenv("PAPER_MIN_AI_SCORE", "70")),
-        paper_stop_loss_percent=float(os.getenv("PAPER_STOP_LOSS_PERCENT", "0.5")),
+        # The live paper engine trades rockets only; scalp shadows keep their own stop.
+        # Separate setting supersedes legacy PAPER_STOP_LOSS_PERCENT service overrides.
+        paper_stop_loss_percent=float(os.getenv("ROCKET_STOP_LOSS_PERCENT", "1.0")),
         paper_take_profit_1_percent=float(
             os.getenv("PAPER_TAKE_PROFIT_1_PERCENT", "0.7")
         ),
