@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 
+from bot.rocket_daily import DailyWorker, report_text as daily_report
 from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_entry_guard import fading_buy_guard
@@ -164,6 +165,10 @@ def process_signal(
                     "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
                     "ORDER BY rowid DESC LIMIT 1", (signal.symbol, now)).fetchone()
                 reason = "покупка" if opened else row[0] if row else "ожидание/пропуск без записанной причины"
+                daily = market.__dict__.get('rocket_daily_worker')
+                if daily is not None:
+                    daily.capture(signal.symbol, now, time.time(), reason, opened,
+                                  settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
                 audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа", reason)
                 if timing is not None:
                     timing.send('decision', token, time.time(), reason, opened)
@@ -694,6 +699,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(chat_id, audit.rocket_comparison.report())
             telegram.send(chat_id, audit.rocket_spread.report(now))
             telegram.send(chat_id, timing_report(audit.connection))
+            telegram.send(chat_id, daily_report(audit.connection, now))
             telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -748,6 +754,7 @@ def main() -> None:
     rocket_path_worker = None
     entry_wait_worker = None
     timing_worker = None
+    daily_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -770,6 +777,9 @@ def main() -> None:
         market_stream.start()
         order_flow_stream = LeaderOrderFlowStream(max_symbols=20)
         order_flow_stream.start()
+        daily_worker = DailyWorker(settings.audit_db_path)
+        daily_worker.start()
+        market.rocket_daily_worker = daily_worker
         timing_worker = TimingWorker(settings.audit_db_path, market)
         timing_worker.start()
         market.rocket_timing_worker = timing_worker
@@ -926,6 +936,7 @@ def main() -> None:
                     signals = market.update(prices, now=now)
                     order_flow_stream.set_symbols((*entry_wait_worker.symbols(), *market.order_flow_symbols()) if entry_wait_worker else market.order_flow_symbols())
                     timing_worker.watch_symbols(market.order_flow_symbols())
+                    daily_worker.watch_symbols(market.order_flow_symbols())
                     confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
@@ -939,6 +950,10 @@ def main() -> None:
                         )
                     for confirmation_event in market.drain_confirmation_events():
                         if "лидер" in (confirmation_event.signal_kind or "") and not confirmation_event.accepted:
+                            daily_worker.capture(confirmation_event.symbol, confirmation_event.started_at,
+                                time.time(), confirmation_event.reason, False,
+                                settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
+                                source='confirmation')
                             audit.rocket_spread.record_gate(now, confirmation_event.symbol,
                                 "подтверждение", confirmation_event.reason)
                         confirmation_context = None
@@ -1048,6 +1063,7 @@ def main() -> None:
                     telegram.send(chat_id, audit.rocket_comparison.report())
                     telegram.send(chat_id, audit.rocket_spread.report(now))
                     telegram.send(chat_id, timing_report(audit.connection))
+                    telegram.send(chat_id, daily_report(audit.connection, now))
                     if trader is not None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))
@@ -1059,6 +1075,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if daily_worker:
+            daily_worker.close()
         if timing_worker:
             timing_worker.close()
         if entry_wait_worker:
