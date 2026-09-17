@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from bot.rocket_timing_shadow import report_data as timing_report
 from bot.rocket_cards import cards
 from bot.rocket_recovery_shadow import report_data as recovery_report
 from bot.rocket_entry_variants import report_data as entry_variants_report
@@ -42,6 +43,9 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   generated_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
                   generated_at_unix=now, exit_monitor_healthy=exit_healthy,
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
+    timing = timing_report(audit.connection)
+    timing['pairs'] = timing['pairs'][-100:]
+    bundle['rocket_timing_comparison'] = timing
     bundle['rocket_gate_decisions'] = query_rows(audit.connection,
         'SELECT timestamp,symbol,stage,reason FROM rocket_gate_decisions WHERE timestamp>=? ORDER BY id DESC LIMIT 500',
         (now-86400,))
