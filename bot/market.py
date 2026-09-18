@@ -162,6 +162,8 @@ class MarketMonitor:
         self.entry_confirmation_seconds = entry_confirmation_seconds
         self.rescue_window_seconds = rescue_window_seconds
         self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
+        self.anomaly_window_seconds = 600
+        self.anomaly_history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.last_alert: dict[str, float] = {}
         self.pending_candidates: dict[str, PendingCandidate] = {}
         self.rescue_candidates: dict[str, PendingCandidate] = {}
@@ -679,6 +681,11 @@ class MarketMonitor:
             cutoff = now - self.window_seconds
             while points and points[0][0] < cutoff:
                 points.popleft()
+            anomaly_points = self.anomaly_history[symbol]
+            anomaly_points.append((now, price))
+            while anomaly_points and anomaly_points[0][0] < now - self.anomaly_window_seconds:
+                anomaly_points.popleft()
+            anomaly_change = (price / min(value for _, value in anomaly_points) - 1) * 100
             change_12h = self.change_12h_percent.get(symbol)
             if self.change_12h_percent and (
                 change_12h is None or change_12h <= 0
@@ -693,7 +700,7 @@ class MarketMonitor:
             change = (price / minimum - 1) * 100
             _quote_volume, change_24h = self.market_stats.get(symbol, (0.0, 0.0))
             leader_mode = None
-            if change >= self.threshold_percent:
+            if anomaly_change >= self.threshold_percent:
                 leader_mode = "аномальный лидер"
             elif symbol in top_24h:
                 leader_mode = "лидер"
@@ -735,6 +742,10 @@ class MarketMonitor:
                             leader.peak_price = price
                 else:
                     leader.peak_price = max(leader.peak_price, price)
+            signal_window = self.window_seconds
+            if leader is not None and leader.mode == "аномальный лидер":
+                change = anomaly_change
+                signal_window = self.anomaly_window_seconds
             rescue = self.rescue_candidates.get(symbol)
             if rescue is not None:
                 prior_peak = rescue.peak_price
@@ -776,7 +787,7 @@ class MarketMonitor:
                         "сильный" if change >= self.threshold_percent else "ранний"
                     )
                     candidates.append(PumpSignal(
-                        symbol, price, change, self.window_seconds, kind,
+                        symbol, price, change, signal_window, kind,
                         quote_volume, change_24h, progress, pullback,
                         change_5s, change_10s, True,
                     ))
@@ -866,7 +877,7 @@ class MarketMonitor:
                     symbol,
                     price,
                     change,
-                    self.window_seconds,
+                    signal_window,
                     kind,
                     quote_volume,
                     change_24h,
