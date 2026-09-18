@@ -85,6 +85,11 @@ class RocketQuoteStream:
             self._quotes.append((now, symbol, bid, ask))
             self._stats['depth_quotes' if depth else 'book_quotes'] += 1
             self._stats['last_quote_at'] = now
+        self.on_quote(now, symbol, bid, ask, update)
+
+    def on_quote(self, at, symbol, bid, ask, update):
+        """Optional diagnostic consumer; called only for validated, ordered quotes."""
+        pass
 
     def interrupted(self, symbols, at=None):
         at = time.time() if at is None else at
