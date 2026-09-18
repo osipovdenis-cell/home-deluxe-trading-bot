@@ -1,5 +1,49 @@
 # Report periods and model progress
 
+## Low-volume rocket continuation, prospective shadow v1
+
+For new confirmed leaders rejected at the existing finite 0 <= volume_ratio_5m < 1
+gate, save numeric entry features with the exact rejection episode. Read the
+already buffered order-flow probe; no REST/AI call, sleep, order or new signal.
+The snapshot contains price changes over 5/10/20/60 seconds, executed buys and
+sells over 5/60 seconds, prior 5-second flow, spread, CVD, trade acceleration,
+efficiency and available 15m/1h/4h trend. Missing or stale inputs remain unknown.
+Never backfill a predictor from prices after the decision.
+
+Frozen hypothesis B: positive 5/20/60-second price changes AND buys greater than
+sells in both the 5- and 60-second windows. Also retain the existing fresh leader
+quality/fading-buy guards, positive 12h change, 0.25% spread and 0.1% tick limits.
+Require fresh trades/quotes and complete quote windows. These are a predefined
+test, not thresholds fitted to the three previously linked historical examples.
+The decision snapshot is at most 2 seconds old when captured. B uses only the
+first actual quote following the rejection (never a later favourable quote),
+checks snapshot age <= 2s again, spread/tick, and absolute signal drift < stop.
+A rejected first quote stays NO_ENTRY; an absent/stale quote stays UNKNOWN.
+
+A = retain the actual volume refusal, hence no trade and 0 USDT. B and the
+descriptive "buy all low-volume refusals" reference share the existing daily
+ledger's first ask / chronological bid path: 50 USDT, frozen stop and round-trip
+cost, full-position +1% protection / 1 percentage-point trail, 60-minute horizon.
+Spread is in ask-to-bid returns, not deducted again. Interrupted paths never
+become known wins/losses; horizon-marked positions are reported separately from
+closed PnL. A gap after a completed close does not invalidate that close.
+
+This tests market eligibility, NOT the whole trading algorithm: AI vetoes,
+symbol history, capital/slot limits, execution depth and slippage are not
+modelled. The existing trading volume rejection is unchanged. No automatic
+promotion or stop adjustment. Prospective results must be reviewed on later
+days, across coins, with costs and missing-path coverage; report PnL excluding
+the best coin to reveal concentration. Independent episodes are not independent
+portfolio returns and repeated signals for the same move remain correlated.
+
+The separate /learning and two-hour text shows rolling 24h and 7d cohorts by
+decision time (these windows overlap). Encrypted rocket_daily.volume_test also
+contains symbol/day PnL, counts, PF, feature medians for profitable/unprofitable
+low-volume refusals and rejection reasons. Raw 24h episodes retain their frozen
+volume_experiment and volume_execution fields. Old episodes without a snapshot
+are excluded. Reaching a profit target later is not proof of a profitable
+rocket trade under the chronological stop/trail rules.
+
 ## Quote recorder v2 and AI availability
 
 Rocket daily counterfactuals now use a dedicated combined WebSocket with live
