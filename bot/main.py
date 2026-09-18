@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import httpx
 
-from bot.rocket_daily import DailyWorker, report_text as daily_report
+from bot.rocket_daily import DailyWorker, report_text as daily_report, volume_report_text
+from bot.rocket_volume_shadow import capture as capture_volume_shadow
 from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_entry_guard import fading_buy_guard
@@ -153,6 +154,7 @@ def process_signal(
     settings, preloaded_context=None,
 ):
     opened = False
+    diagnostics = {}
     timing = market.__dict__.get('rocket_timing_worker') if "лидер" in signal.kind else None
     token = (signal.symbol, now)
     if timing is not None:
@@ -160,7 +162,7 @@ def process_signal(
                     settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
     try:
         opened = _process_signal(signal, prices, now, market, audit, trader, ai,
-                                 telegram, chat_id, settings, preloaded_context)
+                                 telegram, chat_id, settings, preloaded_context, diagnostics)
         return opened
     finally:
         if "лидер" in signal.kind and isinstance(audit, AuditLog):
@@ -172,7 +174,8 @@ def process_signal(
                 daily = market.__dict__.get('rocket_daily_worker')
                 if daily is not None:
                     daily.capture(signal.symbol, now, time.time(), reason, opened,
-                                  settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
+                                  settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
+                                  volume_experiment=diagnostics.get('volume_experiment'))
                 audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа", reason)
                 if timing is not None:
                     timing.send('decision', token, time.time(), reason, opened)
@@ -190,7 +193,7 @@ def process_signal(
 
 def _process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
-    settings, preloaded_context=None,
+    settings, preloaded_context=None, diagnostics=None,
 ):
     leader_paper_entry = "лидер" in signal.kind
     waiter = market.__dict__.get('rocket_entry_waiter')
@@ -210,6 +213,10 @@ def _process_signal(
             reason = (f"объём лидера ниже ×1: ×{volume:.3f}"
                       if isinstance(volume, (int, float)) and math.isfinite(volume)
                       else "объём лидера неизвестен; вход отложен")
+            if (diagnostics is not None and market.__dict__.get('rocket_daily_worker') is not None
+                    and isinstance(volume,(int,float)) and not isinstance(volume,bool)
+                    and math.isfinite(volume) and 0 <= volume < 1):
+                diagnostics['volume_experiment'] = capture_volume_shadow(market,signal,context,now)
             audit.record_entry_rejection(now, signal.symbol, reason,
                                          context.spread_bps if context else None, None)
             return False
@@ -713,6 +720,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(chat_id, audit.rocket_spread.report(now))
             telegram.send(chat_id, timing_report(audit.connection))
             telegram.send(chat_id, daily_report(audit.connection, now))
+            telegram.send(chat_id, volume_report_text(audit.connection, now))
             telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
@@ -1079,6 +1087,7 @@ def main() -> None:
                     telegram.send(chat_id, audit.rocket_spread.report(now))
                     telegram.send(chat_id, timing_report(audit.connection))
                     telegram.send(chat_id, daily_report(audit.connection, now))
+                    telegram.send(chat_id, volume_report_text(audit.connection, now))
                     if trader is not None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))
