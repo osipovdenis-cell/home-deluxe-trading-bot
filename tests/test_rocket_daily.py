@@ -55,3 +55,27 @@ class DailyTests(unittest.TestCase):
             self.assertEqual([s['classification'] for s in d['episodes']],['BOUGHT','REJECTED'])
             self.assertEqual(d['actual']['closed'],1);self.assertEqual(d['actual']['pnl'],-.6)
             self.assertIn('отказов 1',report_text(main,400));main.close()
+
+    def test_disconnect_cannot_be_hidden_by_fast_reconnect(self):
+        self.seed()
+        self.m.tick(103,[(100,'TEST',100,100),(103,'TEST',102,102)],gaps=[(101,'TEST')])
+        self.assertEqual(self.state()['leg']['status'],'INCOMPLETE')
+        self.assertEqual(self.state()['leg']['reason'],'разрыв соединения котировок')
+
+    def test_exit_before_disconnect_remains_known(self):
+        self.seed()
+        self.m.tick(103,[(100,'TEST',100,100),(100.5,'TEST',98,98)],gaps=[(101,'TEST')])
+        self.assertEqual(self.state()['leg']['status'],'CLOSED')
+        self.assertAlmostEqual(self.state()['leg']['net'],-2.2)
+
+    def test_failed_write_does_not_lose_active_episode(self):
+        from unittest.mock import patch
+        self.seed()
+        with patch.object(self.m,'save',side_effect=sqlite3.OperationalError('busy')):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.m.tick(101,[(100,'TEST',100,100),(101,'TEST',98,98)])
+        self.assertEqual(self.m.active['x']['leg']['status'],'WAIT')
+        self.assertEqual(self.state()['leg']['status'],'WAIT')
+        self.m.reload_active()
+        self.m.tick(101,[(100,'TEST',100,100),(101,'TEST',98,98)])
+        self.assertEqual(self.state()['leg']['status'],'CLOSED')
