@@ -1,5 +1,35 @@
 # Report periods and model progress
 
+## Quote recorder v2 and AI availability
+
+Rocket daily counterfactuals now use a dedicated combined WebSocket with live
+SUBSCRIBE/UNSUBSCRIBE, rather than reconnecting all symbols whenever membership
+changes. Real-time bookTicker events retain intrasecond barrier ordering;
+actual Binance depth5 snapshots provide a periodic best bid/ask on quiet books.
+Older update IDs cannot overwrite newer quotes. No synthetic ticks, forward fill
+or REST reconstruction are used. Disconnects, invalid quotes, overflow and gaps
+remain INCOMPLETE. A close observed before a later disconnection remains valid.
+Transaction failures restore active in-memory state to committed state.
+
+New episodes carry quote_version=2 and the daily text shows their counts
+separately; existing incomplete observations are never relabelled as complete.
+Health includes real book/depth quote counts, reconnections and connection state.
+This improves the prospective daily ledger only; it does not reconstruct old
+leader-path or timing A/B gaps and is not an execution-quality guarantee.
+
+Signal and performance OpenAI calls share a cooldown after HTTP 429. Retry-After
+is respected; otherwise exponential delay with jitter starts at 30 seconds.
+Recognized credit/spend/usage-limit codes pause for at least an hour and are
+reported separately from rate limits. Unknown 429 responses remain unknown.
+Cooldowns return immediately without calling the API; they do not become AI
+WAIT/SKIP decisions or repeated API error counts. Counters and an allow-listed
+error code are exported and shown in the observer. Restoring exhausted credits
+or account limits requires an account-side change; retries cannot fix that.
+No API response message, credentials or account identifiers are exported.
+
+Entry thresholds, stop, trailing exit, fallback eligibility, stake and paper-only
+permissions are unchanged by this update.
+
 Reports are sent every two hours, not reset every two hours. `/learning` also
 sends the complete reports on demand; `/status` includes cumulative rocket
 totals. Existing trading permissions, entry gates and exits are unchanged.

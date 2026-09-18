@@ -1858,7 +1858,7 @@ class AuditLog:
             if message.startswith("openai") or "openai" in message:
                 category = "OpenAI"
                 subtype = "другое"
-                for name in ("timeout", "format", "empty", "http-429", "http-500", "http-502", "http-503"):
+                for name in ("quota", "timeout", "format", "empty", "http-429", "http-500", "http-502", "http-503"):
                     if f"[{name}]" in message:
                         subtype = name
                         break
@@ -1890,7 +1890,32 @@ class AuditLog:
             f"Технические ошибки: {error_count}"
             + (f" ({errors_text})." if errors_text else ".")
             + (f"\nОшибки OpenAI: {openai_text}." if openai_text else "")
+            + self.ai_health_text(now)
         )
+
+    def record_ai_health(self, state):
+        if not isinstance(state, dict):
+            return
+        self.connection.execute('CREATE TABLE IF NOT EXISTS ai_health(id INTEGER PRIMARY KEY,payload TEXT)')
+        self.connection.execute('INSERT OR REPLACE INTO ai_health VALUES(1,?)',
+                                (json.dumps(state, allow_nan=False),))
+        self.connection.commit()
+
+    def ai_health(self):
+        if not self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='ai_health'").fetchone():
+            return {}
+        row=self.connection.execute('SELECT payload FROM ai_health WHERE id=1').fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def ai_health_text(self, now):
+        s=self.ai_health()
+        if not s:
+            return ''
+        delay=max(0, int(s.get('next_retry_at',0)-now))
+        status=(f"пауза {delay} с" if delay else 'повтор доступен') if s.get('last_kind') else 'последний HTTP-запрос успешен'
+        code=s.get('last_code') or 'нет'
+        return (f"\nДоступ AI: {status}; код {code}. "
+                f"Запросов с запуска {s.get('requests',0)}; пропущено во время паузы {s.get('cooldown_skips',0)}.")
 
     def build_symbol_behavior(
         self,

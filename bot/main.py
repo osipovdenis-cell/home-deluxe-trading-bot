@@ -9,7 +9,7 @@ from bot.rocket_daily import DailyWorker, report_text as daily_report
 from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_entry_guard import fading_buy_guard
-from bot.ai import AIAnalyst, AIError
+from bot.ai import AIAnalyst, AIError, AIUnavailable
 from bot.audit import AuditLog, detect_pumps
 from bot.binance_testnet import BinanceTestnetClient
 from bot.config import load_settings
@@ -104,6 +104,8 @@ def history_entry_policy(behavior, exceptional: bool, base_score: int) -> tuple[
 
 
 def openai_error_kind(error: Exception) -> str:
+    if isinstance(error, AIUnavailable):
+        return error.kind
     text = str(error).lower()
     if isinstance(error, httpx.TimeoutException) or "timeout" in text or "timed out" in text:
         return "timeout"
@@ -124,9 +126,11 @@ def analyze_momentum_with_retries(ai, *args, **kwargs):
             return ai.analyze_momentum(*args, **kwargs), None, attempt
         except (httpx.HTTPError, AIError) as error:
             final_error = error
+            if isinstance(error, AIUnavailable):
+                return None, error, attempt if error.attempted else 0
             if (
                 isinstance(error, httpx.HTTPStatusError)
-                and error.response.status_code in {400, 401, 403}
+                and error.response.status_code in {400, 401, 403, 429}
             ):
                 break
             if attempt < 3:
@@ -381,7 +385,10 @@ def _process_signal(
                     "continuous_spread_change_bps": context.flow_spread_change_bps,
                 } if context else None,
             )
-        if analysis_error is not None:
+        audit.record_ai_health(ai.health())
+        if analysis_error is not None and not (
+            isinstance(analysis_error, AIUnavailable) and not analysis_error.attempted
+        ):
             kind = openai_error_kind(analysis_error)
             audit.record_error(
                 f"OpenAI {signal.symbol} [{kind}] после "
@@ -624,7 +631,10 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
                 ai_text = (f"\n\n🤖 ИИ-вывод по сделкам\nОценка: {result.score}/100 "
                            f"({result.verdict}).\nВывод: {result.reason}\nРиск: {result.risk}")
             except (httpx.HTTPError, AIError) as error:
-                audit.record_error(f"OpenAI trading audit: {error}", now)
+                if not isinstance(error, AIUnavailable) or error.attempted:
+                    audit.record_error(f"OpenAI trading audit: {error}", now)
+            finally:
+                audit.record_ai_health(ai.health())
         telegram.send(chat_id, bank.telegram_text() + "\n\n" + intelligence.telegram_text() + ai_text)
         for details_text in intelligence.trade_breakdown_texts():
             telegram.send(chat_id, details_text)
@@ -657,7 +667,10 @@ def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram,
             ai_text = (f"\n\n🤖 ИИ-вывод по статистике\nОценка: {result.score}/100 "
                        f"({result.verdict}).\nВывод: {result.reason}\nРиск: {result.risk}")
         except (httpx.HTTPError, AIError) as error:
-            audit.record_error(f"OpenAI daily audit: {error}", now)
+            if not isinstance(error, AIUnavailable) or error.attempted:
+                audit.record_error(f"OpenAI daily audit: {error}", now)
+        finally:
+            audit.record_ai_health(ai.health())
     telegram.send(
         chat_id,
         summary.telegram_text() + "\n\n" + performance.telegram_text()
@@ -820,6 +833,8 @@ def main() -> None:
             except (httpx.HTTPError, AIError) as error:
                 ai_status = "ошибка подключения"
                 audit.record_error(f"OpenAI: {error}")
+            finally:
+                audit.record_ai_health(ai.health())
         monitoring = (
             f"весь Binance Spot USDT ({len(market.symbols)} активных, "
             f"{market.eligible_count} прошли фильтр)"
