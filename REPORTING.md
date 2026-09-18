@@ -1,5 +1,38 @@
 # Report periods and model progress
 
+## Timing recorder v2 and diagnostic order flow
+
+The timing experiment writes to `<audit-path>.rocket_timing.sqlite3` in WAL
+mode. It no longer competes for the trading/audit database writer lock. Commands,
+model results and heartbeat commit together; drained commands and in-memory job
+references are acknowledged only after commit. A failed iteration invalidates
+affected paths rather than concealing a missed extremum. Error type and SQLite
+code are reported without exception payloads. The old timing database/tables
+remain untouched; their counts and error total are reported as an archive.
+
+The diagnostic feed uses live subscribe/unsubscribe on one connection for
+aggTrade, bookTicker, depth5 and depth updates. Membership/order changes do not
+reconnect existing coins. Recently watched coins retain subscriptions for up
+to 120 seconds within the 40-symbol cap; active timing episodes take priority.
+Real depth5 quotes fill otherwise quiet quote windows without interpolation.
+Update IDs prevent stale depth snapshots overwriting newer quotes; aggregate
+trade IDs prevent duplicate volume. Disconnects are recorded and clear flow
+anchors, so an incomplete 60-second trade window cannot become a known signal.
+The snapshot is atomic and excludes events received after its timestamp.
+
+Timing exits process bids before the first connection gap; an already completed
+exit is retained, but any leg still waiting/open at the gap becomes incomplete.
+Heartbeat staleness is reported without mutating recorded outcomes.
+
+Low-volume shadow experiments now read this diagnostic feed instead of the
+trading feed. They record feed_version=2 and explicit missing-data reasons:
+no subscription, stale trades/quotes, missing price anchors, warm-up after a
+disconnect or incomplete 10-second windows. Observed flow may be retained for
+diagnosis even when stale, but it cannot make the entry eligible. The text shows
+new-feed coverage separately. Old UNKNOWN examples are not reconstructed.
+The hypothesis, two-second freshness limit, market checks and actual trading
+probe/entry/exit rules are unchanged; this does not enable any additional orders.
+
 ## Low-volume rocket continuation, prospective shadow v1
 
 For new confirmed leaders rejected at the existing finite 0 <= volume_ratio_5m < 1
