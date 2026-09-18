@@ -625,11 +625,6 @@ class MarketMonitor:
         ):
             return False, "частота исполненных сделок не ускоряется"
         if (
-            context.flow_price_change_60s_percent is None
-            or context.flow_price_change_60s_percent <= 0.05
-        ):
-            return False, "покупки не вызывают продолжения роста цены"
-        if (
             context.flow_price_efficiency_per_10k is None
             or context.flow_price_efficiency_per_10k <= 0
         ):
