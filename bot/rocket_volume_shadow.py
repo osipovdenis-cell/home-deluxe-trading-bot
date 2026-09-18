@@ -26,7 +26,8 @@ def capture(market, signal, context, started):
     at = time.time()
     try:
         dynamics = market.entry_dynamics(signal.symbol, at)
-        probe = entry_probe(market, signal, context, dynamics, started) or {}
+        probe = entry_probe(market, signal, context, dynamics, started,
+                            probe_provider=market.__dict__.get('rocket_volume_probe')) or {}
         return evaluate(probe, context, signal.price,
                         market.tick_sizes.get(signal.symbol),
                         market.change_12h_percent.get(signal.symbol), time.time())
@@ -35,7 +36,8 @@ def capture(market, signal, context, started):
 
 
 def evaluate(probe, context, signal_price, tick_size, change12h, at):
-    flow, changes = probe.get('after_flow') or {}, probe.get('changes') or {}
+    flow = probe.get('after_flow') or probe.get('observed_flow') or {}
+    changes = probe.get('changes') or {}
     f = {f'price_{seconds}s': number(changes.get(str(seconds))) for seconds in (5, 10, 20, 60)}
     for field in ('buy_5s_usdt', 'sell_5s_usdt', 'buy_60s_usdt', 'sell_60s_usdt',
                   'cvd_60s_percent', 'trade_rate_acceleration', 'price_efficiency_per_10k',
@@ -51,7 +53,7 @@ def evaluate(probe, context, signal_price, tick_size, change12h, at):
     for field in ('buy', 'sell'):
         f[f'previous_{field}_5s'] = number(windows[0].get(field)) if windows else None
     result = dict(version=VERSION, evaluated_at=number(probe.get('at')), state='UNKNOWN',
-                  features=f, hypothesis=None, reasons=[])
+                  features=f, hypothesis=None, reasons=[], feed_version=probe.get('feed_version',1))
     required = ('price_5s', 'price_10s', 'price_20s', 'price_60s', 'buy_5s_usdt',
                 'sell_5s_usdt', 'buy_60s_usdt', 'sell_60s_usdt', 'spread_bps',
                 'volume_ratio', 'signal_price', 'tick_size', 'change_12h', 'context_buy_5s')
@@ -61,7 +63,7 @@ def evaluate(probe, context, signal_price, tick_size, change12h, at):
              and all(f[key] is not None and 0 <= f[key] <= 2 for key in ('trade_age', 'quote_age'))
              and (probe.get('recovery_windows') or {}).get('complete') is True)
     if absent or not fresh:
-        result['reasons'] = ['неполный/устаревший снимок'] + absent
+        result['reasons'] = ['неполный/устаревший снимок'] + list(probe.get('freshness_reasons') or []) + absent
         return result
     if (not 0 <= f['volume_ratio'] < 1 or min(f['signal_price'], f['tick_size']) <= 0
             or any(f[k] < 0 for k in ('buy_5s_usdt','sell_5s_usdt','buy_60s_usdt',
@@ -120,6 +122,7 @@ def summarize(items, now, seconds):
     rows = [s for s in items if now-seconds <= s['at'] <= now
             and (s.get('volume_experiment') or {}).get('version') == VERSION]
     selected = [s for s in rows if s.get('volume_execution',{}).get('state')=='ENTERED']
+    new_feed = [s for s in rows if s['volume_experiment'].get('feed_version')==2]
     known = [s for s in rows if s['volume_experiment']['state'] != 'UNKNOWN']
     groups = {}
     for name, key in [('symbols', lambda s:s['symbol']),
@@ -138,6 +141,10 @@ def summarize(items, now, seconds):
             values = [v for v in values if finite(v)]
             comparison[name][key] = dict(n=len(values),median=median(values) if values else None)
     return dict(since=now-seconds, until=now, candidates=len(rows),
+                feed_versions=dict(Counter(s['volume_experiment'].get('feed_version',1) for s in rows)),
+                new_feed=dict(candidates=len(new_feed),
+                    unknown_features=sum(s['volume_experiment']['state']=='UNKNOWN' for s in new_feed),
+                    selected=leg_stats([s for s in new_feed if s.get('volume_execution',{}).get('state')=='ENTERED'])),
                 unknown_features=len(rows)-len(known), baseline_pnl=0,
                 all_low_volume=leg_stats(rows), selected=leg_stats(selected),
                 hypothesis_passed=sum(s['volume_experiment'].get('hypothesis') is True for s in rows),
@@ -165,6 +172,8 @@ def report_text(data):
             f"B: наблюдаются {b['pending']}; разрывы пути {b['incomplete']}; открыты через час {b['marked']} ({b['marked_pnl']:+.3f} USDT). Без входа {states.get('NO_ENTRY',0)}, первая котировка ожидается {states.get('PENDING',0)}, неизвестно {states.get('UNKNOWN',0)}.",
             f"Для сравнения, купить все отказы по объёму: закрыто {all_['closed']}, плюс/минус {all_['wins']}/{all_['losses']}, {all_['pnl']:+.3f} USDT; неполных путей {all_['incomplete']}."])
     d=data['seven_days']
+    nf=d['new_feed']
+    lines.append(f"Новый поток v2: снимков {nf['candidates']}, полных {nf['candidates']-nf['unknown_features']}, неполных {nf['unknown_features']}; условных входов {nf['selected']['count']}.")
     for reason,count in sorted(d['rejection_reasons'].items(),key=lambda item:-item[1])[:3]:
         lines.append(f"Причина отказа B: {str(reason)[:110]} — {count}.")
     if d['selected']['closed']:

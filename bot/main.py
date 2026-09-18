@@ -804,6 +804,7 @@ def main() -> None:
         timing_worker = TimingWorker(settings.audit_db_path, market)
         timing_worker.start()
         market.rocket_timing_worker = timing_worker
+        market.rocket_volume_probe = timing_worker.stream.entry_probe
         if trader is not None:
             market.rocket_probe=order_flow_stream.entry_probe
             def recovery_probe(symbol, original):

@@ -1,7 +1,13 @@
 import json
 import sqlite3
 import unittest
-from bot.rocket_timing_shadow import TimingModel, TimingFlowStream, report_data, report_text, strengthened
+import tempfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch, Mock
+from bot.rocket_timing_shadow import (TimingModel, TimingFlowStream, report_data, report_text,
+    strengthened, open_recorder, apply_commands, SUFFIX, VERSION, TimingWorker)
 
 
 def probe(now, bid=100, ask=100.01, growing=True, fresh=True):
@@ -87,12 +93,13 @@ class TimingTests(unittest.TestCase):
     def test_raw_stream_keeps_intrastep_stop_and_rebound(self):
         stream=TimingFlowStream()
         stream.set_symbols(['X'])
-        for at,bid in ((100.1,100),(100.2,99),(100.3,101)):
-            stream.ingest({'s':'X','b':str(bid),'a':str(bid+.01)},at)
-        events,overflow=stream.drain()
+        for i,(at,bid) in enumerate(((100.1,100),(100.2,99),(100.3,101))):
+            stream.ingest({'s':'X','b':str(bid),'a':str(bid+.01),'u':i},at)
+        events,overflow,gaps=stream.drain()
         self.assertFalse(overflow)
+        self.assertEqual(gaps,[])
         self.assertEqual([r[2] for r in events],[100,99,101])
-        self.assertEqual(stream.drain(),([],False))
+        self.assertEqual(stream.drain(),([],False,[]))
 
     def test_equal_buy_volume_does_not_count_as_strengthening(self):
         p=probe(100)
@@ -100,6 +107,93 @@ class TimingTests(unittest.TestCase):
         self.assertFalse(strengthened(p))
         p['recovery_windows']['complete']=False
         self.assertIsNone(strengthened(p))
+
+    def test_brief_disconnect_cannot_be_hidden_by_reconnect(self):
+        self.tick(100.2)
+        self.model.tick(101,{'X':[(100.4,100),(100.9,105)]},{},gaps=[(100.5,'X')])
+        self.assertEqual(self.state()['A']['status'],'INCOMPLETE')
+
+    def test_completed_exit_before_gap_stays_valid(self):
+        self.tick(100.2)
+        self.model.tick(101,{'X':[(100.4,99),(100.9,105)]},{},gaps=[(100.5,'X')])
+        self.assertEqual(self.state()['A']['status'],'CLOSED')
+        self.assertEqual(self.state()['A']['reason'],'STOP')
+
+    def test_commands_are_replayable_after_rollback_without_losing_approval(self):
+        self.db.commit()
+        signal=SimpleNamespace(symbol='Y',price=100)
+        token=('Y',100)
+        commands=[('begin',(token,signal,100,100,1,.2)),('approve',(token,101,None,None))]
+        jobs={}
+        with patch.object(self.model,'approve',side_effect=sqlite3.OperationalError('busy')):
+            with self.assertRaises(sqlite3.OperationalError):
+                apply_commands(self.model,jobs,commands)
+        self.db.rollback()
+        self.assertEqual(jobs,{})
+        self.assertIsNone(self.db.execute("SELECT id FROM rocket_timing_pairs WHERE symbol='Y'").fetchone())
+        jobs=apply_commands(self.model,jobs,commands);self.db.commit()
+        state=next(s for i,s in self.model.states() if i==jobs[token][0])
+        self.assertEqual(state['approved'],101)
+        self.assertEqual(state['A']['status'],'WAIT')
+
+    def test_main_database_lock_does_not_block_diagnostics_or_readback(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=str(Path(root)/'main.db');main=sqlite3.connect(path)
+            main.execute('PRAGMA journal_mode=WAL')
+            old=TimingModel(main);ident=old.begin('OLD',100,99,100,1,.2)
+            main.execute("UPDATE rocket_timing_pairs SET version='rocket-timing-v1' WHERE id=?",(ident,))
+            main.commit()
+            main.execute("INSERT INTO rocket_timing_health VALUES('held_writer','1')")
+            sidecar=open_recorder(path);model=TimingModel(sidecar)
+            ident=model.begin('NEW',200,199,100,1,.2);model.approve(ident,200)
+            model.tick(200.2,{'NEW':[(200.2,100)]},{'NEW':probe(200.2)})
+            sidecar.execute("INSERT INTO rocket_timing_health VALUES('last_tick','200.2')")
+            sidecar.commit()
+            with patch('bot.rocket_timing_shadow.time.time',return_value=201):d=report_data(main)
+            self.assertEqual(d['version'],VERSION)
+            self.assertEqual(d['pairs'][0]['symbol'],'NEW')
+            self.assertEqual(d['pairs'][0]['A']['status'],'OPEN')
+            self.assertEqual(d['legacy']['candidates'],1)
+            self.assertTrue(Path(path+SUFFIX).exists())
+            self.assertEqual(main.execute('SELECT COUNT(*) FROM rocket_timing_pairs').fetchone()[0],1)
+            with patch('bot.rocket_timing_shadow.time.time',return_value=212):d=report_data(main)
+            self.assertEqual(d['pairs'][0]['A']['status'],'INCOMPLETE')
+            self.assertEqual(model.states()[0][1]['A']['status'],'OPEN')  # Read-only report.
+            main.rollback();main.close();sidecar.close()
+
+    def test_background_worker_consumes_commands_with_main_writer_locked(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=str(Path(root)/'main.db');main=sqlite3.connect(path)
+            main.execute('CREATE TABLE trading_state(value)');main.commit()
+            main.execute('INSERT INTO trading_state VALUES(1)')
+            worker=TimingWorker(path,SimpleNamespace())
+            worker.stream=Mock()
+            worker.stream.drain.return_value=([],False,[])
+            worker.stream.health.return_value={'connected':True}
+            now=time.time();signal=SimpleNamespace(symbol='X',price=100);token=('X',now)
+            worker.send('begin',token,signal,now,now,1,.2)
+            worker.send('decision',token,now,'объём',False)
+            worker.start()
+            try:
+                until=time.monotonic()+3
+                complete=False
+                while time.monotonic()<until:
+                    try:
+                        check=sqlite3.connect(path+SUFFIX,timeout=.05)
+                        count=check.execute('SELECT COUNT(*) FROM rocket_timing_pairs WHERE finished IS NOT NULL').fetchone()[0]
+                        health=dict(check.execute('SELECT key,value FROM rocket_timing_health'))
+                        check.close()
+                        if count==1 and health:
+                            complete=True;break
+                    except sqlite3.OperationalError:
+                        if 'check' in locals():check.close()
+                    time.sleep(.02)
+                self.assertTrue(complete)
+                self.assertEqual(int(health['session_errors']),0)
+                self.assertEqual(int(health['queued_commands']),0)
+                self.assertEqual(worker.commands.qsize(),0)
+            finally:
+                worker.close();main.rollback();main.close()
 
 if __name__=='__main__':
     unittest.main()

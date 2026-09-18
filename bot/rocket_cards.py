@@ -40,8 +40,8 @@ def exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
-def entry_probe(market, signal, context, dynamics, started):
-    callback = market.__dict__.get('rocket_probe')
+def entry_probe(market, signal, context, dynamics, started, probe_provider=None):
+    callback = probe_provider if probe_provider is not None else market.__dict__.get('rocket_probe')
     if callback is None:
         return None
     calculation_started = time.perf_counter()
