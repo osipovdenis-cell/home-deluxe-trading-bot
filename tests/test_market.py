@@ -240,6 +240,41 @@ class MarketMonitorTests(unittest.TestCase):
         finally:
             monitor.close()
 
+    def test_anomaly_uses_ten_minutes_without_changing_scalp_history(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("ROCKETUSDT",), 300, 3, 1800,
+            early_threshold_percent=3, entry_confirmation_seconds=20,
+        )
+        try:
+            monitor.market_stats["ROCKETUSDT"] = (2_000_000, 4)
+            monitor.change_12h_percent["ROCKETUSDT"] = 1
+            for now, price in ((0, 100), (280, 102.8), (300, 102.8)):
+                monitor.update({"ROCKETUSDT": price}, now=now)
+            self.assertEqual(monitor.update({"ROCKETUSDT": 103.2}, now=580), [])
+            signals = monitor.update({"ROCKETUSDT": 103.3}, now=600)
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0].kind, "аномальный лидер")
+            self.assertEqual(signals[0].window_seconds, 600)
+            self.assertAlmostEqual(signals[0].change_percent, 3.3)
+            self.assertEqual(monitor.window_seconds, 300)
+            self.assertTrue(all(t >= 300 for t, _ in monitor.history["ROCKETUSDT"]))
+        finally:
+            monitor.close()
+
+    def test_anomaly_excludes_prices_older_than_ten_minutes(self) -> None:
+        monitor = MarketMonitor(
+            "https://api.binance.com", ("ROCKETUSDT",), 300, 3, 1800,
+            early_threshold_percent=3,
+        )
+        try:
+            monitor.market_stats["ROCKETUSDT"] = (2_000_000, 4)
+            for now, price in ((0, 100), (300, 102.8), (320, 102.8), (601, 103.2)):
+                self.assertEqual(monitor.update({"ROCKETUSDT": price}, now=now), [])
+            self.assertNotIn("ROCKETUSDT", monitor.leaders)
+            self.assertTrue(all(t >= 1 for t, _ in monitor.anomaly_history["ROCKETUSDT"]))
+        finally:
+            monitor.close()
+
     def test_leader_can_reenter_after_pullback_and_reacceleration(self) -> None:
         monitor = MarketMonitor(
             "https://api.binance.com", ("LEADERUSDT",), 300, 3, 1800,
