@@ -1,11 +1,24 @@
 from dataclasses import dataclass
 import json
+import math
+import random
+import threading
+import time
+from email.utils import parsedate_to_datetime
 
 import httpx
 
 
 class AIError(RuntimeError):
     pass
+
+
+class AIUnavailable(AIError):
+    """A transport failure or a local cooldown; never an AI trading decision."""
+    def __init__(self, kind, code, retry_at, attempted=True):
+        self.kind, self.code, self.retry_at = kind, code, retry_at
+        self.attempted = attempted
+        super().__init__(f"[{kind}] code={code}; повтор не ранее {retry_at:.0f} UTC unix")
 
 
 @dataclass(frozen=True)
@@ -20,12 +33,83 @@ class AIAnalysis:
 class AIAnalyst:
     def __init__(self, api_key: str, model: str) -> None:
         self.model = model
+        self._request_lock = threading.Lock()
+        self._blocked_until = 0.0
+        self._consecutive_limits = 0
+        self._health = dict(requests=0, successes=0, failures=0, cooldown_skips=0,
+                            last_code='', last_kind='', last_success_at=0.0,
+                            next_retry_at=0.0, updated_at=0.0)
         self.client = httpx.Client(
             base_url="https://api.openai.com",
             headers={"Authorization": f"Bearer {api_key}"},
             # A momentum decision that arrives too late is no longer useful.
             timeout=httpx.Timeout(12.0, connect=5.0),
         )
+
+    def health(self):
+        return dict(self._health)
+
+    @staticmethod
+    def _retry_after(value, now):
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            try:
+                seconds = parsedate_to_datetime(value).timestamp() - now
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+        return max(0.0, seconds) if math.isfinite(seconds) else 0.0
+
+    def _post(self, *args, **kwargs):
+        # One shared gate for signal and performance requests. Never sleep while
+        # a momentum decision waits; the next candidate may probe after cooldown.
+        with self._request_lock:
+            now = time.time()
+            self._health['updated_at'] = now
+            if now < self._blocked_until:
+                self._health['cooldown_skips'] += 1
+                raise AIUnavailable(self._health['last_kind'], self._health['last_code'],
+                                    self._blocked_until, attempted=False)
+            self._health['requests'] += 1
+            try:
+                response = self.client.post(*args, **kwargs)
+                if response.status_code != 429:
+                    response.raise_for_status()
+            except httpx.HTTPError as error:
+                status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+                kind = f'http-{status}' if status else 'timeout' if isinstance(error, httpx.TimeoutException) else 'transport'
+                self._health.update(failures=self._health['failures'] + 1,
+                    last_code=kind, last_kind=kind, next_retry_at=0.0, updated_at=time.time())
+                raise
+            if response.status_code == 429:
+                try:
+                    error = response.json().get('error', {})
+                    code = error.get('code') if isinstance(error, dict) else None
+                except (ValueError, AttributeError):
+                    code = None
+                quota_codes = {'insufficient_quota', 'credit_balance_exhausted',
+                    'organization_spend_limit_exceeded', 'project_spend_limit_exceeded',
+                    'organization_usage_limit_exceeded', 'billing_hard_limit_reached'}
+                quota = code in quota_codes if isinstance(code, str) else False
+                code = code if isinstance(code, str) and code in quota_codes | {'rate_limit_exceeded', 'slow_down'} else 'unknown_429'
+                kind = 'quota' if quota else 'http-429'
+                self._consecutive_limits += 1
+                delay = 3600 if quota else min(900, 30 * 2 ** min(5, self._consecutive_limits - 1))
+                now = time.time()
+                delay = max(delay + random.uniform(0, delay * .1),
+                            self._retry_after(response.headers.get('Retry-After'), now))
+                self._blocked_until = now + delay
+                self._health.update(failures=self._health['failures'] + 1,
+                    last_code=code, last_kind=kind, next_retry_at=self._blocked_until, updated_at=now)
+                # Deliberately omit arbitrary response messages and request headers.
+                raise AIUnavailable(kind, code, self._blocked_until)
+            response.raise_for_status()
+            self._consecutive_limits = 0
+            self._blocked_until = 0.0
+            self._health.update(successes=self._health['successes'] + 1,
+                last_code='', last_kind='', next_retry_at=0.0,
+                last_success_at=time.time(), updated_at=time.time())
+            return response
 
     @staticmethod
     def _extract_output_text(payload: dict) -> str:
@@ -76,7 +160,7 @@ class AIAnalyst:
         learned_policy: dict | None = None,
         large_trade_flow: dict | None = None,
     ) -> AIAnalysis:
-        response = self.client.post(
+        response = self._post(
             "/v1/responses",
             json={
                 "model": self.model,
@@ -188,7 +272,7 @@ class AIAnalyst:
         return self._parse_analysis(self._extract_output_text(response.json()))
 
     def analyze_performance(self, performance: dict) -> AIAnalysis:
-        response = self.client.post(
+        response = self._post(
             "/v1/responses",
             json={
                 "model": self.model,
