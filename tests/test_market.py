@@ -46,10 +46,15 @@ class MarketMonitorTests(unittest.TestCase):
             )
             dynamics = EntryDynamics(0.1, 0.2, 0.3, 1, 2, -0.05, 0, 0, 40)
             self.assertEqual(monitor.leader_entry_quality(context, dynamics), (True, None))
-            absorbed = replace(context, flow_price_change_60s_percent=0.0)
+            for change in (None, -0.1, 0.0, 0.01, 0.05):
+                with self.subTest(change_60s=change):
+                    self.assertEqual(monitor.leader_entry_quality(
+                        replace(context, flow_price_change_60s_percent=change), dynamics
+                    ), (True, None))
+            absorbed = replace(context, flow_price_efficiency_per_10k=0.0)
             safe, reason = monitor.leader_entry_quality(absorbed, dynamics)
             self.assertFalse(safe)
-            self.assertIn("роста цены", reason)
+            self.assertIn("поглощается", reason)
         finally:
             monitor.close()
 
