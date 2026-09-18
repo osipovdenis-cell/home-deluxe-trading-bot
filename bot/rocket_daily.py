@@ -8,8 +8,9 @@ from collections import Counter, deque
 from pathlib import Path
 from queue import SimpleQueue, Empty
 from datetime import datetime, timezone
+from copy import deepcopy
 
-from bot.scalp_shadow import ScalpQuoteStream
+from bot.rocket_quote_stream import RocketQuoteStream
 from bot.rocket_recovery_shadow import new_leg, advance
 
 SUFFIX = '.rocket_daily.sqlite3'
@@ -36,6 +37,10 @@ class DailyModel:
                 self.save(ident, s)
         db.commit()
 
+    def reload_active(self):
+        self.active = {ident: s for ident, payload in self.db.execute('SELECT id,payload FROM episodes')
+                       if (s := json.loads(payload))['leg']['status'] in ('WAIT', 'OPEN')}
+
     def save(self, ident, s):
         self.db.execute('INSERT OR REPLACE INTO episodes VALUES(?,?,?,?)',
                         (ident, s['symbol'], s['at'], json.dumps(s, allow_nan=False)))
@@ -46,14 +51,24 @@ class DailyModel:
             return
         if not all(math.isfinite(event[k]) for k in ('at','stop','cost')) or event['stop']<=0 or event['cost']<0:
             raise ValueError('invalid decision')
-        s = dict(event, leg=dict(status='WAIT', net=None))
+        s = dict(event, quote_version=2, leg=dict(status='WAIT', net=None))
         if len({x['symbol'] for x in self.active.values()} | {s['symbol']}) > 100:
             s['leg'].update(status='INCOMPLETE', reason='лимит 100 монет')
         self.save(ident, s)
         if s['leg']['status']=='WAIT':
             self.active[ident]=s
 
-    def tick(self, now, quotes, overflow=False):
+    def tick(self, now, quotes, overflow=False, gaps=()):
+        before = deepcopy(self.active)
+        try:
+            self._tick(now, quotes, overflow, gaps)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            self.active = before
+            raise
+
+    def _tick(self, now, quotes, overflow, gaps):
         grouped = {}
         for at,symbol,bid,ask in sorted(quotes):
             if all(math.isfinite(x) and x>0 for x in (at,bid,ask)) and ask>=bid:
@@ -62,7 +77,11 @@ class DailyModel:
             leg=s['leg']
             if overflow:
                 leg.update(status='INCOMPLETE', reason='пропуск регистратора/переполнение')
-            rows=grouped.get(s['symbol'], [])
+            gap = min((at for at, symbol in gaps if symbol == s['symbol']
+                       and s['at'] <= at <= min(now, s['at']+HORIZON)), default=None)
+            # A close observed before a disconnect remains valid; later prices
+            # cannot turn an interrupted path into a known profit or loss.
+            rows=[r for r in grouped.get(s['symbol'], []) if gap is None or r[0] < gap]
             if leg['status']=='WAIT':
                 first=next((r for r in rows if r[0]>=s['at']), None)
                 # No hindsight: first observed quote, never search for a nicer entry.
@@ -74,12 +93,13 @@ class DailyModel:
                     leg['last_at']=at-1e-6
                 elif now-s['at']>5:
                     leg.update(status='INCOMPLETE', reason='нет первой котировки в пределах 5с')
-            advance(leg, [(at,bid) for at,bid,ask in rows], now,
+            advance(leg, [(at,bid) for at,bid,ask in rows], now if gap is None else gap,
                     s['at']+HORIZON, s['stop'], s['cost'])
+            if gap is not None and leg['status'] in ('WAIT', 'OPEN', 'INCOMPLETE'):
+                leg.update(status='INCOMPLETE', reason='разрыв соединения котировок')
             self.save(ident,s)
             if leg['status'] not in ('WAIT','OPEN'):
                 del self.active[ident]
-        self.db.commit()
 
 
 class DailyWorker:
@@ -87,8 +107,7 @@ class DailyWorker:
         self.path=path+SUFFIX
         self.queue=SimpleQueue()
         self.stop=threading.Event()
-        self.stream=ScalpQuoteStream()
-        self.stream.max_symbols=100
+        self.stream=RocketQuoteStream()
         self.watch=()
         self.thread=None
 
@@ -125,15 +144,17 @@ class DailyWorker:
                     active=sorted({s['symbol'] for s in model.active.values()})
                     symbols=tuple(dict.fromkeys((*active,*self.watch)))[:100]
                     self.stream.set_symbols(symbols)
-                    quotes,overflow=self.stream.drain_quotes()
+                    quotes,overflow,gaps=self.stream.drain_quotes()
                     now=time.time()
-                    model.tick(now,quotes,overflow or degraded)
+                    model.tick(now,quotes,overflow or degraded,gaps)
                     degraded=False
                     db.executemany('INSERT OR REPLACE INTO health VALUES(?,?)',
-                        [('last_tick',str(now)),('errors',str(errors)),('queued',str(len(pending)))])
+                        [('last_tick',str(now)),('errors',str(errors)),('queued',str(len(pending))),
+                         ('quote_version','2'),('stream',json.dumps(self.stream.health()))])
                     db.commit()
                 except Exception as error:
                     db.rollback()
+                    model.reload_active()
                     errors+=1
                     degraded=True
                     print('Rocket daily recorder: '+type(error).__name__,flush=True)
@@ -153,7 +174,7 @@ def source_path(db):
 
 def report_data(main, now):
     path=source_path(main)
-    result=dict(version='rocket-daily-v1',since=now-86400,until=now,episodes=[],health={},actual={})
+    result=dict(version='rocket-daily-v2',since=now-86400,until=now,episodes=[],health={},actual={})
     exists=lambda name: main.execute('SELECT 1 FROM sqlite_master WHERE name=?',(name,)).fetchone()
     positions=list(main.execute('SELECT id,symbol,signal_timestamp,opened_at,closed_at,status,realized_pnl_usdt '
                                "FROM paper_positions WHERE signal_kind LIKE '%лидер%'")) if exists('paper_positions') else []
@@ -215,4 +236,8 @@ def report_text(main, now):
     lines.extend([f"Регистратор: ошибок {d['health'].get('errors','—')}. Новые записи с установки; старые отказы не пересчитаны.",
         'Каждый сигнал отдельно, без лимита одной монеты в час. Покупка — первая ask не позднее 5с после решения; выход — bid. По 50 USDT, стоп и комиссия фиксируются на сигнале; защита +1%, откат 1 п.п., горизонт 60 мин. Открытые на горизонте не считаются закрытыми прибыльными.',
         'Это независимые виртуальные опыты, не доходность банка. Глубина и проскальзывание не моделируются. Повторная покупка после ожидания связана с исходным сигналом. Закрытые фактические сделки — по времени выхода.'])
+    v2=[s for s in rejected if s.get('quote_version')==2]
+    if v2:
+        g=outcome(v2)
+        lines.insert(5, f"Новый сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
     return '\n'.join(lines)
