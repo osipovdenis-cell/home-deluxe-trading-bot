@@ -12,6 +12,7 @@ from copy import deepcopy
 
 from bot.rocket_quote_stream import RocketQuoteStream
 from bot.rocket_recovery_shadow import new_leg, advance
+from bot import rocket_volume_shadow as volume_shadow
 
 SUFFIX = '.rocket_daily.sqlite3'
 HORIZON = 3600
@@ -51,7 +52,15 @@ class DailyModel:
             return
         if not all(math.isfinite(event[k]) for k in ('at','stop','cost')) or event['stop']<=0 or event['cost']<0:
             raise ValueError('invalid decision')
-        s = dict(event, quote_version=2, leg=dict(status='WAIT', net=None))
+        s = dict(deepcopy(event), quote_version=2, leg=dict(status='WAIT', net=None))
+        experiment = s.get('volume_experiment')
+        if experiment:
+            stamp = experiment.get('evaluated_at')
+            if (experiment['state'] != 'UNKNOWN' and
+                    (not volume_shadow.finite(stamp) or not 0 <= s['at']-stamp <= 2)):
+                experiment.update(state='UNKNOWN', reasons=['снимок устарел к записи отказа'])
+            s['volume_execution'] = dict(state={'ELIGIBLE':'PENDING', 'NO_ENTRY':'NO_ENTRY',
+                                                'UNKNOWN':'UNKNOWN'}[experiment['state']])
         if len({x['symbol'] for x in self.active.values()} | {s['symbol']}) > 100:
             s['leg'].update(status='INCOMPLETE', reason='лимит 100 монет')
         self.save(ident, s)
@@ -87,6 +96,9 @@ class DailyModel:
                 # No hindsight: first observed quote, never search for a nicer entry.
                 if first and first[0]-s['at']<=5:
                     at,bid,ask=first
+                    if s.get('volume_execution',{}).get('state') == 'PENDING':
+                        s['volume_execution'] = volume_shadow.first_quote(
+                            s['volume_experiment'], first, s['stop'])
                     s['leg']=leg=new_leg(at,ask,bid)
                     s['entry_delay_seconds']=at-s['at']
                     # Include the initial spread in immediate barrier evaluation.
@@ -97,6 +109,8 @@ class DailyModel:
                     s['at']+HORIZON, s['stop'], s['cost'])
             if gap is not None and leg['status'] in ('WAIT', 'OPEN', 'INCOMPLETE'):
                 leg.update(status='INCOMPLETE', reason='разрыв соединения котировок')
+            if leg['status']=='INCOMPLETE' and s.get('volume_execution',{}).get('state')=='PENDING':
+                s['volume_execution'].update(state='UNKNOWN', reason=leg.get('reason'))
             self.save(ident,s)
             if leg['status'] not in ('WAIT','OPEN'):
                 del self.active[ident]
@@ -111,10 +125,11 @@ class DailyWorker:
         self.watch=()
         self.thread=None
 
-    def capture(self, symbol, signal_at, at, reason, opened, stop, cost, source='signal'):
+    def capture(self, symbol, signal_at, at, reason, opened, stop, cost, source='signal',
+                volume_experiment=None):
         self.queue.put(dict(id=f'{source}:{symbol}:{signal_at!r}', symbol=symbol,
             signal_at=signal_at, at=at, reason=str(reason), opened=bool(opened),
-            stop=stop, cost=cost, source=source))
+            stop=stop, cost=cost, source=source, volume_experiment=deepcopy(volume_experiment)))
 
     def watch_symbols(self, symbols):
         self.watch=tuple(symbols)
@@ -174,7 +189,8 @@ def source_path(db):
 
 def report_data(main, now):
     path=source_path(main)
-    result=dict(version='rocket-daily-v2',since=now-86400,until=now,episodes=[],health={},actual={})
+    result=dict(version='rocket-daily-v2',since=now-86400,until=now,episodes=[],health={},actual={},
+                volume_test=volume_shadow.report_data([],now))
     exists=lambda name: main.execute('SELECT 1 FROM sqlite_master WHERE name=?',(name,)).fetchone()
     positions=list(main.execute('SELECT id,symbol,signal_timestamp,opened_at,closed_at,status,realized_pnl_usdt '
                                "FROM paper_positions WHERE signal_kind LIKE '%лидер%'")) if exists('paper_positions') else []
@@ -187,12 +203,21 @@ def report_data(main, now):
     db=sqlite3.connect(Path(path+SUFFIX).resolve().as_uri()+'?mode=ro',uri=True,timeout=2)
     try:
         result['health']=dict(db.execute('SELECT key,value FROM health'))
-        rows=list(db.execute('SELECT payload FROM episodes WHERE at>=? AND at<=? ORDER BY at',(now-86400,now)))
+        rows=list(db.execute('SELECT payload FROM episodes WHERE at>=? AND at<=? ORDER BY at',(now-7*86400,now)))
     finally: db.close()
     bought={(r[1],r[2]):r[0] for r in positions}
     waits={(r[0],r[1]):r[2] for r in main.execute('SELECT symbol,signal_at,state FROM rocket_entry_waits ORDER BY id')} if exists('rocket_entry_waits') else {}
+    volume_rows=[]
     for payload, in rows:
         s=json.loads(payload)
+        if s['leg']['status'] in ('WAIT','OPEN') and now-float(result['health'].get('last_tick',0))>10:
+            s['leg'].update(status='INCOMPLETE',reason='регистратор не обновляется')
+        if s['leg']['status']=='INCOMPLETE' and s.get('volume_execution',{}).get('state')=='PENDING':
+            s['volume_execution'].update(state='UNKNOWN',reason=s['leg'].get('reason'))
+        if s.get('volume_experiment'):
+            volume_rows.append(s)
+        if s['at']<now-86400:
+            continue
         key=(s['symbol'],s['signal_at'])
         position=bought.get(key) if s['source']=='signal' else None
         wait=waits.get(key) if s['source']=='signal' else None
@@ -200,10 +225,13 @@ def report_data(main, now):
         s['classification']=('BOUGHT' if position is not None or s['opened'] else
             'PENDING_DECISION' if s['source']=='signal' and wait is None and now-s['at']<120 else 'REJECTED')
         s['wait_outcome']=wait
-        if s['leg']['status'] in ('WAIT','OPEN') and now-float(result['health'].get('last_tick',0))>10:
-            s['leg'].update(status='INCOMPLETE',reason='регистратор не обновляется')
         result['episodes'].append(s)
+    result['volume_test']=volume_shadow.report_data(volume_rows,now)
     return result
+
+
+def volume_report_text(main, now):
+    return volume_shadow.report_text(report_data(main,now)['volume_test'])
 
 
 def outcome(items):
