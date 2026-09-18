@@ -45,6 +45,7 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   generated_at_unix=now, exit_monitor_healthy=exit_healthy,
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
     bundle['rocket_daily'] = daily_report_data(audit.connection, now)
+    bundle['ai_health'] = audit.ai_health()
     timing = timing_report(audit.connection)
     timing['pairs'] = timing['pairs'][-100:]
     bundle['rocket_timing_comparison'] = timing
