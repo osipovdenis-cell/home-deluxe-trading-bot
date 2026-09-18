@@ -8,13 +8,15 @@ from collections import deque
 from dataclasses import asdict, replace
 from queue import Queue, Empty, Full
 from statistics import median
+from pathlib import Path
 
-from bot.streams import LeaderOrderFlowStream
+from bot.rocket_diagnostic_flow import DiagnosticFlowStream
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_recovery_shadow import new_leg, advance
 
-VERSION = 'rocket-timing-v1'
+VERSION = 'rocket-timing-v2'
+SUFFIX = '.rocket_timing.sqlite3'
 WAIT, HORIZON = 90, 3600
 
 
@@ -23,7 +25,16 @@ def schema(db):
         id INTEGER PRIMARY KEY, version TEXT NOT NULL, symbol TEXT NOT NULL,
         started REAL NOT NULL, finished REAL, payload TEXT NOT NULL)''')
     db.execute('CREATE INDEX IF NOT EXISTS rocket_timing_active ON rocket_timing_pairs(finished,symbol)')
-    db.execute('CREATE TABLE IF NOT EXISTS rocket_timing_health(key TEXT PRIMARY KEY,value REAL NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS rocket_timing_health(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+
+
+def open_recorder(path):
+    """A private writer cannot contend with the trade/audit database writer."""
+    db=sqlite3.connect(path+SUFFIX,timeout=1)
+    db.execute('PRAGMA journal_mode=WAL')
+    schema(db)
+    db.commit()
+    return db
 
 
 def strengthened(probe):
@@ -56,7 +67,6 @@ class TimingModel:
         ident = self.db.execute('INSERT INTO rocket_timing_pairs(version,symbol,started,payload) VALUES(?,?,?,?)',
                                (VERSION,symbol,now,json.dumps(s))).lastrowid
         self.save(ident,s,now)
-        self.db.commit()
         return ident
 
     def save(self, ident, s, now):
@@ -86,7 +96,7 @@ class TimingModel:
                     s[k].update(status='NO_ENTRY',reason='общие проверки: '+reason)
             self.save(i,s,now)
 
-    def tick(self, now, quotes, probes, overflow=False):
+    def tick(self, now, quotes, probes, overflow=False, gaps=()):
         for ident,s in self.states():
             approved = s['approved']
             if approved is None:
@@ -102,11 +112,16 @@ class TimingModel:
                 self.save(ident,s,now)
                 continue
             end = approved+HORIZON
+            gap=min((at for at,symbol in gaps if symbol==s['symbol']
+                     and approved<=at<=min(now,end)),default=None)
+            rows=[r for r in quotes.get(s['symbol'],()) if gap is None or r[0]<gap]
             # Replay every received bid in order BEFORE evaluating a new entry.
             for k in ('A','B'):
                 if overflow and s[k]['status'] in ('WAIT','OPEN'):
                     s[k].update(status='INCOMPLETE',reason='переполнение буфера котировок')
-                advance(s[k],quotes.get(s['symbol'],()),now,end,s['stop'],s['cost'])
+                advance(s[k],rows,now if gap is None else gap,end,s['stop'],s['cost'])
+                if gap is not None and s[k]['status'] in ('WAIT','OPEN','INCOMPLETE'):
+                    s[k].update(status='INCOMPLETE',reason='разрыв соединения котировок')
             waiting = [k for k in ('A','B') if s[k]['status']=='WAIT']
             if waiting:
                 p = probes.get(s['symbol']) or {}
@@ -142,38 +157,32 @@ class TimingModel:
                             windows=w,allowed=p.get('allowed'),reason=p.get('reason')))
                 s['last_check'] = now
             self.save(ident,s,now)
-        self.db.commit()
+        # The worker commits commands, outcomes and health as one transaction.
 
 
-class TimingFlowStream(LeaderOrderFlowStream):
-    def __init__(self):
-        super().__init__(max_symbols=40)
-        self.events = deque(maxlen=100000)
-        self.events_lock = threading.Lock()
-        self.overflow = False
+TimingFlowStream = DiagnosticFlowStream
 
-    def ingest(self, payload, received_at=None):
-        now = time.time() if received_at is None else received_at
-        super().ingest(payload, now)
-        item = json.loads(payload) if isinstance(payload,str) else payload
-        item = item.get('data',item)
-        if 'b' not in item or 'a' not in item or item.get('e')=='depthUpdate':
-            return
-        symbol = item.get('s')
-        bid,ask = float(item['b']),float(item['a'])
-        if not all(math.isfinite(v) and v>0 for v in (bid,ask)) or ask<bid:
-            return
-        with self.events_lock:
-            if len(self.events)==self.events.maxlen:
-                self.overflow=True
-            self.events.append((now,symbol,bid))
 
-    def drain(self):
-        with self.events_lock:
-            events,overflow = list(self.events),self.overflow
-            self.events.clear()
-            self.overflow=False
-        return events,overflow
+def apply_commands(model, jobs, pending):
+    """Commands and job references are acknowledged only after a DB commit."""
+    updated=dict(jobs)
+    for action,args in pending:
+        token=args[0]
+        if action=='begin':
+            _,signal,signal_at,received,stop,cost=args
+            ident=model.begin(signal.symbol,received,signal_at,signal.price,stop,cost)
+            updated[token]=(ident,signal,None,None)
+        elif token in updated:
+            ident,signal,context,dynamics=updated[token]
+            if ident is None:
+                continue
+            if action=='approve':
+                _,at,context,dynamics=args
+                updated[token]=(ident,signal,context,dynamics)
+                model.approve(ident,at)
+            elif action=='decision':
+                model.decision(ident,*args[1:])
+    return updated
 
 
 class TimingWorker:
@@ -203,7 +212,7 @@ class TimingWorker:
         self.thread.start()
 
     def run(self):
-        db=sqlite3.connect(self.path,timeout=1)
+        db=open_recorder(self.path)
         model=TimingModel(db)
         # No historical recovery after restart: missing decision windows are unknown.
         for ident,s in model.states():
@@ -213,54 +222,48 @@ class TimingWorker:
             model.save(ident,s,time.time())
         db.commit()
         jobs={}
-        errors=0
+        saved_health=dict(db.execute('SELECT key,value FROM rocket_timing_health'))
+        errors=int(saved_health.get('errors',0))
+        session_errors=0
+        last_error_type=last_error_code=''
+        pending=deque()
+        retained={}
         recorder_failed=False
         try:
             while not self.stop.is_set():
                 try:
                     # Keep diagnostic DB errors isolated from the trading threads.
-                    while True:
+                    while len(pending)<200:
                         try:
                             action,args=self.commands.get_nowait()
                         except Empty:
                             break
-                        token=args[0]
-                        if action=='begin':
-                            _,signal,signal_at,received,stop,cost=args
-                            ident=model.begin(signal.symbol,received,signal_at,signal.price,stop,cost)
-                            jobs[token]=(ident,signal,None,None)
-                        elif token in jobs:
-                            ident,signal,context,dynamics=jobs[token]
-                            if ident is None:
-                                continue
-                            if action=='approve':
-                                _,at,context,dynamics=args
-                                jobs[token]=(ident,signal,context,dynamics)
-                                model.approve(ident,at)
-                            elif action=='decision':
-                                model.decision(ident,*args[1:])
+                        pending.append((action,args))
+                    next_jobs=apply_commands(model,jobs,pending)
                     if recorder_failed:
                         for ident,s in model.states():
                             for k in ('A','B'):
                                 if s[k]['status'] in ('PENDING','WAIT','OPEN'):
                                     s[k].update(status='INCOMPLETE',reason='ошибка независимого регистратора')
                             model.save(ident,s,time.time())
-                        db.commit()
-                        recorder_failed=False
                     states=model.states()
                     active={s['symbol'] for _,s in states}
                     active_ids={i for i,_ in states}
-                    jobs={k:v for k,v in jobs.items() if v[0] in active_ids}
+                    next_jobs={k:v for k,v in next_jobs.items() if v[0] in active_ids}
                     with self.lock:
                         watch=self.watch
-                    self.stream.set_symbols((*sorted(active),*watch))
-                    events,overflow=self.stream.drain()
+                    clock=time.time()
+                    retained.update((symbol,clock) for symbol in watch)
+                    retained={symbol:t for symbol,t in retained.items() if clock-t<=120}
+                    desired=tuple(dict.fromkeys((*sorted(active),*watch,*retained)))[:40]
+                    self.stream.set_symbols(desired)
+                    events,overflow,gaps=self.stream.drain()
                     quotes={}
-                    for at,symbol,bid in events:
+                    for at,symbol,bid in sorted(events):
                         quotes.setdefault(symbol,[]).append((at,bid))
                     now=time.time()
                     probes={}
-                    for ident,signal,context,dynamics in jobs.values():
+                    for ident,signal,context,dynamics in next_jobs.values():
                         p=self.stream.entry_probe(signal.symbol,now)
                         snapshot=p.pop('snapshot')
                         if context is None:
@@ -274,13 +277,22 @@ class TimingWorker:
                             p['allowed'],p['reason']=self.market.leader_entry_quality(fresh_context,fresh_dynamics)
                             p['after_flow']=asdict(snapshot)
                         probes[signal.symbol]=p
-                    model.tick(now,quotes,probes,overflow)
-                    for key,value in (('last_tick',now),('errors',errors),('dropped_commands',self.dropped)):
+                    model.tick(now,quotes,probes,overflow,gaps)
+                    for key,value in (('last_tick',now),('errors',errors),('session_errors',session_errors),
+                                      ('last_error_type',last_error_type),('last_error_code',last_error_code),
+                                      ('dropped_commands',self.dropped),('queued_commands',self.commands.qsize()),
+                                      ('stream',json.dumps(self.stream.health()))):
                         db.execute('INSERT OR REPLACE INTO rocket_timing_health VALUES(?,?)',(key,value))
                     db.commit()
+                    jobs=next_jobs
+                    pending.clear()
+                    recorder_failed=False
                 except Exception as error:
                     db.rollback()
                     errors+=1
+                    session_errors+=1
+                    last_error_type=type(error).__name__
+                    last_error_code=str(getattr(error,'sqlite_errorname',''))
                     recorder_failed=True
                     # A failed drain/transaction can hide an extremum: invalidate,
                     # rather than silently treating a later price as a full path.
@@ -293,7 +305,7 @@ class TimingWorker:
                         db.commit()
                     except sqlite3.Error:
                         db.rollback()
-                    print('Rocket timing shadow: '+type(error).__name__,flush=True)
+                    print('Rocket timing shadow: '+last_error_type+' '+last_error_code,flush=True)
                 self.stop.wait(.2)
         finally:
             db.close()
@@ -305,12 +317,41 @@ class TimingWorker:
         self.stream.close()
 
 
-def report_data(db):
+def _read_data(db):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_timing_pairs'").fetchone():
         return dict(version=VERSION,pairs=[],health={})
     rows=db.execute('SELECT id,finished,payload FROM rocket_timing_pairs WHERE version=? ORDER BY id',(VERSION,)).fetchall()
     return dict(version=VERSION,pairs=[dict(id=i,finished=f,**json.loads(p)) for i,f,p in rows],
                 health=dict(db.execute('SELECT key,value FROM rocket_timing_health')))
+
+
+def report_data(db):
+    path=next((r[2] for r in db.execute('PRAGMA database_list') if r[1]=='main'),'')
+    if not path or not Path(path+SUFFIX).exists():
+        result=_read_data(db)
+        if path and not path.endswith(SUFFIX) and not result['pairs']:
+            result['health']={}  # Legacy counters do not belong to the new recorder.
+    else:
+        sidecar=sqlite3.connect(Path(path+SUFFIX).resolve().as_uri()+'?mode=ro',uri=True,timeout=1)
+        try: result=_read_data(sidecar)
+        finally: sidecar.close()
+    exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_timing_pairs'").fetchone()
+    if exists:
+        rows=db.execute('SELECT payload FROM rocket_timing_pairs WHERE version!=?',(VERSION,)).fetchall()
+        legacy=[json.loads(payload) for payload, in rows]
+        result['legacy']=dict(candidates=len(legacy),incomplete=sum(any(s[k]['status']=='INCOMPLETE'
+                                    for k in ('A','B')) for s in legacy))
+        if legacy:
+            health_table=db.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_timing_health'").fetchone()
+            legacy_health=dict(db.execute('SELECT key,value FROM rocket_timing_health')) if health_table else {}
+            result['legacy']['errors']=int(float(legacy_health.get('errors',0)))
+    health=result['health']
+    if path and time.time()-float(health.get('last_tick',0))>10:
+        for s in result['pairs']:
+            for k in ('A','B'):
+                if s[k]['status'] in ('PENDING','WAIT','OPEN'):
+                    s[k].update(status='INCOMPLETE',reason='регистратор не обновляется')
+    return result
 
 
 def report_text(db):
@@ -326,7 +367,11 @@ def report_text(db):
     if delays:
         lines.append(f'Сигнал → допуск: медиана {median(delays):.2f}с; максимум {max(delays):.2f}с, n={len(delays)}.')
     health=d['health']
-    lines.append(f"Ошибок регистратора {int(health.get('errors',0))}; потеряно команд {int(health.get('dropped_commands',0))}.")
+    lines.append(f"Ошибок регистратора v2 {int(health.get('errors',0))}, с перезапуска {int(health.get('session_errors',0))}; потеряно команд {int(health.get('dropped_commands',0))}.")
+    if health.get('last_error_type'):
+        lines.append(f"Последняя ошибка: {health['last_error_type']} {health.get('last_error_code','')}.")
+    if d.get('legacy',{}).get('candidates'):
+        lines.append(f"Архив прежнего регистратора: {d['legacy']['candidates']} пар, неполных {d['legacy']['incomplete']}, ошибок {d['legacy'].get('errors',0)}; в результаты v2 не включён.")
     totals={}
     for k in ('A','B'):
         closed=[s[k] for s in eligible if s[k]['status']=='CLOSED']
