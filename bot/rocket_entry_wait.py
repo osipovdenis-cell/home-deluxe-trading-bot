@@ -7,7 +7,7 @@ import httpx
 
 from bot.execution import fresh_entry
 from bot.rocket_cards import entry_probe
-from bot.rocket_entry_guard import finite, fresh_quality_guard
+from bot.rocket_entry_guard import finite, fading_buy_guard
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,8 @@ class RocketEntryWaitWorker:
 
     @staticmethod
     def recovery_reason(probe):
-        allowed, reason = fresh_quality_guard(probe)
+        # Delayed entries must satisfy the same final veto as immediate entries.
+        allowed, reason = fading_buy_guard(probe)
         if not allowed:
             return reason
         r5 = (probe.get('changes') or {}).get('5')
