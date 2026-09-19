@@ -20,7 +20,48 @@ class ShortWaitTests(unittest.TestCase):
         self.worker.prepare(self.trader)
         with patch('bot.rocket_entry_wait.time.time',return_value=100):
             self.worker.submit(PumpSignal('R',100,3,300,'лидер'),None,None,80,80)
-        self.good=dict(fresh=True,allowed=True,changes={'5':.1},after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10})
+        self.good=dict(fresh=True,allowed=True,changes={'5':.1,'10':.1},
+                       before_context={'flow_buy_5s_usdt':10},
+                       after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10})
+
+    def fading_probe(self):
+        # Observed EPIC case: small 5s uptick despite fading buys and a 10s decline.
+        return dict(self.good, before_context={'flow_buy_5s_usdt':6205.55853},
+                    after_flow={'buy_5s_usdt':91.41469,'sell_5s_usdt':85.31244},
+                    changes={'5':.0849076629,'10':-.0212044105})
+
+    def test_fading_buys_defer_then_recover_without_resetting_wait(self):
+        weak = self.fading_probe()
+        self.assertEqual(self.tick([weak]), 0)
+        self.assertEqual(self.trader.open_symbols(), ())
+        self.assertEqual(self.worker.symbols(), ('R',))
+        self.assertEqual(self.worker._pending['R'].queued_at, 100)
+        self.assertIn('ослабление покупок', self.worker._last_block['R'])
+        # Lower volume alone is not a veto once the 10s decline has stopped.
+        recovered = dict(weak, changes={'5':.1,'10':0.0})
+        self.assertEqual(self.tick([recovered,recovered], 102), 1)
+        self.assertEqual(self.trader.open_symbols(), ('R',))
+        self.assertEqual(self.worker.symbols(), ())
+        row = self.trader.connection.execute('SELECT signal_timestamp,opened_at FROM paper_positions').fetchone()
+        self.assertEqual(tuple(row), (80,102))
+
+    def test_fading_buys_during_quote_request_do_not_buy(self):
+        self.assertEqual(self.tick([self.good,self.fading_probe()]), 1)
+        self.assertEqual(self.trader.open_symbols(), ())
+        self.assertEqual(self.worker.symbols(), ('R',))
+        self.assertIn('ослабление покупок', self.worker._last_block['R'])
+        self.tick([], 190)
+        row = self.trader.connection.execute('SELECT state,detail FROM rocket_entry_waits').fetchone()
+        self.assertEqual(row['state'], 'EXPIRED')
+        self.assertIn('ослабление покупок', row['detail'])
+
+    def test_missing_baseline_or_ten_second_change_cannot_bypass_guard(self):
+        for weak in (dict(self.good,before_context={}),
+                     dict(self.good,changes={'5':.1})):
+            with self.subTest(probe=weak):
+                self.assertEqual(self.tick([weak]), 0)
+                self.assertEqual(self.trader.open_symbols(), ())
+                self.assertEqual(self.worker.symbols(), ('R',))
 
     def tearDown(self):
         self.trader.close()
