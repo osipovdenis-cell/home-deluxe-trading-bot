@@ -53,8 +53,8 @@ class TimingTests(unittest.TestCase):
     def test_missing_probe_excludes_pair_not_no_entry(self):
         self.tick(100.2,fresh=False)
         self.assertTrue(all(self.state()[k]['status']=='INCOMPLETE' for k in ('A','B')))
-        self.assertIn('неполных 1',report_text(self.db))
-        self.assertIn('полных допущенных пар 0',report_text(self.db))
+        self.assertIn('неполных 1',report_text(self.db,now=3701))
+        self.assertIn('полных допущенных пар 0',report_text(self.db,now=3701))
 
     def test_missing_wait_check_and_buffer_overflow(self):
         self.tick(100.2,growing=False)
@@ -70,7 +70,12 @@ class TimingTests(unittest.TestCase):
         row=next(s for s in d['pairs'] if s['id']==ident)
         self.assertEqual(row['A']['status'],'NO_ENTRY')
         self.assertEqual(row['B']['status'],'NO_ENTRY')
-        self.assertIsNone(self.model.begin('Y',120,119,100,.5,.2))
+        self.assertIsNone(self.model.begin('Y',120,99,100,.5,.2))
+        later=self.model.begin('Y',120,119,100,.5,.2)
+        self.assertIsNotNone(later)
+        self.model.approve(later,120)
+        self.model.tick(120.2,{'Y':[(120.2,100)]},{later:probe(120.2)})
+        self.assertEqual(next(s for i,s in self.model.states() if i==later)['A']['status'],'OPEN')
         self.assertIsNone(self.model.begin('BAD',100,99,100,-.5,.2))
 
     def test_trailing_whole_position_and_quote_gap(self):
@@ -88,7 +93,7 @@ class TimingTests(unittest.TestCase):
         for at in range(191,3701):
             self.model.tick(at,{'X':[(at,100)]},{})
         self.assertEqual(self.state()['A']['status'],'MARKED')
-        self.assertIn('полных допущенных пар 1',report_text(self.db))
+        self.assertIn('полных допущенных пар 1',report_text(self.db,now=3701))
 
     def test_raw_stream_keeps_intrastep_stop_and_rebound(self):
         stream=TimingFlowStream()
@@ -135,6 +140,25 @@ class TimingTests(unittest.TestCase):
         state=next(s for i,s in self.model.states() if i==jobs[token][0])
         self.assertEqual(state['approved'],101)
         self.assertEqual(state['A']['status'],'WAIT')
+
+    def test_parallel_same_symbol_keeps_signal_specific_probes(self):
+        other=self.model.begin('X',100.1,100,100,.5,.2)
+        self.model.approve(other,100.1)
+        bad=probe(100.2);bad['allowed']=False;bad['reason']='CVD'
+        self.model.tick(100.2,{'X':[(100.2,100)]},{self.id:probe(100.2),other:bad})
+        states=dict(self.model.states())
+        self.assertEqual(states[self.id]['A']['status'],'OPEN')
+        self.assertEqual(states[other]['A']['status'],'WAIT')
+
+    def test_daily_report_excludes_old_pairs_and_counts_avoided_loss(self):
+        self.tick(100.2,growing=False)
+        self.tick(101,99.4,growing=False)
+        for at in range(102,191): self.tick(at,99.4,growing=False)
+        report=report_text(self.db,now=200)
+        self.assertIn('B предотвратил убыточных A: 1',report)
+        self.assertIn('Законченные сравнения: 1',report)
+        self.assertIn('Законченные сравнения: 0',report_text(self.db,now=90000))
+        self.assertIn('записано 1 сигналов',report_text(self.db,now=90000))
 
     def test_main_database_lock_does_not_block_diagnostics_or_readback(self):
         with tempfile.TemporaryDirectory() as root:
