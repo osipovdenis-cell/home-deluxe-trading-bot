@@ -4,7 +4,7 @@ import math
 import sqlite3
 import threading
 import time
-from collections import deque
+from collections import deque, Counter
 from dataclasses import asdict, replace
 from queue import Queue, Empty, Full
 from statistics import median
@@ -15,7 +15,7 @@ from bot.rocket_entry_guard import fading_buy_guard
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_recovery_shadow import new_leg, advance
 
-VERSION = 'rocket-timing-v2'
+VERSION = 'rocket-timing-v3'
 SUFFIX = '.rocket_timing.sqlite3'
 WAIT, HORIZON = 90, 3600
 
@@ -55,8 +55,8 @@ class TimingModel:
     def begin(self, symbol, now, signal_at, signal_price, stop, cost):
         if not all(math.isfinite(x) for x in (now, signal_at, signal_price, stop, cost)) or min(signal_price, stop) <= 0 or cost < 0:
             return None
-        if self.db.execute('SELECT 1 FROM rocket_timing_pairs WHERE version=? AND symbol=? AND started>?',
-                           (VERSION, symbol, now-HORIZON)).fetchone():
+        if self.db.execute("SELECT 1 FROM rocket_timing_pairs WHERE version=? AND symbol=? AND json_extract(payload,'$.signal_at')=?",
+                           (VERSION, symbol, signal_at)).fetchone():
             return None
         s = dict(symbol=symbol, signal_at=signal_at, start=now, signal_price=signal_price,
                  stop=stop, cost=cost, approved=None, last_check=None, snapshots=[],
@@ -100,7 +100,7 @@ class TimingModel:
         for ident,s in self.states():
             approved = s['approved']
             if approved is None:
-                p = probes.get(s['symbol']) or {}
+                p = probes.get(ident, probes.get(s['symbol'])) or {}
                 if p and (not s['snapshots'] or now-s['snapshots'][-1]['at']>=1):
                     s['snapshots'].append(dict(at=now,stage='до допуска',fresh=p.get('fresh'),
                         changes=p.get('changes'),windows=p.get('recovery_windows'),
@@ -124,7 +124,7 @@ class TimingModel:
                     s[k].update(status='INCOMPLETE',reason='разрыв соединения котировок')
             waiting = [k for k in ('A','B') if s[k]['status']=='WAIT']
             if waiting:
-                p = probes.get(s['symbol']) or {}
+                p = probes.get(ident, probes.get(s['symbol'])) or {}
                 w = p.get('recovery_windows') or {}
                 values = [w.get(k) for k in ('quote_at','bid','ask')]
                 valid = (p.get('fresh') is True and w.get('complete') is True
@@ -133,7 +133,8 @@ class TimingModel:
                          and abs(p.get('at',0)-now) < 0.5)
                 if now-s['last_check']>2 or not valid:
                     for k in waiting:
-                        s[k].update(status='INCOMPLETE',reason='неполные данные ожидания/потока')
+                        s[k].update(status='INCOMPLETE',reason=('пауза проверок >2с' if now-s['last_check']>2 else
+                            'неполные данные ожидания/потока: '+str(p.get('reason') or 'нет полных окон/свежей котировки')))
                 elif now >= approved+WAIT:
                     for k in waiting:
                         s[k].update(status='NO_ENTRY',reason='90с без восстановления')
@@ -267,7 +268,7 @@ class TimingWorker:
                         p=self.stream.entry_probe(signal.symbol,now)
                         snapshot=p.pop('snapshot')
                         if context is None:
-                            probes[signal.symbol]=p
+                            probes[ident]=p
                             continue
                         p.update(before_context=asdict(context),allowed=False,reason='поток не готов',
                                  growth_12h=self.market.change_12h_percent.get(signal.symbol,0)>0)
@@ -276,7 +277,7 @@ class TimingWorker:
                             fresh_dynamics=replace(dynamics,change_15s_percent=p['changes']['15'])
                             p['allowed'],p['reason']=self.market.leader_entry_quality(fresh_context,fresh_dynamics)
                             p['after_flow']=asdict(snapshot)
-                        probes[signal.symbol]=p
+                        probes[ident]=p
                     model.tick(now,quotes,probes,overflow,gaps)
                     for key,value in (('last_tick',now),('errors',errors),('session_errors',session_errors),
                                       ('last_error_type',last_error_type),('last_error_code',last_error_code),
@@ -354,12 +355,16 @@ def report_data(db):
     return result
 
 
-def report_text(db):
+def report_text(db, now=None):
     d=report_data(db)
-    pairs=d['pairs']
+    now=time.time() if now is None else now
+    all_pairs=d['pairs']
+    pairs=[s for s in all_pairs if now-86400 <= s['start'] <= now]
     bad=[s for s in pairs if any(s[k]['status']=='INCOMPLETE' for k in ('A','B'))]
     eligible=[s for s in pairs if s['approved'] is not None and s['finished'] is not None and s not in bad]
     lines=['⏱ Момент входа ракет — независимая тень',
+        'Период: сигналы за последние 24 часа; незавершённые и неполные отдельно.',
+        f'С запуска {VERSION}: записано {len(all_pairs)} сигналов.',
         f"Версия {VERSION}: кандидатов {len(pairs)}, полных допущенных пар {len(eligible)}, неполных {len(bad)}; наблюдаются {sum(s['finished'] is None for s in pairs)}.",
         f"Общие проверки отклонили {sum(s['approved'] is None and s['finished'] is not None and s not in bad for s in pairs)}; в обеих ветках без входа.",
         'A: текущая финальная проверка и короткое ожидание. B: дополнительно покупки 5с > предыдущих 5с и продаж, bid выше 5с назад. Ожидание до 90с без нового AI/20с.']
@@ -367,11 +372,13 @@ def report_text(db):
     if delays:
         lines.append(f'Сигнал → допуск: медиана {median(delays):.2f}с; максимум {max(delays):.2f}с, n={len(delays)}.')
     health=d['health']
-    lines.append(f"Ошибок регистратора v2 {int(health.get('errors',0))}, с перезапуска {int(health.get('session_errors',0))}; потеряно команд {int(health.get('dropped_commands',0))}.")
+    lines.append(f"Ошибок регистратора {int(health.get('errors',0))}, с перезапуска {int(health.get('session_errors',0))}; потеряно команд {int(health.get('dropped_commands',0))}.")
     if health.get('last_error_type'):
         lines.append(f"Последняя ошибка: {health['last_error_type']} {health.get('last_error_code','')}.")
     if d.get('legacy',{}).get('candidates'):
-        lines.append(f"Архив прежнего регистратора: {d['legacy']['candidates']} пар, неполных {d['legacy']['incomplete']}, ошибок {d['legacy'].get('errors',0)}; в результаты v2 не включён.")
+        lines.append(f"Архив прежнего регистратора: {d['legacy']['candidates']} пар, неполных {d['legacy']['incomplete']}, ошибок {d['legacy'].get('errors',0)}; в текущие результаты не включён.")
+    reasons=Counter(s[k].get('reason','неизвестно') for s in bad for k in ('A','B') if s[k]['status']=='INCOMPLETE')
+    lines.extend(f'Неполные ветки: {reason} — {count}.' for reason,count in reasons.most_common(5))
     totals={}
     for k in ('A','B'):
         closed=[s[k] for s in eligible if s[k]['status']=='CLOSED']
@@ -380,10 +387,17 @@ def report_text(db):
         mark=sum(l['net']*.5 for l in marked)
         totals[k]=pnl+mark
         lines.append(f"• {k}: закрыто {len(closed)}, прибыльных {sum(l['net']>0 for l in closed)}; PnL {pnl:+.3f} USDT; открыто на горизонте {len(marked)} на {mark:+.3f}; без входа {sum(s[k]['status']=='NO_ENTRY' for s in eligible)}.")
+    closed_pairs=[s for s in eligible if all(s[k]['status'] in ('CLOSED','NO_ENTRY') for k in ('A','B'))]
+    value=lambda leg: leg['net']*.5 if leg['status']=='CLOSED' else 0.0
+    avoided=[s for s in closed_pairs if value(s['A'])<0 and value(s['B'])>=0]
+    lost=[s for s in closed_pairs if value(s['A'])>0 and value(s['B'])<=0]
+    lines.extend([f'Законченные сравнения: {len(closed_pairs)}; разница B−A без открытых: {sum(value(s["B"])-value(s["A"]) for s in closed_pairs):+.3f} USDT.',
+        f'B предотвратил убыточных A: {len(avoided)}; убыток A {sum(value(s["A"]) for s in avoided):+.3f} USDT.',
+        f'B не сохранил прибыльных A: {len(lost)}; прибыль A {sum(value(s["A"]) for s in lost):+.3f} USDT.'])
     skipped=[s for s in eligible if s['B']['status']=='NO_ENTRY' and s['A']['status']=='CLOSED']
     lines.extend([f"Разница B−A с оценкой открытых: {totals['B']-totals['A']:+.3f} USDT.",
         f"B пропустил прибыльных A: {sum(s['A']['net']>0 for s in skipped)} на +{sum(max(0,s['A']['net'])*.5 for s in skipped):.3f}; убыточных: {sum(s['A']['net']<0 for s in skipped)} на −{-sum(min(0,s['A']['net'])*.5 for s in skipped):.3f} USDT.",
         'Отдельный поток сделок и bid/ask, проверка каждые 0,2с. Пропуск проверки >2с, bid >5с или неполные окна исключают пару.',
         'По 50 USDT; фактические bid/ask, комиссии и стоп фиксируются на старте; защита +1%, откат 1 п.п.; горизонт 60 мин от допуска.',
-        'Только новые кандидаты, дошедшие до обработки сигнала; одна пара на монету в час. Не все лидеры Binance. Лимиты банка, глубина и проскальзывание не моделируются. A — модель правил, не фактическая сделка. На торговлю не влияет.'])
+        'Только новые кандидаты, дошедшие до обработки сигнала; отдельная пара на каждый сигнал, повторы одного сигнала исключены. Не все лидеры Binance. Лимиты банка, глубина и проскальзывание не моделируются. A — модель правил, не фактическая сделка. На торговлю не влияет.'])
     return '\n'.join(lines)
