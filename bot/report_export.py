@@ -46,6 +46,18 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
     bundle['rocket_daily'] = daily_report_data(audit.connection, now)
     bundle['ai_health'] = audit.ai_health()
+    # A read-only lookup on the live history also verifies the hot query when no
+    # candidates currently pass the gates. It never changes decisions or models.
+    latest = audit.connection.execute('SELECT symbol FROM signal_events ORDER BY timestamp DESC LIMIT 1').fetchone()
+    if latest:
+        started = time.perf_counter()
+        profile = audit.build_learning_profile(latest[0], now, {})
+        bundle['history_lookup_probe'] = dict(symbol=latest[0],
+            elapsed_seconds=time.perf_counter()-started, symbol_examples=profile.symbol_examples,
+            measured_at=time.time())
+    bundle['entry_latency'] = query_rows(audit.connection,
+        'SELECT symbol,signal_at,started_at,finished_at,queue_seconds,total_seconds,stages_json FROM rocket_entry_latency WHERE finished_at>=? ORDER BY id DESC LIMIT 100',
+        (now-86400,))
     timing = timing_report(audit.connection)
     timing['pairs'] = timing['pairs'][-100:]
     bundle['rocket_timing_comparison'] = timing
