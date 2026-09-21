@@ -358,6 +358,12 @@ class AuditLog:
                 spread_bps REAL,
                 tick_percent REAL
             );
+            CREATE TABLE IF NOT EXISTS rocket_entry_latency (
+                id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, signal_at REAL NOT NULL,
+                started_at REAL NOT NULL, finished_at REAL NOT NULL, queue_seconds REAL NOT NULL,
+                total_seconds REAL NOT NULL, stages_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS rocket_entry_latency_time ON rocket_entry_latency(finished_at);
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -433,6 +439,8 @@ class AuditLog:
                 ai_score INTEGER,
                 ai_decision TEXT
             );
+            CREATE INDEX IF NOT EXISTS learning_examples_time
+                ON learning_examples(signal_timestamp);
             CREATE INDEX IF NOT EXISTS learning_examples_symbol_time
                 ON learning_examples(symbol, signal_timestamp);
             CREATE TABLE IF NOT EXISTS confirmation_events (
@@ -476,6 +484,8 @@ class AuditLog:
                 ,flow_spread_bps REAL
                 ,flow_spread_change_bps REAL
             );
+            CREATE INDEX IF NOT EXISTS confirmation_events_matured_symbol_time
+                ON confirmation_events(symbol, started_at) WHERE evaluated_at IS NOT NULL;
             CREATE INDEX IF NOT EXISTS confirmation_events_time
                 ON confirmation_events(started_at);
             CREATE TABLE IF NOT EXISTS confirmation_samples (
@@ -1484,6 +1494,29 @@ class AuditLog:
             matches += abs(float(historical) - float(present)) <= tolerance
         return available >= 3 and matches / available >= 0.6
 
+    def record_entry_latency(self, symbol, signal_at, started_at, finished_at, elapsed, stages):
+        self.connection.execute(
+            "INSERT INTO rocket_entry_latency(symbol,signal_at,started_at,finished_at,queue_seconds,total_seconds,stages_json) VALUES(?,?,?,?,?,?,?)",
+            (symbol,signal_at,started_at,finished_at,max(0,started_at-signal_at),
+             max(0,elapsed),json.dumps(stages)))
+        self.connection.commit()
+
+    def entry_latency_report_text(self, now):
+        rows=self.connection.execute(
+            "SELECT queue_seconds,total_seconds,stages_json FROM rocket_entry_latency WHERE finished_at>=? AND finished_at<=?",
+            (now-86400,now)).fetchall()
+        lines=['⏱ Скорость обработки входов ракет — 24 часа',f'Измерено решений: {len(rows)}.']
+        values={'до обработки': [r[0] for r in rows], 'обработка целиком': [r[1] for r in rows]}
+        for _,_,payload in rows:
+            for stage,value in json.loads(payload).items():
+                values.setdefault(stage,[]).append(value)
+        for stage,items in values.items():
+            if items:
+                ordered=sorted(items)
+                lines.append(f'• {stage}: медиана {median(items):.3f}с; p95 {ordered[math.ceil(.95*len(items))-1]:.3f}с; максимум {max(items):.3f}с; n={len(items)}.')
+        lines.append('Включены отказы. Отсчёт от готового сигнала; исходные 20с подтверждения и отдельное ожидание восстановления сюда не входят. Этапы входят в общее время, не суммировать с ним.')
+        return '\n'.join(lines)
+
     def build_learning_profile(
         self,
         symbol: str,
@@ -1518,7 +1551,7 @@ class AuditLog:
             "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
             "WHERE c.symbol=learning_examples.symbol "
             "AND c.evaluated_at IS NOT NULL "
-            "AND ABS(c.started_at-learning_examples.signal_timestamp)<=60) "
+            "AND c.started_at BETWEEN learning_examples.signal_timestamp-60 AND learning_examples.signal_timestamp+60) "
             "ORDER BY signal_timestamp DESC LIMIT 2000",
             (now - lookback_seconds,),
         ).fetchall()
@@ -1627,7 +1660,7 @@ class AuditLog:
             "AND NOT EXISTS (SELECT 1 FROM confirmation_events c "
             "WHERE c.symbol=learning_examples.symbol "
             "AND c.evaluated_at IS NOT NULL "
-            "AND ABS(c.started_at-learning_examples.signal_timestamp)<=60)",
+            "AND c.started_at BETWEEN learning_examples.signal_timestamp-60 AND learning_examples.signal_timestamp+60)",
             (now - 30 * 86400,),
         ).fetchall()
         shadow = self.connection.execute(
