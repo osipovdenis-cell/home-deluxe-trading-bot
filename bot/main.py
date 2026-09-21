@@ -1,5 +1,6 @@
 import time
 import math
+import sqlite3
 from queue import Empty
 from types import SimpleNamespace
 
@@ -149,12 +150,24 @@ def leader_ai_entry_policy(analysis, is_leader_reentry: bool) -> tuple[bool, str
     )
 
 
+def timed_entry_call(diagnostics, stage, callback, *args, **kwargs):
+    started = time.perf_counter()
+    try:
+        return callback(*args, **kwargs)
+    finally:
+        if diagnostics is not None:
+            stages = diagnostics.setdefault('stages', {})
+            stages[stage] = stages.get(stage, 0.0) + max(0.0, time.perf_counter() - started)
+
+
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None,
 ):
     opened = False
-    diagnostics = {}
+    diagnostics = {'stages': {}}
+    processing_started = time.time()
+    processing_clock = time.perf_counter()
     timing = market.__dict__.get('rocket_timing_worker') if "лидер" in signal.kind else None
     token = (signal.symbol, now)
     if timing is not None:
@@ -181,6 +194,12 @@ def process_signal(
                     timing.send('decision', token, time.time(), reason, opened)
             except Exception as error:
                 print("Rocket gate diagnostics: " + type(error).__name__, flush=True)
+        if "лидер" in signal.kind and isinstance(audit, AuditLog):
+            try:
+                audit.record_entry_latency(signal.symbol, now, processing_started, time.time(),
+                                           time.perf_counter()-processing_clock, diagnostics['stages'])
+            except sqlite3.Error as error:
+                print('Entry latency recording: ' + type(error).__name__, flush=True)
         if "лидер" not in signal.kind:
             rejection = audit.connection.execute(
                 "SELECT reason FROM paper_entry_rejections WHERE symbol=? AND timestamp>=? "
@@ -202,7 +221,7 @@ def _process_signal(
     context = preloaded_context
     if context is None:
         try:
-            context = market.fetch_signal_context(signal.symbol)
+            context = timed_entry_call(diagnostics, "контекст рынка", market.fetch_signal_context, signal.symbol)
         except (httpx.HTTPError, ValueError) as error:
             audit.record_error(f"Signal context {signal.symbol}: {error}", now)
             print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
@@ -283,7 +302,7 @@ def _process_signal(
             )
             print(f"Вход {signal.symbol} отклонён: {quality_reason}", flush=True)
             return False
-    behavior = audit.build_symbol_behavior(
+    behavior = timed_entry_call(diagnostics, "история монеты", audit.build_symbol_behavior,
         signal.symbol,
         now,
         settings.early_threshold_percent,
@@ -315,7 +334,7 @@ def _process_signal(
             context.ask_wall_share_percent if context else None
         ),
     }
-    learned = audit.build_learning_profile(
+    learned = timed_entry_call(diagnostics, "обучающая история", audit.build_learning_profile,
         signal.symbol, now, learned_features,
         strategy=None if leader_paper_entry else "scalp",
     )
@@ -349,7 +368,7 @@ def _process_signal(
     analysis_error = None
     analysis_attempts = 0
     if ai is not None:
-        analysis, analysis_error, analysis_attempts = analyze_momentum_with_retries(
+        analysis, analysis_error, analysis_attempts = timed_entry_call(diagnostics, "AI с повторами", analyze_momentum_with_retries,
             ai,
                 signal.symbol, signal.price, signal.change_percent,
                 signal.window_seconds // 60, signal.quote_volume_usdt,
@@ -557,7 +576,7 @@ def _process_signal(
         try:
             if trader.exit_monitor_healthy is not None and not trader.exit_monitor_healthy():
                 raise ValueError('обработчик выходов недоступен; покупка отложена')
-            entry_at, bid, entry_price = fresh_entry(
+            entry_at, bid, entry_price = timed_entry_call(diagnostics, "свежая цена", fresh_entry,
                 market.client, signal.symbol, signal.price,
                 settings.paper_stop_loss_percent, .25,
             )
@@ -568,7 +587,7 @@ def _process_signal(
             audit.record_entry_rejection(time.time(), signal.symbol,
                 f'Свежесть входа: {error}', None, None)
             return False
-    diagnostic_probe = entry_probe(market, signal, context, dynamics, now) if leader_paper_entry else None
+    diagnostic_probe = timed_entry_call(diagnostics, "финальная проверка", entry_probe, market, signal, context, dynamics, now) if leader_paper_entry else None
     if trader is not None and leader_paper_entry:
         entry_allowed, entry_reason = fading_buy_guard(diagnostic_probe)
         if not entry_allowed:
@@ -719,6 +738,7 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(chat_id, audit.rocket_comparison.report())
             telegram.send(chat_id, audit.rocket_spread.report(now))
             telegram.send(chat_id, timing_report(audit.connection))
+            telegram.send(chat_id, audit.entry_latency_report_text(now))
             telegram.send(chat_id, daily_report(audit.connection, now))
             telegram.send(chat_id, volume_report_text(audit.connection, now))
             telegram.send(chat_id, audit.scalp_shadow.report(now))
