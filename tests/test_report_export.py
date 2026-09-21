@@ -77,6 +77,9 @@ class ReportExportTests(unittest.TestCase):
             self.assertNotIn('DO_NOT_EXPORT', json.dumps(bundle))
             self.assertEqual(trader.connection.execute('SELECT COUNT(*) FROM paper_positions').fetchone()[0], 1)
             self.assertTrue(bundle['exit_monitor_healthy'])
+            self.assertEqual(bundle['history_lookup_probe']['symbol'], 'LSKUSDT')
+            self.assertGreaterEqual(bundle['history_lookup_probe']['elapsed_seconds'],0)
+            self.assertEqual(bundle['entry_latency'],[])
         finally:
             audit.close()
             trader.close()
