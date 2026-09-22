@@ -10,9 +10,9 @@ from queue import SimpleQueue, Empty
 from datetime import datetime, timezone
 from copy import deepcopy
 
-from bot.rocket_quote_stream import RocketQuoteStream
 from bot.rocket_recovery_shadow import new_leg, advance
 from bot import rocket_volume_shadow as volume_shadow
+from bot import rocket_structure as structure
 
 SUFFIX = '.rocket_daily.sqlite3'
 HORIZON = 3600
@@ -121,7 +121,7 @@ class DailyWorker:
         self.path=path+SUFFIX
         self.queue=SimpleQueue()
         self.stop=threading.Event()
-        self.stream=RocketQuoteStream()
+        self.stream=structure.StructureStream()
         self.watch=()
         self.thread=None
 
@@ -153,6 +153,11 @@ class DailyWorker:
                         try: pending.append(self.queue.get_nowait())
                         except Empty: break
                     for event in pending:
+                        if 'structure' not in event:
+                            try:
+                                event['structure'] = self.stream.snapshot(event['symbol'], event['at'])
+                            except Exception:
+                                event['structure'] = structure.unknown(event['at'], 'ошибка снимка')
                         model.capture(event)
                     db.commit()
                     pending.clear()
@@ -268,4 +273,4 @@ def report_text(main, now):
     if v2:
         g=outcome(v2)
         lines.insert(5, f"Новый сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
-    return '\n'.join(lines)
+    return '\n'.join(lines) + '\n\n' + structure.report_text(ep)
