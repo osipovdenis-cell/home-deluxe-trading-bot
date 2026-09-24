@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from bot.rocket_cards import schema, build_card, cards, format_card, RocketPathWorker, entry_probe, shadow_summary
+from bot.rocket_cards import schema, build_card, cards, format_card, RocketPathWorker, entry_probe, shadow_summary, RecordedBidStream, RetainedBidBatch
 from bot.streams import LeaderOrderFlowStream, PositionBookTickerStream
 from bot.trading import PaperTrader
 
@@ -141,3 +141,21 @@ class RocketCardsTests(unittest.TestCase):
                 self.assertEqual(live.connection.execute("SELECT COUNT(*) FROM paper_fills WHERE side='SELL'").fetchone()[0],0)
             finally:
                 worker.close(); live.close()
+
+    def test_real_depth_heartbeats_record_quiet_market_and_explicit_disconnect(self):
+        stream=RecordedBidStream()
+        stream.set_symbols(['R'])
+        for t in range(11,311):
+            stream.ingest({'stream':'r@depth5','data':{'lastUpdateId':1,
+                'bids':[['100','1']],'asks':[['100.1','1']]}},t)
+        batch=RetainedBidBatch()
+        events,overflow,gaps=stream.drain_recording_batch()
+        batch.append(events,overflow,10,310,gaps)
+        batch.write(self.db)
+        self.assertEqual(build_card(self.db,self.row,310)['windows']['5']['status'],'complete')
+        stream.interrupted(['R'],200)
+        events,overflow,gaps=stream.drain_recording_batch()
+        batch.append(events,overflow,310,311,gaps)
+        batch.write(self.db)
+        self.assertEqual(build_card(self.db,self.row,311)['windows']['5']['status'],'incomplete')
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM paper_fills WHERE side="SELL"').fetchone()[0],1)

@@ -16,6 +16,8 @@ from bot.streams import BINANCE_STREAM_BASE_URL
 
 class RocketQuoteStream:
     max_symbols = 100
+    idle_timeout = 30
+    subscription_timeout = 30
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -27,7 +29,11 @@ class RocketQuoteStream:
         self._gaps = deque(maxlen=10000)
         self._overflow = False
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
-                           connected=False, last_quote_at=0.0, invalid_messages=0)
+                           connected=False, last_quote_at=0.0, invalid_messages=0,
+                           version='rocket-quotes-v3', started_at=time.time(),
+                           last_disconnect_at=None, last_error_type=None,
+                           last_error_phase=None, last_close_code=None,
+                           disconnect_reasons={})
 
     def set_symbols(self, symbols):
         wanted = {str(s).upper() for s in symbols}
@@ -110,7 +116,24 @@ class RocketQuoteStream:
 
     def health(self):
         with self._lock:
-            return dict(self._stats, subscribed_symbols=len(self._symbols))
+            return dict(self._stats, disconnect_reasons=dict(self._stats['disconnect_reasons']),
+                        subscribed_symbols=len(self._symbols))
+
+    def record_error(self, error, phase):
+        # Exception text may contain URLs/payloads; export only bounded metadata.
+        name = type(error).__name__
+        if name not in ('TimeoutError', 'ConnectionClosedError', 'ConnectionClosedOK',
+                        'OSError', 'ValueError', 'JSONDecodeError'):
+            name = 'OtherError'
+        code = getattr(getattr(error, 'rcvd', None), 'code', None)
+        with self._lock:
+            reasons = self._stats['disconnect_reasons']
+            key = phase + ':' + name
+            reasons[key] = reasons.get(key, 0) + 1
+            self._stats.update(reconnects=self._stats['reconnects']+1,
+                               last_disconnect_at=time.time(), last_error_type=name,
+                               last_error_phase=phase,
+                               last_close_code=code if isinstance(code, int) else None)
 
     def start(self):
         self._thread = threading.Thread(target=self.run, name='rocket-daily-quotes', daemon=True)
@@ -120,9 +143,16 @@ class RocketQuoteStream:
         delay = 1
         while not self._stop.is_set():
             subscribed, pending, request_id = set(), {}, 0
+            phase = 'connect'
+            connected_at = None
             try:
+                # Binance sends server PINGs; websockets answers them automatically.
+                # Avoid a second, short client heartbeat deadline during bursts.
+                # A separate idle watchdog still reconnects a stalled data stream.
                 with connect(BINANCE_STREAM_BASE_URL + '/stream', open_timeout=10,
-                             close_timeout=2, ping_interval=20, ping_timeout=10) as ws:
+                             close_timeout=2, ping_interval=None, max_queue=256,
+                             compression=None) as ws:
+                    connected_at = last_received = time.monotonic()
                     with self._lock:
                         self._stats['connected'] = True
                     last_sync = -math.inf
@@ -130,29 +160,44 @@ class RocketQuoteStream:
                         now = time.monotonic()
                         # At most two control messages/sec, leaving room for pong.
                         if now - last_sync >= 1:
+                            phase = 'subscribe'
                             subscribed, request_id = self.sync_subscriptions(ws, subscribed, request_id, pending)
                             last_sync = now
-                        if any(now - sent > 5 for sent in pending.values()):
-                            raise TimeoutError('subscription acknowledgement missing')
+                        phase = 'receive'
                         try:
                             message = json.loads(ws.recv(timeout=.2))
                         except TimeoutError:
+                            now = time.monotonic()
+                            if any(now - sent > self.subscription_timeout for sent in pending.values()):
+                                phase = 'subscription_ack'
+                                raise TimeoutError('subscription acknowledgement missing')
+                            if subscribed and now - last_received > self.idle_timeout:
+                                phase = 'idle'
+                                raise TimeoutError('market stream idle')
                             continue
+                        last_received = time.monotonic()
                         if 'id' in message:
+                            phase = 'subscription_ack'
                             if message.get('result', 'error') is not None:
                                 raise ValueError('subscription rejected')
                             pending.pop(message['id'], None)
-                            delay = 1
                         else:
+                            phase = 'ingest'
                             self.ingest(message)
-            except Exception:
-                # The public log must never include payloads or account data.
-                with self._lock:
-                    self._stats['reconnects'] += 1
+                        # Read the queued ACK before declaring its timeout. A busy
+                        # socket must not postpone a genuinely missing ACK forever.
+                        if any(last_received - sent > self.subscription_timeout for sent in pending.values()):
+                            phase = 'subscription_ack'
+                            raise TimeoutError('subscription acknowledgement missing')
+            except Exception as error:
+                if not self._stop.is_set():
+                    self.record_error(error, phase)
             finally:
                 self.interrupted(subscribed)
                 with self._lock:
                     self._stats['connected'] = False
+            if connected_at is not None and time.monotonic() - connected_at >= 60:
+                delay = 1
             if self._stop.wait(delay):
                 break
             delay = min(30, delay * 2)

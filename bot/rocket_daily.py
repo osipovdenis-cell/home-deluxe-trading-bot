@@ -266,7 +266,27 @@ def report_text(main, now):
         group=[s for s in rejected if s['source']==source]
         g=outcome(group)
         lines.append(f"• {label}: {g['count']}; плюс/минус {g['profitable']}/{g['losing']}; закрытые {g['pnl']:+.3f} USDT; неполных {g['incomplete']}.")
-    lines.extend([f"Регистратор: ошибок {d['health'].get('errors','—')}. Новые записи с установки; старые отказы не пересчитаны.",
+    incomplete_reasons = Counter(s['leg'].get('reason','неизвестно') for s in rejected
+                                 if s['leg']['status']=='INCOMPLETE')
+    try:
+        stream_health = json.loads(d['health'].get('stream') or '{}')
+    except (TypeError, ValueError):
+        stream_health = {}
+    if not isinstance(stream_health, dict):
+        stream_health = {}
+    coverage = 100*(o['profitable']+o['losing']+o['flat']+o['marked'])/o['count'] if o['count'] else 0
+    lines.append(f"Полнота исходов отказов: {coverage:.1f}%. Пропуски — неизвестный результат, не убыток.")
+    if incomplete_reasons:
+        lines.append('Причины пропусков: '+ '; '.join(f'{k} — {v}' for k,v in incomplete_reasons.most_common(3))+'.')
+    if stream_health:
+        state = 'подключён' if stream_health.get('connected') else 'отключён'
+        lines.append(f"Поток {stream_health.get('version','v2')}: {state}; "
+                     f"переподключений с запуска {stream_health.get('reconnects',0)}; "
+                     f"ошибок обработки/БД {d['health'].get('errors','—')}.")
+        if stream_health.get('last_error_type'):
+            lines.append(f"Последний разрыв: {stream_health.get('last_error_phase')} / "
+                         f"{stream_health['last_error_type']}; код {stream_health.get('last_close_code') or '—'}.")
+    lines.extend(['Новые записи с установки; старые отказы не пересчитаны.',
         'Каждый сигнал отдельно, без лимита одной монеты в час. Покупка — первая ask не позднее 5с после решения; выход — bid. По 50 USDT, стоп и комиссия фиксируются на сигнале; защита +1%, откат 1 п.п., горизонт 60 мин. Открытые на горизонте не считаются закрытыми прибыльными.',
         'Это независимые виртуальные опыты, не доходность банка. Глубина и проскальзывание не моделируются. Повторная покупка после ожидания связана с исходным сигналом. Закрытые фактические сделки — по времени выхода.'])
     v2=[s for s in rejected if s.get('quote_version')==2]

@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from bot.rocket_quote_stream import RocketQuoteStream
 from bot.rocket_daily import DailyModel
@@ -73,3 +73,61 @@ class RocketQuoteTests(unittest.TestCase):
         self.book(102,float('nan'),102,12)
         quotes,_,gaps=self.stream.drain_quotes()
         self.assertEqual(quotes,[]);self.assertEqual(gaps,[(102,'X')])
+
+    def run_socket(self, recv, clock, attempts=1):
+        ws=Mock()
+        ws.recv.side_effect=recv
+        cm=Mock()
+        cm.__enter__=Mock(return_value=ws)
+        cm.__exit__=Mock(return_value=False)
+        self.stream._stop=Mock()
+        self.stream._stop.is_set.return_value=False
+        self.stream._stop.wait.side_effect=[False]*(attempts-1)+[True]
+        with patch('bot.rocket_quote_stream.connect',return_value=cm) as connect, \
+             patch('bot.rocket_quote_stream.time.monotonic',side_effect=lambda:clock[0]):
+            self.stream.run()
+        return ws,connect
+
+    def test_idle_watchdog_still_reconnects_without_client_pings(self):
+        clock=[0]
+        answers=iter([json.dumps({'id':1,'result':None}),None])
+        def recv(**kw):
+            answer=next(answers)
+            if answer is None:
+                clock[0]=31
+                raise TimeoutError()
+            return answer
+        _,connect=self.run_socket(recv,clock)
+        self.assertIsNone(connect.call_args.kwargs['ping_interval'])
+        self.assertEqual(connect.call_args.kwargs['max_queue'],256)
+        self.assertEqual(self.stream.health()['last_error_phase'],'idle')
+        self.assertEqual(len(self.stream.drain_quotes()[2]),1)
+
+    def test_missing_ack_reconnects_even_with_busy_market_data(self):
+        clock=[0]
+        def recv(**kw):
+            clock[0]=31
+            return json.dumps({'s':'X','b':'100','a':'101','u':1})
+        self.run_socket(recv,clock)
+        self.assertEqual(self.stream.health()['last_error_phase'],'subscription_ack')
+        self.assertEqual(self.stream.health()['book_quotes'],1)
+
+    def test_queued_ack_is_read_before_deadline_check(self):
+        clock=[0]
+        answers=iter([json.dumps({'id':1,'result':None}),None])
+        def recv(**kw):
+            clock[0]=31
+            answer=next(answers)
+            if answer is None: raise OSError('private URL must not be exported')
+            return answer
+        self.run_socket(recv,clock)
+        self.assertEqual(self.stream.health()['last_error_phase'],'receive')
+        self.assertNotIn('private',json.dumps(self.stream.health()))
+
+    def test_repeated_short_failures_back_off_and_keep_error_counts(self):
+        clock=[0]
+        def recv(**kw): raise ValueError('private response')
+        self.run_socket(recv,clock,attempts=2)
+        self.assertEqual([c.args[0] for c in self.stream._stop.wait.call_args_list],[1,2])
+        self.assertEqual(self.stream.health()['disconnect_reasons'],{'receive:ValueError':2})
+        self.assertFalse(self.stream.health()['connected'])
