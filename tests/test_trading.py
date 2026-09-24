@@ -45,34 +45,30 @@ class PaperTraderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
             try:
-                trader.connection.execute(
-                    "CREATE TABLE samples(timestamp REAL,symbol TEXT,price REAL)"
-                )
+                from bot.rocket_cards import schema
+                schema(trader.connection)
                 trader.open_on_signal(
                     "STOPUSDT", 100, "аномальный лидер", 20, 0,
                     bypass_min_score=True,
                 )
                 trader.update_positions({"STOPUSDT": 99.5}, 10)
                 trader.connection.executemany(
-                    "INSERT INTO samples(timestamp,symbol,price) VALUES(?,?,?)",
-                    ((20, "STOPUSDT", 99.0), (300, "STOPUSDT", 98.0),
-                     (1200, "STOPUSDT", 100.8), (3600, "STOPUSDT", 100.2)),
+                    "INSERT INTO rocket_bid_path(symbol,timestamp,bid) VALUES(?,?,?)",
+                    (("STOPUSDT", t, 98.0 if t<1200 else 100.8)
+                     for t in range(11,3611)),
                 )
                 trader.connection.commit()
                 report = trader.post_stop_report_text(3700, 0)
-                self.assertIn("Созрело 60-минутных наблюдений: 1", report)
-                self.assertIn("максимально на -1.51%", report)
+                self.assertIn("Полных путей: 1; неполных: 0", report)
+                self.assertIn("наиболее глубокий -1.51%", report)
                 self.assertIn("к цене входа: 1/1", report)
                 self.assertIn("достигли +0,7% от входа: 1/1", report)
-                self.assertIn("возможных ложных стопов: 1/1", report)
-                self.assertIn(
-                    "цель +0,7% раньше нового стопа — 0/1", report
-                )
-                self.assertIn("стоп −1% раньше цели — 1/1", report)
+                self.assertIn("Не вернулись к входу за полное окно: 0/1", report)
+                self.assertNotIn("ложных стопов", report)
             finally:
                 trader.close()
 
-    def test_post_stop_report_detects_target_before_wider_stop(self) -> None:
+    def test_post_stop_report_does_not_infer_outcome_from_sparse_trade_prices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             trader = make_trader(str(Path(directory) / "trades.db"))
             try:
@@ -91,10 +87,9 @@ class PaperTraderTests(unittest.TestCase):
                 )
                 trader.connection.commit()
                 report = trader.post_stop_report_text(3700, 0)
-                self.assertIn(
-                    "цель +0,7% раньше нового стопа — 1/1", report
-                )
-                self.assertIn("стоп −1% раньше цели — 0/1", report)
+                self.assertIn("Полных путей: 0", report)
+                self.assertIn("нет проверяемых bid-данных: 1", report)
+                self.assertNotIn("стоп −1% раньше цели", report)
             finally:
                 trader.close()
 

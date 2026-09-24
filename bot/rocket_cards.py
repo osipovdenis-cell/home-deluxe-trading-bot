@@ -10,7 +10,7 @@ from dataclasses import asdict, replace
 
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
-from bot.streams import PositionBookTickerStream
+from bot.rocket_quote_stream import RocketQuoteStream
 from bot.rocket_entry_variants import evaluate as evaluate_variants, report_text as variants_report
 
 from bot.rocket_recovery_shadow import RecoveryShadow, report_text as recovery_report
@@ -241,6 +241,15 @@ def cards(db, now, limit=20):
     return result
 
 
+class RecordedBidStream(RocketQuoteStream):
+    """Diagnostic bids with real depth heartbeats and in-place subscriptions."""
+    max_symbols = 128
+
+    def drain_recording_batch(self):
+        quotes, overflow, gaps = self.drain_quotes()
+        return [(at, symbol, bid) for at, symbol, bid, _ask in quotes], overflow, gaps
+
+
 class RetainedBidBatch:
     """A drained batch is acknowledged only after SQLite commits it."""
     LIMIT = 100000
@@ -250,8 +259,12 @@ class RetainedBidBatch:
         self.gaps = []
         self.last = {}
 
-    def append(self, events, overflow, previous, now):
+    def append(self, events, overflow, previous, now, interruptions=()):
         self.events.extend(events)
+        if interruptions:
+            # The existing gap table is global. Conservatively exclude every
+            # overlapping card; never bridge a known interruption with a price.
+            self.gaps.append((min(at for at, _symbol in interruptions), now))
         if overflow or len(self.events) > self.LIMIT:
             starts = [previous] + [e[0] for e in self.events]
             self.gaps.append((min(starts), now))
@@ -279,7 +292,7 @@ class RocketPathWorker:
     def __init__(self, database, stream=None, recovery_probe=None, recovery_stop=.5):
         self.database=database
         self.recovery_probe,self.recovery_stop=recovery_probe,recovery_stop
-        self.stream=stream or PositionBookTickerStream(max_symbols=128)
+        self.stream=stream or RecordedBidStream()
         self._stop=threading.Event()
         self._queue=SimpleQueue()
         self._thread=None
@@ -326,8 +339,12 @@ class RocketPathWorker:
                         rows=db.execute("SELECT symbol FROM paper_positions WHERE signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=?) ORDER BY id DESC",(now-3605,)).fetchall()
                         self.stream.set_symbols(tuple(dict.fromkeys(r[0] for r in rows))[:128])
                         last_refresh=now
-                    events,overflow=self.stream.drain_batch()
-                    batch.append(events, overflow, previous_drain, now)
+                    if isinstance(self.stream, RecordedBidStream):
+                        events,overflow,interruptions=self.stream.drain_recording_batch()
+                    else:
+                        events,overflow=self.stream.drain_batch()
+                        interruptions=()
+                    batch.append(events, overflow, previous_drain, now, interruptions)
                     overflow_batches += int(overflow)
                     batch.write(db)
                     previous_drain=now
