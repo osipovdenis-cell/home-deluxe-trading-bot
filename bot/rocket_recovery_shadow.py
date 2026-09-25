@@ -1,6 +1,7 @@
 """Prospective delayed-entry experiment; diagnostics only, no trading methods."""
 import json
 import math
+from bot.recording_gaps import read_gaps
 
 VERSION = 'recovery-two-windows-v1'
 WAIT, HORIZON, MAX_GAP = 90, 3600, 5
@@ -103,9 +104,7 @@ class RecoveryShadow:
             s=json.loads(payload)
             b,end=s['B'],s['start']+HORIZON
             gaps=[]
-            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='rocket_path_gaps'").fetchone():
-                gaps=self.db.execute('SELECT started,ended FROM rocket_path_gaps WHERE ended>=? AND started<=?',
-                                     (s['start'],min(now,end))).fetchall()
+            gaps=read_gaps(self.db, s['symbol'], s['start'], min(now,end))
             if gaps:
                 if b['status']=='WAIT':
                     s['missing']=True

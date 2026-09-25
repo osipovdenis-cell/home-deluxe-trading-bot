@@ -9,6 +9,7 @@ import math
 import threading
 import time
 from collections import deque
+from urllib.parse import quote
 
 from websockets.sync.client import connect
 from bot.streams import BINANCE_STREAM_BASE_URL
@@ -30,7 +31,8 @@ class RocketQuoteStream:
         self._overflow = False
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v3', started_at=time.time(),
+                           version='rocket-quotes-v4', subscription_reconciliations=0,
+                           confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
                            last_disconnect_at=None, last_error_type=None,
                            last_error_phase=None, last_close_code=None,
                            disconnect_reasons={})
@@ -50,6 +52,10 @@ class RocketQuoteStream:
                 (s.lower() + '@bookTicker', s.lower() + '@depth5')]
 
     def sync_subscriptions(self, ws, subscribed, request_id, pending):
+        # Only one outstanding mutation. Membership may change while its ACK is
+        # in flight; reconcile the new desired set after that ACK, not optimistically.
+        if pending:
+            return subscribed, request_id
         with self._lock:
             wanted = set(self._symbols)
         for method, symbols in (('UNSUBSCRIBE', subscribed - wanted),
@@ -57,8 +63,51 @@ class RocketQuoteStream:
             if symbols:
                 request_id += 1
                 ws.send(json.dumps(dict(method=method, params=self.streams(symbols), id=request_id)))
-                pending[request_id] = time.monotonic()
-        return wanted, request_id
+                pending[request_id] = dict(sent=time.monotonic(), method=method, symbols=set(symbols))
+                break
+        return subscribed, request_id
+
+    def reconcile_timeout(self, ws, subscribed, request_id, pending, now):
+        expired = [p for p in pending.values() if now-p['sent'] > self.subscription_timeout]
+        if not expired:
+            return request_id
+        if any(p['method']=='LIST_SUBSCRIPTIONS' for p in pending.values()):
+            if any(p['method']=='LIST_SUBSCRIPTIONS' for p in expired):
+                raise TimeoutError('subscription reconciliation missing')
+            return request_id
+        # An ACK can be lost while quotes keep flowing. Verify server state once;
+        # do not tear down every healthy subscription just to repeat the request.
+        request_id += 1
+        ws.send(json.dumps(dict(method='LIST_SUBSCRIPTIONS', id=request_id)))
+        pending[request_id] = dict(sent=now, method='LIST_SUBSCRIPTIONS', symbols=set())
+        with self._lock:
+            self._stats['subscription_reconciliations'] += 1
+        return request_id
+
+    def subscription_reply(self, message, subscribed, pending):
+        request = pending.get(message.get('id'))
+        if request is None:
+            return subscribed  # Late reply after an authoritative reconciliation.
+        if request['method']=='LIST_SUBSCRIPTIONS':
+            streams = message.get('result')
+            if not isinstance(streams,list) or not all(isinstance(s,str) for s in streams):
+                raise ValueError('subscription reconciliation rejected')
+            actual = set(streams)
+            with self._lock:
+                wanted = set(self._symbols)
+            affected = subscribed | wanted | set().union(*(p['symbols'] for p in pending.values()))
+            confirmed = {s for s in affected if set(self.streams([s])) <= actual}
+            # A missing channel means an unknown interval even if another channel
+            # for that symbol was still delivering quotes.
+            self.interrupted(affected-confirmed)
+            pending.clear()
+            return confirmed
+        if message.get('result','error') is not None:
+            raise ValueError('subscription rejected')
+        pending.pop(message['id'])
+        if request['method']=='SUBSCRIBE':
+            return subscribed | request['symbols']
+        return subscribed - request['symbols']
 
     def ingest(self, payload, received_at=None):
         now = time.time() if received_at is None else received_at
@@ -142,14 +191,22 @@ class RocketQuoteStream:
     def run(self):
         delay = 1
         while not self._stop.is_set():
-            subscribed, pending, request_id = set(), {}, 0
+            with self._lock:
+                subscribed = set(self._symbols)
+            if not subscribed:
+                self._stop.wait(.2)
+                continue
+            pending, request_id = {}, 0
             phase = 'connect'
             connected_at = None
             try:
                 # Binance sends server PINGs; websockets answers them automatically.
                 # Avoid a second, short client heartbeat deadline during bursts.
                 # A separate idle watchdog still reconnects a stalled data stream.
-                with connect(BINANCE_STREAM_BASE_URL + '/stream', open_timeout=10,
+                # Establish initial subscriptions in the handshake. No initial ACK
+                # is required; subsequent membership changes stay on this socket.
+                url = BINANCE_STREAM_BASE_URL + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
+                with connect(url, open_timeout=10,
                              close_timeout=2, ping_interval=None, max_queue=256,
                              compression=None) as ws:
                     connected_at = last_received = time.monotonic()
@@ -158,7 +215,7 @@ class RocketQuoteStream:
                     last_sync = -math.inf
                     while not self._stop.is_set():
                         now = time.monotonic()
-                        # At most two control messages/sec, leaving room for pong.
+                        # At most one mutation/sec, leaving room for ping/pong.
                         if now - last_sync >= 1:
                             phase = 'subscribe'
                             subscribed, request_id = self.sync_subscriptions(ws, subscribed, request_id, pending)
@@ -168,9 +225,8 @@ class RocketQuoteStream:
                             message = json.loads(ws.recv(timeout=.2))
                         except TimeoutError:
                             now = time.monotonic()
-                            if any(now - sent > self.subscription_timeout for sent in pending.values()):
-                                phase = 'subscription_ack'
-                                raise TimeoutError('subscription acknowledgement missing')
+                            phase = 'subscription_ack'
+                            request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, now)
                             if subscribed and now - last_received > self.idle_timeout:
                                 phase = 'idle'
                                 raise TimeoutError('market stream idle')
@@ -178,22 +234,21 @@ class RocketQuoteStream:
                         last_received = time.monotonic()
                         if 'id' in message:
                             phase = 'subscription_ack'
-                            if message.get('result', 'error') is not None:
-                                raise ValueError('subscription rejected')
-                            pending.pop(message['id'], None)
+                            subscribed = self.subscription_reply(message, subscribed, pending)
                         else:
                             phase = 'ingest'
                             self.ingest(message)
-                        # Read the queued ACK before declaring its timeout. A busy
-                        # socket must not postpone a genuinely missing ACK forever.
-                        if any(last_received - sent > self.subscription_timeout for sent in pending.values()):
-                            phase = 'subscription_ack'
-                            raise TimeoutError('subscription acknowledgement missing')
+                        phase = 'subscription_ack'
+                        request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, last_received)
+                        with self._lock:
+                            self._stats.update(confirmed_symbols=len(subscribed),
+                                               pending_subscription_requests=len(pending))
             except Exception as error:
                 if not self._stop.is_set():
                     self.record_error(error, phase)
             finally:
-                self.interrupted(subscribed)
+                affected = subscribed | set().union(*(p['symbols'] for p in pending.values()))
+                self.interrupted(affected)
                 with self._lock:
                     self._stats['connected'] = False
             if connected_at is not None and time.monotonic() - connected_at >= 60:
