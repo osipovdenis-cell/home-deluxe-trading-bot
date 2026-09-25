@@ -42,21 +42,55 @@ class RocketQuoteTests(unittest.TestCase):
         quotes,_,_=self.stream.drain_quotes()
         self.assertEqual([r[2] for r in quotes],[100,98,105])
 
-    def test_membership_change_only_updates_subscriptions(self):
-        ws=Mock();pending={}
-        subscribed,ident=self.stream.sync_subscriptions(ws,set(),0,pending)
+    def test_membership_changes_wait_for_ack_and_preserve_newest_wanted_set(self):
+        ws=Mock(); pending={}
+        subscribed, ident=self.stream.sync_subscriptions(ws,set(),0,pending)
+        self.assertEqual(subscribed,set())  # Sending isn't acknowledgement.
         self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['x@bookTicker','x@depth5'])
-        self.book(100,100,100.1,10)
-        self.stream.set_symbols(['Y','X'])
-        subscribed,ident=self.stream.sync_subscriptions(ws,subscribed,ident,pending)
-        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['y@bookTicker','y@depth5'])
         self.stream.set_symbols(['X','Y'])
         self.stream.sync_subscriptions(ws,subscribed,ident,pending)
-        self.assertEqual(ws.send.call_count,2)
-        self.assertEqual(len(self.stream.drain_quotes()[0]),1)
+        self.assertEqual(ws.send.call_count,1)
+        subscribed=self.stream.subscription_reply({'id':ident,'result':None},subscribed,pending)
+        subscribed,ident=self.stream.sync_subscriptions(ws,subscribed,ident,pending)
+        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['y@bookTicker','y@depth5'])
+        subscribed=self.stream.subscription_reply({'id':ident,'result':None},subscribed,pending)
         self.stream.set_symbols(['X'])
-        self.stream.sync_subscriptions(ws,subscribed,ident,pending)
-        self.assertEqual(json.loads(ws.send.call_args.args[0])['method'],'UNSUBSCRIBE')
+        subscribed,ident=self.stream.sync_subscriptions(ws,subscribed,ident,pending)
+        self.assertEqual(subscribed,{'X','Y'})
+        subscribed=self.stream.subscription_reply({'id':ident,'result':None},subscribed,pending)
+        self.assertEqual(subscribed,{'X'})
+
+    def test_lost_ack_reconciles_without_disconnecting_continuous_quotes(self):
+        ws=Mock(); pending={1:dict(sent=0,method='SUBSCRIBE',symbols={'X'})}
+        ident=self.stream.reconcile_timeout(ws,set(),1,pending,31)
+        self.assertEqual(json.loads(ws.send.call_args.args[0]),{'method':'LIST_SUBSCRIPTIONS','id':2})
+        self.stream.reconcile_timeout(ws,set(),ident,pending,32)
+        self.assertEqual(ws.send.call_count,1)
+        confirmed=self.stream.subscription_reply({'id':2,'result':self.stream.streams(['X'])},set(),pending)
+        self.assertEqual(confirmed,{'X'}); self.assertFalse(pending)
+        self.assertEqual(self.stream.drain_quotes()[2],[])
+        self.assertEqual(self.stream.health()['subscription_reconciliations'],1)
+        self.assertEqual(self.stream.subscription_reply({'id':1,'result':None},confirmed,pending),confirmed)
+
+    def test_reconciliation_retries_missing_channels_and_marks_only_affected_symbol(self):
+        self.stream.set_symbols(['X','Y'])
+        pending={1:dict(sent=0,method='SUBSCRIBE',symbols={'Y'}),
+                 2:dict(sent=31,method='LIST_SUBSCRIPTIONS',symbols=set())}
+        confirmed=self.stream.subscription_reply({'id':2,'result':self.stream.streams(['X'])+['y@bookTicker']}, {'X'},pending)
+        self.assertEqual(confirmed,{'X'})
+        self.assertEqual([s for at,s in self.stream.drain_quotes()[2]],['Y'])
+        ws=Mock(); self.stream.sync_subscriptions(ws,confirmed,2,pending)
+        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],self.stream.streams(['Y']))
+
+    def test_reconciliation_timeout_and_server_errors_are_not_ignored(self):
+        pending={1:dict(sent=0,method='SUBSCRIBE',symbols={'X'}),
+                 2:dict(sent=31,method='LIST_SUBSCRIPTIONS',symbols=set())}
+        with self.assertRaises(TimeoutError):
+            self.stream.reconcile_timeout(Mock(),set(),2,pending,62)
+        with self.assertRaises(ValueError):
+            self.stream.subscription_reply({'id':1,'code':2},set(),pending)
+        with self.assertRaises(ValueError):
+            self.stream.subscription_reply({'id':2,'result':None},set(),pending)
 
     def test_reconnect_gap_is_explicit_and_update_ids_reset(self):
         self.book(100,100,100.1,10)
@@ -103,26 +137,34 @@ class RocketQuoteTests(unittest.TestCase):
         self.assertEqual(self.stream.health()['last_error_phase'],'idle')
         self.assertEqual(len(self.stream.drain_quotes()[2]),1)
 
-    def test_missing_ack_reconnects_even_with_busy_market_data(self):
+    def test_initial_subscription_is_in_url_without_pending_ack(self):
         clock=[0]
         def recv(**kw):
-            clock[0]=31
-            return json.dumps({'s':'X','b':'100','a':'101','u':1})
-        self.run_socket(recv,clock)
-        self.assertEqual(self.stream.health()['last_error_phase'],'subscription_ack')
-        self.assertEqual(self.stream.health()['book_quotes'],1)
-
-    def test_queued_ack_is_read_before_deadline_check(self):
-        clock=[0]
-        answers=iter([json.dumps({'id':1,'result':None}),None])
-        def recv(**kw):
-            clock[0]=31
-            answer=next(answers)
-            if answer is None: raise OSError('private URL must not be exported')
-            return answer
-        self.run_socket(recv,clock)
+            raise OSError('private URL must not be exported')
+        ws,connect=self.run_socket(recv,clock)
+        self.assertTrue(connect.call_args.args[0].endswith('/stream?streams=x@bookTicker/x@depth5'))
+        ws.send.assert_not_called()
         self.assertEqual(self.stream.health()['last_error_phase'],'receive')
         self.assertNotIn('private',json.dumps(self.stream.health()))
+
+    def test_running_socket_recovers_lost_dynamic_ack(self):
+        clock=[0]; step=[0]
+        def recv(**kw):
+            step[0]+=1
+            if step[0]==1:
+                self.stream.set_symbols(['X','Y']);clock[0]=1
+                return json.dumps({'s':'X','b':'100','a':'101','u':1})
+            if step[0]==2:
+                clock[0]=32
+                return json.dumps({'s':'X','b':'100','a':'101','u':2})
+            if step[0]==3:
+                return json.dumps({'id':2,'result':self.stream.streams(['X','Y'])})
+            self.stream._stop.is_set.return_value=True
+            return json.dumps({'s':'Y','b':'100','a':'101','u':1})
+        ws,_=self.run_socket(recv,clock)
+        self.assertEqual([json.loads(c.args[0])['method'] for c in ws.send.call_args_list],['SUBSCRIBE','LIST_SUBSCRIPTIONS'])
+        self.assertEqual(self.stream.health()['reconnects'],0)
+        self.assertEqual(self.stream.health()['confirmed_symbols'],2)
 
     def test_repeated_short_failures_back_off_and_keep_error_counts(self):
         clock=[0]

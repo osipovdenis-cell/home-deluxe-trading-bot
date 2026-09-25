@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.rocket_quote_stream import RocketQuoteStream
+from bot.recording_gaps import read_gaps
 from bot.rocket_entry_variants import evaluate as evaluate_variants, report_text as variants_report
 
 from bot.rocket_recovery_shadow import RecoveryShadow, report_text as recovery_report
@@ -33,6 +34,8 @@ def schema(db):
             PRIMARY KEY(position_id,minutes));
         CREATE TABLE IF NOT EXISTS rocket_path_meta (key TEXT PRIMARY KEY,value REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS rocket_path_gaps (started REAL NOT NULL, ended REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS rocket_symbol_gaps (symbol TEXT NOT NULL, started REAL NOT NULL, ended REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS rocket_symbol_gaps_lookup ON rocket_symbol_gaps(symbol,ended);
     ''')
 
 
@@ -156,7 +159,7 @@ def build_card(db, row, now):
             cost=((price/entry-1)-pnl/(entry*quantity))*100
     if cost is not None and (not math.isfinite(cost) or cost < -1e-6): cost=None
     card['cost_percent']=cost
-    gaps=list(db.execute('SELECT started,ended FROM rocket_path_gaps WHERE ended>=? AND started<=?',(opened,closed+3600))) if exists(db,'rocket_path_gaps') else []
+    gaps=read_gaps(db, row['symbol'], opened, closed+3600)
     card['recording_gaps']=[list(g) for g in gaps]
     card['minute_path']=[]
     for minute in range(1,min(60,max(0,int((now-closed)//60)))+1):
@@ -257,14 +260,13 @@ class RetainedBidBatch:
     def __init__(self):
         self.events = []
         self.gaps = []
+        self.symbol_gaps = []
         self.last = {}
 
     def append(self, events, overflow, previous, now, interruptions=()):
         self.events.extend(events)
         if interruptions:
-            # The existing gap table is global. Conservatively exclude every
-            # overlapping card; never bridge a known interruption with a price.
-            self.gaps.append((min(at for at, _symbol in interruptions), now))
+            self.symbol_gaps.extend((symbol, at, max(at, now)) for at, symbol in interruptions)
         if overflow or len(self.events) > self.LIMIT:
             starts = [previous] + [e[0] for e in self.events]
             self.gaps.append((min(starts), now))
@@ -281,10 +283,12 @@ class RetainedBidBatch:
                 last[symbol] = (at, bid)
         db.executemany('INSERT OR IGNORE INTO rocket_bid_path VALUES(?,?,?)', values)
         db.executemany('INSERT INTO rocket_path_gaps VALUES(?,?)', self.gaps)
+        db.executemany('INSERT INTO rocket_symbol_gaps VALUES(?,?,?)', self.symbol_gaps)
         db.commit()
         self.last = last
         self.events.clear()
         self.gaps.clear()
+        self.symbol_gaps.clear()
 
 
 class RocketPathWorker:
@@ -298,6 +302,11 @@ class RocketPathWorker:
         self._thread=None
         self.notifications=SimpleQueue()
         self._acks=SimpleQueue()
+        self._watch=()
+
+    def watch_symbols(self, symbols):
+        # Prewarm before entry. Actual open/recent positions retain first priority.
+        self._watch=tuple(dict.fromkeys(symbols))[:128]
 
     def acknowledge(self, position_id, minutes):
         self._acks.put((position_id,minutes))
@@ -337,7 +346,7 @@ class RocketPathWorker:
                     now=time.time()
                     if now-last_refresh>=1:
                         rows=db.execute("SELECT symbol FROM paper_positions WHERE signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=?) ORDER BY id DESC",(now-3605,)).fetchall()
-                        self.stream.set_symbols(tuple(dict.fromkeys(r[0] for r in rows))[:128])
+                        self.stream.set_symbols(tuple(dict.fromkeys((*[r[0] for r in rows], *self._watch)))[:128])
                         last_refresh=now
                     if isinstance(self.stream, RecordedBidStream):
                         events,overflow,interruptions=self.stream.drain_recording_batch()

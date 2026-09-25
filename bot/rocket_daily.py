@@ -282,6 +282,7 @@ def report_text(main, now):
         state = 'подключён' if stream_health.get('connected') else 'отключён'
         lines.append(f"Поток {stream_health.get('version','v2')}: {state}; "
                      f"переподключений с запуска {stream_health.get('reconnects',0)}; "
+                     f"сверок подписок {stream_health.get('subscription_reconciliations',0)}; "
                      f"ошибок обработки/БД {d['health'].get('errors','—')}.")
         if stream_health.get('last_error_type'):
             lines.append(f"Последний разрыв: {stream_health.get('last_error_phase')} / "

@@ -159,3 +159,28 @@ class RocketCardsTests(unittest.TestCase):
         batch.write(self.db)
         self.assertEqual(build_card(self.db,self.row,311)['windows']['5']['status'],'incomplete')
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM paper_fills WHERE side="SELL"').fetchone()[0],1)
+
+    def test_other_symbol_interruption_does_not_invalidate_complete_trade_path(self):
+        self.path()
+        batch=RetainedBidBatch()
+        batch.append([],False,20,21,[(20,'OTHER')]);batch.write(self.db)
+        card=build_card(self.db,self.row,3610)
+        self.assertEqual(card['windows']['20']['status'],'complete')
+        self.assertIn('20',card['comparisons'])
+        self.assertEqual(card['recording_gaps'],[])
+        batch.append([],False,22,23,[(22,'R')]);batch.write(self.db)
+        card=build_card(self.db,self.row,3610)
+        self.assertEqual(card['windows']['20']['status'],'incomplete')
+        self.assertNotIn('20',card['comparisons'])
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM rocket_path_gaps').fetchone()[0],0)
+
+    def test_retry_keeps_symbol_gaps_until_commit(self):
+        batch=RetainedBidBatch()
+        batch.append([(20,'R',100)],False,19,21,[(20,'R')])
+        failing=Mock();failing.commit.side_effect=sqlite3.OperationalError('busy')
+        with self.assertRaises(sqlite3.OperationalError):batch.write(failing)
+        self.assertEqual(batch.symbol_gaps,[('R',20,21)])
+        self.assertEqual(len(batch.events),1)
+        batch.write(self.db)
+        self.assertEqual(batch.symbol_gaps,[])
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM rocket_symbol_gaps').fetchone()[0],1)

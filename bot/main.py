@@ -10,6 +10,7 @@ from bot.rocket_daily import DailyWorker, report_text as daily_report, volume_re
 from bot.rocket_volume_shadow import capture as capture_volume_shadow
 from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
+from bot.rocket_signal_worker import RocketSignalWorker
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.ai import AIAnalyst, AIError, AIUnavailable
 from bot.audit import AuditLog, detect_pumps
@@ -162,11 +163,11 @@ def timed_entry_call(diagnostics, stage, callback, *args, **kwargs):
 
 def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
-    settings, preloaded_context=None,
+    settings, preloaded_context=None, processing_started=None, initial_stages=None,
 ):
     opened = False
-    diagnostics = {'stages': {}}
-    processing_started = time.time()
+    diagnostics = {'stages': dict(initial_stages or {})}
+    processing_started = time.time() if processing_started is None else processing_started
     processing_clock = time.perf_counter()
     timing = market.__dict__.get('rocket_timing_worker') if "лидер" in signal.kind else None
     token = (signal.symbol, now)
@@ -197,7 +198,7 @@ def process_signal(
         if "лидер" in signal.kind and isinstance(audit, AuditLog):
             try:
                 audit.record_entry_latency(signal.symbol, now, processing_started, time.time(),
-                                           time.perf_counter()-processing_clock, diagnostics['stages'])
+                                           time.perf_counter()-processing_clock+sum((initial_stages or {}).values()), diagnostics['stages'])
             except sqlite3.Error as error:
                 print('Entry latency recording: ' + type(error).__name__, flush=True)
         if "лидер" not in signal.kind:
@@ -208,6 +209,25 @@ def process_signal(
             audit.scalp_shadow.decision(signal.symbol, time.time(),
                                         reason=rejection[0] if rejection else None)
             audit.connection.commit()
+
+
+def handle_ready_rocket(job, audit, trader, telegram, ai, chat_id, settings, flow):
+    started, clock = time.time(), time.perf_counter()
+    context = None
+    try:
+        context = job.market.fetch_signal_context(job.signal.symbol)
+        context = job.market.with_order_flow(context, flow.snapshot(job.signal.symbol, time.time()))
+    except (httpx.HTTPError, ValueError) as error:
+        audit.record_error('Ready rocket context: ' + type(error).__name__, job.at)
+    if job.confirmation is not None:
+        audit.record_confirmation_event(job.confirmation, context,
+            job.market.entry_dynamics(job.signal.symbol, job.at),
+            scalp_now=time.time(), scalp_cost=settings.estimated_round_trip_cost_percent)
+    if job.market._entry_cancelled():
+        return False
+    return process_signal(job.signal, job.prices, job.at, job.market, audit, trader,
+                          ai, telegram, chat_id, settings, context, processing_started=started,
+                          initial_stages={'контекст и запись подтверждения':time.perf_counter()-clock})
 
 
 def _process_signal(
@@ -598,6 +618,14 @@ def _process_signal(
             audit.record_entry_rejection(time.time(), signal.symbol, entry_reason,
                                          context.spread_bps if context else None, None)
             return False
+    if leader_paper_entry:
+        cancelled = market.__dict__.get('_entry_cancelled')
+        if cancelled is not None and cancelled():
+            return False
+        if time.time() - entry_at > 2:
+            audit.record_entry_rejection(time.time(), signal.symbol,
+                'свежая цена устарела за время финальной проверки', None, None)
+            return False
     notice = (
         trader.open_on_signal(signal.symbol, entry_price, trade_signal_kind,
                               analysis.score if analysis else 0, entry_at,
@@ -796,6 +824,7 @@ def main() -> None:
     entry_wait_worker = None
     timing_worker = None
     daily_worker = None
+    signal_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -842,6 +871,24 @@ def main() -> None:
                 settings.market_data_base_url)
             market.rocket_entry_waiter=entry_wait_worker
             entry_wait_worker.start()
+        def signal_resources():
+            worker_audit = AuditLog(settings.audit_db_path)
+            worker_trader = None
+            try:
+                worker_trader = make_paper_trader(settings) if trader is not None else None
+                if worker_trader is not None:
+                    worker_trader.exit_monitor_healthy = position_worker.healthy
+                client = httpx.Client(base_url=settings.market_data_base_url, timeout=15)
+                return worker_audit, worker_trader, client
+            except Exception:
+                worker_audit.close()
+                if worker_trader is not None:
+                    worker_trader.close()
+                raise
+        signal_worker = RocketSignalWorker(signal_resources,
+            lambda job, worker_audit, worker_trader, notices: handle_ready_rocket(
+                job, worker_audit, worker_trader, notices, ai, chat_id, settings, order_flow_stream))
+        signal_worker.start()
         scalp_stream = ScalpQuoteStream()
         audit.scalp_shadow.expire(time.time())
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
@@ -927,6 +974,11 @@ def main() -> None:
             now = time.time()
             try:
                 report_worker.set_prices(prices)
+                while not signal_worker.errors.empty():
+                    audit.record_error(signal_worker.errors.get(), now)
+                while not signal_worker.messages.empty():
+                    notice_chat, notice_text = signal_worker.messages.get()
+                    telegram.send(notice_chat, notice_text)
                 if entry_wait_worker is not None:
                     while not entry_wait_worker.errors.empty():
                         audit.record_error(entry_wait_worker.errors.get(),now)
@@ -981,6 +1033,25 @@ def main() -> None:
                     order_flow_stream.set_symbols((*entry_wait_worker.symbols(), *market.order_flow_symbols()) if entry_wait_worker else market.order_flow_symbols())
                     timing_worker.watch_symbols(market.order_flow_symbols())
                     daily_worker.watch_symbols(market.order_flow_symbols())
+                    confirmation_events = market.drain_confirmation_events()
+                    accepted_leaders = {e.symbol:e for e in confirmation_events
+                                        if e.accepted and 'лидер' in (e.signal_kind or '')}
+                    if rocket_path_worker is not None:
+                        rocket_path_worker.watch_symbols(market.order_flow_symbols())
+                    queued_leaders = set()
+                    # Submit ready leaders before any slow rejected-candidate REST
+                    # context, scalp analysis, Telegram report or learning rebuild.
+                    for signal in signals:
+                        if 'лидер' in signal.kind:
+                            queued = signal_worker.submit(signal, prices, now, market,
+                                                          accepted_leaders.get(signal.symbol))
+                            if queued:
+                                queued_leaders.add(signal.symbol)
+                            else:
+                                reason = 'очередь ракет занята или монета уже обрабатывается'
+                                audit.record_entry_rejection(now, signal.symbol, reason, None, None)
+                                daily_worker.capture(signal.symbol, now, time.time(), reason, False,
+                                    settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
                     confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
@@ -992,7 +1063,9 @@ def main() -> None:
                             f"Вход {rejected_symbol} отклонён: {reason}",
                             flush=True,
                         )
-                    for confirmation_event in market.drain_confirmation_events():
+                    for confirmation_event in confirmation_events:
+                        if confirmation_event.accepted and confirmation_event.symbol in queued_leaders:
+                            continue
                         if "лидер" in (confirmation_event.signal_kind or "") and not confirmation_event.accepted:
                             daily_worker.capture(confirmation_event.symbol, confirmation_event.started_at,
                                 time.time(), confirmation_event.reason, False,
@@ -1041,6 +1114,8 @@ def main() -> None:
                         now,
                     )
                     for signal in signals:
+                        if 'лидер' in signal.kind:
+                            continue
                         opened = process_signal(
                             signal, prices, now, market, audit, trader, ai,
                             telegram, chat_id, settings,
@@ -1120,6 +1195,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if signal_worker:
+            signal_worker.close()
         if daily_worker:
             daily_worker.close()
         if timing_worker:

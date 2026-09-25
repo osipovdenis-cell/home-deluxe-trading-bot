@@ -41,6 +41,7 @@ class DiagnosticFlowTests(unittest.TestCase):
     def test_live_subscription_changes_preserve_existing_history(self):
         self.warm();ws=Mock();pending={}
         current,rid=self.stream.sync_subscriptions(ws,set(),0,pending)
+        current=self.stream.subscription_reply({'id':rid,'result':None},current,pending)
         self.stream.set_symbols(['Y','X'])
         current,rid=self.stream.sync_subscriptions(ws,current,rid,pending)
         sent=json.loads(ws.send.call_args.args[0])
