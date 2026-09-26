@@ -261,7 +261,7 @@ class LeaderOrderFlowStream:
         if self._stop.is_set():
             return
         try:
-            transport.run()
+            transport.run_sharded()
         finally:
             self.interrupted(self._symbols)
 

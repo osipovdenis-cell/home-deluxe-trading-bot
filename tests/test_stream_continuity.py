@@ -132,3 +132,34 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(watch.select(['D'], ['A'], now=301), ('D','A','B'))
         self.assertEqual(watch.select([], ['A'], now=901), ('A',))
 
+
+
+class ExchangeClockTests(unittest.TestCase):
+    def test_backlogged_frames_do_not_become_fresh_on_arrival(self):
+        s = RocketQuoteStream(); s.set_symbols(['X', 'Y'])
+        self.assertTrue(s.timely_message({'data': {'E': 100000}}, 100.5))
+        self.assertFalse(s.timely_message({'data': {'E': 101000}}, 110))
+        self.assertFalse(s.timely_message({'data': {'s': 'X', 'b': '1'}}, 110.1))
+        self.assertFalse(s.timely_message({'data': {'E': 102000}}, 111))
+        self.assertEqual(set(s.drain_quotes()[2]), {(110, 'X'), (110, 'Y')})
+        self.assertTrue(s.timely_message({'data': {'E': 111000}}, 111.1))
+        self.assertEqual(s.health()['stale_data_messages'], 3)
+
+
+class PartitionTests(unittest.TestCase):
+    def test_symbol_changes_and_gaps_are_local_to_one_partition(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        owner = RocketQuoteStream(); owner.set_symbols(['BTCUSDT','ETHUSDT'])
+        shards = owner._shards = ShardedMarketStream(owner)
+        shards.set_symbols(owner._symbols)
+        btc = shards.parts[shards.index('BTCUSDT')]
+        eth = shards.parts[shards.index('ETHUSDT')]
+        self.assertIsNot(btc,eth)
+        eth._stats['connected'] = True; eth._confirmed = {'ETHUSDT'}
+        owner.set_symbols(['BTCUSDT','ETHUSDT','ARBUSDT'])
+        self.assertEqual(eth._symbols, {'ETHUSDT'})
+        self.assertTrue(owner.subscription_confirmed('ETHUSDT'))
+        btc.interrupted(['BTCUSDT'], 100)
+        self.assertEqual(owner.drain_quotes()[2], [(100,'BTCUSDT')])
+        self.assertTrue(owner.subscription_confirmed('ETHUSDT'))
+        self.assertEqual(owner.health()['subscription_replies'],0)

@@ -19,5 +19,7 @@ jobs:
           .venv-check/bin/python -m pip install -r requirements.txt
       - name: Unit tests
         run: .venv-check/bin/python -m unittest discover -s tests -q
+      - name: Diagnose individual channel load
+        run: .venv-check/bin/python ops/probe-channel-load.py
       - name: Check continuous public data and dynamic subscriptions
         run: .venv-check/bin/python ops/check-stream-continuity.py

@@ -94,19 +94,22 @@ class RocketQuoteStream:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        self._shards = None
         self._symbols = set()
         self._updates = {}
         self._confirmed = set()
         self._last_data_received = None
         self._endpoint_index = 0
+        self._event_late = False
         self._quotes = deque(maxlen=100000)
         self._gaps = deque(maxlen=10000)
         self._overflow = False
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v7-async', subscription_reconciliations=0,
+                           version='rocket-quotes-v8-partitioned', subscription_reconciliations=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
+                           stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
                            last_disconnect_at=None, last_error_type=None,
@@ -122,6 +125,8 @@ class RocketQuoteStream:
             for symbol in self._symbols - wanted:
                 self._updates.pop(symbol, None)
             self._symbols = wanted
+            if self._shards is not None:
+                self._shards.set_symbols(wanted)
 
     @staticmethod
     def streams(symbols):
@@ -211,6 +216,8 @@ class RocketQuoteStream:
         return subscribed - request['symbols']
 
     def subscription_confirmed(self, symbol):
+        if self._shards is not None:
+            return self._shards.confirmed(symbol)
         with self._lock:
             return self._stats['connected'] and symbol in self._confirmed
 
@@ -224,6 +231,26 @@ class RocketQuoteStream:
                 self._stats['wrapped_replies'] += 1
             return inner
         return None
+
+    def timely_message(self, message, received_at):
+        data = message.get('data', message)
+        event_at = data.get('E')
+        if isinstance(event_at, (int, float)):
+            lag = received_at-event_at/1000
+            late = not math.isfinite(lag) or lag > 2 or lag < -2
+            with self._lock:
+                if math.isfinite(lag):
+                    self._stats['max_event_lag_seconds'] = max(
+                        self._stats['max_event_lag_seconds'], lag)
+                symbols = set(self._symbols)
+            if late and not self._event_late:
+                self.queue_interruption(symbols, received_at)
+            self._event_late = late
+        if self._event_late:
+            with self._lock:
+                self._stats['stale_data_messages'] += 1
+            return False
+        return True
 
     def ingest(self, payload, received_at=None):
         now = time.time() if received_at is None else received_at
@@ -282,9 +309,11 @@ class RocketQuoteStream:
     def health(self):
         # Lock order is queue -> stream; never hold stream while taking the queue.
         ingest = self._ingest_worker.health() if self._ingest_worker else {}
+        if self._shards is not None:
+            ingest.update(self._shards.health())
         with self._lock:
-            return dict(self._stats, disconnect_reasons=dict(self._stats['disconnect_reasons']),
-                        subscribed_symbols=len(self._symbols), **ingest)
+            return {**self._stats, 'disconnect_reasons': dict(self._stats['disconnect_reasons']),
+                    'subscribed_symbols': len(self._symbols), **ingest}
 
     def queue_interruption(self, symbols, at=None):
         at = time.time() if at is None else at
@@ -312,8 +341,15 @@ class RocketQuoteStream:
                                last_sent_close_code=sent_code if isinstance(sent_code, int) else None)
 
     def start(self):
-        self._thread = threading.Thread(target=self.run, name='rocket-daily-quotes', daemon=True)
+        self._thread = threading.Thread(target=self.run_sharded, name='rocket-daily-quotes', daemon=True)
         self._thread.start()
+
+    def run_sharded(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        with self._lock:
+            self._shards = ShardedMarketStream(self)
+            self._shards.set_symbols(self._symbols)
+        self._shards.run()
 
     def run(self):
         worker = self._ingest_worker = QuoteIngestQueue(self)
@@ -349,6 +385,7 @@ class RocketQuoteStream:
                              compression=None) as ws:
                     connected_at = last_received = time.monotonic()
                     self._last_data_received = None
+                    self._event_late = False
                     with self._lock:
                         self._stats['connected'] = True
                         self._confirmed = set(subscribed)
@@ -381,7 +418,9 @@ class RocketQuoteStream:
                         else:
                             self._last_data_received = last_received
                             phase = 'ingest'
-                            self._ingest_worker.put('data', message, time.time())
+                            received_at = time.time()
+                            if self.timely_message(message, received_at):
+                                self._ingest_worker.put('data', message, received_at)
                         phase = 'subscription_ack'
                         request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, last_received)
                         with self._lock:
