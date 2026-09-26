@@ -1,4 +1,4 @@
-"""Six-minute public-data gate. No credentials, orders or production databases."""
+"""Eight-minute public-data gate. No credentials, orders or production databases."""
 import json
 import os
 import resource
@@ -23,6 +23,21 @@ def resources():
     return data
 
 
+def coverage(stream, symbol, now):
+    start, end = int(now)-300, int(now)
+    with stream._lock:
+        rows = sorted((list(r) for sec,r in stream.bars.get(symbol,{}).items()
+                       if start <= sec < end and r[1] is not None), key=lambda r:r[0])
+        first_trade = stream.first_trade.get(symbol)
+    gaps = [(a[8],b[7],b[7]-a[8]) for a,b in zip(rows,rows[1:]) if b[7]-a[8]>2]
+    snap = stream.snapshot(symbol,now)
+    return dict(state=snap['state'], reason=snap.get('reason'),
+                trade_history_age=None if first_trade is None else now-first_trade,
+                quote_seconds=len(rows), first_quote_offset=None if not rows else rows[0][7]-start,
+                last_quote_age=None if not rows else now-rows[-1][8],
+                gaps_over_2s=gaps, confirmed=stream.subscription_confirmed(symbol))
+
+
 def main():
     print(json.dumps(dict(resources_start=resources())), flush=True)
     base = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT']
@@ -37,7 +52,7 @@ def main():
     phase = 0
     next_log = 30
     try:
-        while time.monotonic()-start < 370:
+        while time.monotonic()-start < 480:
             elapsed = time.monotonic()-start
             if phase < len(changes) and elapsed >= changes[phase][0]:
                 for stream in (flow, structure):
@@ -53,11 +68,13 @@ def main():
                 raise RuntimeError('public stream queue overflow')
             if elapsed >= next_log:
                 print(json.dumps(dict(elapsed=round(elapsed), fresh=fresh,
-                                      known_structure=known, quotes=quotes)), flush=True)
+                                      known_structure=known, quotes=quotes,
+                                      coverage={s:coverage(structure,s,now) for s in base[:2]})), flush=True)
                 next_log += 30
             time.sleep(.5)
         result = dict(fresh=fresh, known_structure=known, quotes=quotes,
-                      flow=flow.health(), structure=structure.health())
+                      flow=flow.health(), structure=structure.health(),
+                      coverage={s:coverage(structure,s,time.time()) for s in base[:2]})
         result['resources_end'] = resources()
         print(json.dumps(result), flush=True)
         transports = [result['flow']['transport'], result['structure']]
