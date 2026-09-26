@@ -1,0 +1,22 @@
+name: Prewarm and shadow checks
+on:
+  push:
+    branches: [feat/prewarm-market-shadow-20260926]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install isolated test dependencies
+        run: |
+          python3 -m venv .venv-check
+          .venv-check/bin/python -m pip install -r requirements.txt
+      - name: Unit tests
+        run: .venv-check/bin/python -m unittest discover -s tests -q
+      - name: Warm public data before candidates
+        run: .venv-check/bin/python ops/check-prewarm.py

@@ -77,6 +77,8 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                 'SELECT * FROM rocket_entry_waits ORDER BY id DESC LIMIT 100')
         bundle['rocket_cards']=cards(trader.connection, now, 100)
         bundle['rocket_entry_variants'] = entry_variants_report(trader.connection)
+        from bot.rocket_market_regime import report_data as market_regime_report
+        bundle['rocket_market_regime'] = market_regime_report(trader.connection)
         bundle['rocket_recovery_comparison'] = recovery_report(trader.connection)
         # Explicit allow-list: no environment, raw logs, account keys or full DB dump.
         bundle['positions'] = query_rows(trader.connection, '''

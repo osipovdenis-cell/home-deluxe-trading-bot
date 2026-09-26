@@ -1,6 +1,9 @@
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 import json
+import math
+from bot.warm_symbols import WarmSymbols
+from bot.rocket_market_regime import snapshot as regime_snapshot
 import time
 
 import httpx
@@ -173,23 +176,37 @@ class MarketMonitor:
         self.market_stats: dict[str, tuple[float, float]] = {}
         self.change_12h_percent: dict[str, float] = {}
         self.last_12h_refresh = 0.0
+        self._flow_warm = WarmSymbols(20)
+        self._prewarm_ranked = ()
+        self._prewarm_at = -float("inf")
+        self._market_regime_snapshot = {}
         self.tick_sizes: dict[str, float] = {}
         self.eligible_count = 0
         self.last_symbol_refresh = 0.0
         self.client = httpx.Client(base_url=base_url, timeout=15.0)
 
-    def order_flow_symbols(self) -> tuple[str, ...]:
-        """Prioritize candidates being confirmed, then the freshest leaders."""
-        fresh_leaders = sorted(
-            self.leaders,
-            key=lambda symbol: self.leaders[symbol].last_qualified_at,
-            reverse=True,
-        )
-        return tuple(dict.fromkeys((
-            *self.pending_candidates.keys(),
-            *self.rescue_candidates.keys(),
-            *fresh_leaders,
-        )))
+    def order_flow_symbols(self, now=None) -> tuple[str, ...]:
+        """Active candidates first; prewarm at most ten likely leaders in spare slots."""
+        now = time.time() if now is None else now
+        leaders = sorted(self.leaders, key=lambda s:self.leaders[s].last_qualified_at, reverse=True)
+        required = tuple(dict.fromkeys((*self.pending_candidates,*self.rescue_candidates,*leaders)))
+        if now-self._prewarm_at >= 30:
+            eligible = [s for s,(volume,growth) in self.market_stats.items()
+                        if volume>=self.min_quote_volume_usdt and math.isfinite(growth)
+                        and self.change_12h_percent.get(s,0)>0]
+            daily = sorted(eligible,key=lambda s:(-self.market_stats[s][1],s))[:5]
+            rising=[]
+            for symbol in eligible:
+                points=self.anomaly_history.get(symbol,())
+                if len(points)<2 or not 0<=now-points[-1][0]<=3: continue
+                recent=[p for at,p in points if at>=now-600 and p>0]
+                if recent:
+                    growth=(recent[-1]/min(recent)-1)*100
+                    if growth>=self.threshold_percent*.5:rising.append((growth,symbol))
+            near=[s for _,s in sorted(rising,key=lambda r:(-r[0],r[1]))[:5]]
+            self._prewarm_ranked=tuple(dict.fromkeys((*daily,*near)))[:10]
+            self._prewarm_at=now
+        return self._flow_warm.select(required,self._prewarm_ranked,now=now)
 
     @staticmethod
     def with_order_flow(context: SignalMarketContext, snapshot) -> SignalMarketContext:
@@ -900,6 +917,8 @@ class MarketMonitor:
                 leader.reentry_ready = False
                 leader.peak_price = signal.price
                 leader.trough_price = signal.price
+        if now-self._market_regime_snapshot.get("at",-float("inf"))>=5:
+            self._market_regime_snapshot=regime_snapshot(self.anomaly_history,prices,now)
         return signals
 
     def close(self) -> None:
