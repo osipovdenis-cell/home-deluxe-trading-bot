@@ -1,0 +1,23 @@
+name: Stream continuity checks
+on:
+  push:
+    branches: [fix/stream-continuity-20260926]
+permissions:
+  contents: read
+jobs:
+  tests:
+    if: github.actor == 'osipovdenis-cell'
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install isolated test dependencies
+        run: |
+          python3 -m venv .venv-check
+          .venv-check/bin/python -m pip install -r requirements.txt
+      - name: Unit tests
+        run: .venv-check/bin/python -m unittest discover -s tests -q
+      - name: Check continuous public data and dynamic subscriptions
+        run: .venv-check/bin/python ops/check-stream-continuity.py

@@ -16,7 +16,7 @@ class DiagnosticFlowTests(unittest.TestCase):
 
     def trade(self,at,price=100,ident=None):
         self.stream.ingest(dict(e='aggTrade',s='X',p=str(price),q='2',m=False,
-                               a=int(at*100) if ident is None else ident),at)
+                               a=int(at) if ident is None else ident),at)
 
     def book(self,at,bid=100,update=None):
         self.stream.ingest(dict(s='X',b=str(bid),a=str(bid+.01),u=int(at*100) if update is None else update),at)

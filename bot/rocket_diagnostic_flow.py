@@ -55,6 +55,9 @@ class DiagnosticFlowStream(RocketQuoteStream):
                     ident=int(data['a'])
                     if ident<=self._trade_ids.get(symbol,-1):
                         return
+                    previous=self._trade_ids.get(symbol)
+                    if previous is not None and ident != previous+1:
+                        self.interrupted([symbol],now)
                     self._trade_ids[symbol]=ident
                 self.flow.ingest(data,now)
             else:
@@ -65,13 +68,10 @@ class DiagnosticFlowStream(RocketQuoteStream):
         symbols=tuple(symbols)
         with self._ingest_lock:
             super().interrupted(symbols,at)
-            with self.flow._lock:
-                for symbol in symbols:
-                    # Do not bridge an unknown trade interval with old anchors.
-                    for cache in (self.flow._trades,self.flow._quotes,
-                                  self.flow._depth,self.flow._depth_changes):
-                        cache.pop(symbol,None)
-                    self._last_gaps[symbol]=at
+            self.flow.interrupted(symbols,at)
+            for symbol in symbols:
+                self._trade_ids.pop(symbol,None)
+                self._last_gaps[symbol]=at
 
     def entry_probe(self, symbol, now):
         symbol=symbol.upper()
