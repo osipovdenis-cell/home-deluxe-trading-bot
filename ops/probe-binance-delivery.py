@@ -1,52 +1,52 @@
-"""Same-load direct/default/wrapper public transport comparison."""
-import asyncio
+"""Read-only coverage comparison; isolated public feeds, no production access."""
 import json
-import os
+import multiprocessing
 import sys
 import time
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from websockets.asyncio.client import connect
-from bot.async_market_socket import AsyncMarketSocket
+from bot.rocket_structure import StructureStream
+from bot.sharded_market_stream import ShardedMarketStream
 
-STREAMS='/'.join(s+'@'+c for s in ['btcusdt','ethusdt','bnbusdt'] for c in ['depth5@100ms','kline_1s'])
 
-def summarize(values):
-    values.sort()
-    return dict(n=len(values),median=values[len(values)//2],p95=values[int(len(values)*.95)],maximum=values[-1]) if values else {}
-
-def record(raw, lag, counts):
-    data=json.loads(raw)['data']
-    counts[0]+=1
-    if 'E' in data:
-        lag.append(time.time()-data['E']/1000)
-
-async def native(label,endpoint,options):
-    lag=[]; counts=[0]
+def probe(group_size):
+    ShardedMarketStream.symbols_per_group = group_size
+    stream = StructureStream()
+    symbols=['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','DOGEUSDT']
+    stream.set_symbols(symbols)
+    stream.start()
+    began=time.time()
+    last={}; pauses={s:[] for s in symbols}; counts={s:0 for s in symbols}
+    interruptions=[]
     try:
-        async with connect(endpoint+'/stream?streams='+STREAMS,compression=None,max_queue=256,ping_interval=None,open_timeout=10,close_timeout=2,**options) as ws:
-            deadline=time.monotonic()+65
-            while time.monotonic()<deadline:
-                try: record(await asyncio.wait_for(ws.recv(),1),lag,counts)
-                except TimeoutError: pass
-        print(json.dumps(dict(label=label,messages=counts[0],lag=summarize(lag))),flush=True)
-    except Exception as exc:
-        print(json.dumps(dict(label=label,error=type(exc).__name__)),flush=True)
+        while time.time()-began<100:
+            quotes,overflow,gaps=stream.drain_quotes()
+            if overflow: raise RuntimeError('quote overflow')
+            interruptions.extend(gaps)
+            for at,s,bid,ask in quotes:
+                if s in last and at-last[s]>2:
+                    pauses[s].append([round(last[s]-began,2),round(at-began,2),round(at-last[s],3)])
+                last[s]=max(last.get(s,at),at)
+                counts[s]+=1
+            time.sleep(.1)
+        now=time.time()
+        coverage={}
+        with stream._lock:
+            for s in symbols:
+                rows=sorted(stream.bars.get(s,{}).values(),key=lambda r:r[0])
+                coverage[s]=dict(first_trade_after_start=(stream.first_trade[s]-began if s in stream.first_trade else None),quote_seconds=len(rows),first_quote_after_start=(rows[0][7]-began if rows else None),last_quote_age=(now-rows[-1][8] if rows else None),pauses_over_2s=pauses[s],quotes=counts[s],trades=len(stream.trades.get(s,())))
+        health=stream.health()
+        for part,stats in zip(stream._shards.parts,health['partitions']):
+            stats['symbols']=sorted(part._symbols)
+            stats['family']=part._family
+        print(json.dumps(dict(group_size=group_size,coverage=coverage,interruptions=interruptions,health=health)),flush=True)
+    finally:
+        stream.close()
 
-def wrapper():
-    lag=[]; counts=[0]
-    try:
-        with AsyncMarketSocket('wss://stream.binance.com:443/stream?streams='+STREAMS,compression=None,max_queue=256,ping_interval=None,open_timeout=10,close_timeout=2) as ws:
-            deadline=time.monotonic()+65
-            while time.monotonic()<deadline:
-                try: record(ws.recv(timeout=.2),lag,counts)
-                except TimeoutError: pass
-        print(json.dumps(dict(label='wrapper-default',messages=counts[0],lag=summarize(lag))),flush=True)
-    except Exception as exc:
-        print(json.dumps(dict(label='wrapper-default',error=type(exc).__name__)),flush=True)
-
-async def main():
-    print(json.dumps(dict(proxy_env_present={k:bool(os.environ.get(k)) for k in ['HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','https_proxy','http_proxy','all_proxy']})),flush=True)
-    await asyncio.gather(native('native-direct','wss://stream.binance.com:443',dict(proxy=None)),native('native-default','wss://stream.binance.com:443',{}),native('vision-direct','wss://data-stream.binance.vision:443',dict(proxy=None)),asyncio.to_thread(wrapper))
-
-asyncio.run(main())
+if __name__=='__main__':
+    children=[multiprocessing.Process(target=probe,args=(n,)) for n in (3,1)]
+    for p in children:p.start()
+    for p in children:p.join(125)
+    for p in children:
+        if p.is_alive():p.terminate();raise RuntimeError('probe timeout')
+        if p.exitcode:raise RuntimeError('probe failed')

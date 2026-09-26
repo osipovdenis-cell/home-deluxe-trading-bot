@@ -171,10 +171,10 @@ class PartitionTests(unittest.TestCase):
         owner.set_symbols(['BTCUSDT'])
         shards = owner._shards = ShardedMarketStream(owner)
         shards.set_symbols(owner._symbols)
-        parts = shards.parts[shards.index('BTCUSDT'):shards.index('BTCUSDT')+3]
+        parts = shards.parts[shards.index('BTCUSDT'):shards.index('BTCUSDT')+4]
         channels = [p.streams(['BTCUSDT']) for p in parts]
-        self.assertEqual(sorted(c for group in channels for c in group if '@kline_' not in c), sorted(owner.streams(['BTCUSDT'])))
-        self.assertEqual(len(channels), 3)
+        self.assertEqual(sorted({c for group in channels for c in group if '@kline_' not in c}), sorted(owner.streams(['BTCUSDT'])))
+        self.assertEqual(len(channels), 4)
         self.assertFalse(any(any('@aggTrade' in c for c in group) and any('@bookTicker' in c for c in group) for group in channels))
         for part in parts:
             part._stats['connected'] = True
@@ -299,3 +299,53 @@ class CapacityTests(unittest.TestCase):
         self.assertLessEqual(len(budget.attempts),2)
         stop.is_set.return_value=True
         self.assertFalse(budget.acquire(stop))
+
+class RedundantQuoteTests(unittest.TestCase):
+    def build(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        owner = RocketQuoteStream(); owner.set_symbols(['BTCUSDT'])
+        shards = owner._shards = ShardedMarketStream(owner)
+        shards.set_symbols(owner._symbols)
+        a,b = shards.parts
+        now = __import__('time').time()
+        for part in (a,b):
+            part._stats['connected'] = True
+            part._confirmed = {'BTCUSDT'}
+            part._event_seen_at = now
+            part._good_quotes['BTCUSDT'] = now
+        return owner, shards, a,b,now
+
+    def test_one_delayed_or_disconnected_quote_feed_does_not_erase_healthy_peer(self):
+        owner, shards, a,b,now = self.build()
+        a._event_late = True
+        a.queue_delay(['BTCUSDT'],now)
+        a.queue_interruption(['BTCUSDT'],now)
+        a._stats['connected'] = False
+        self.assertEqual(owner.drain_quotes()[2],[])
+        self.assertTrue(owner.subscription_confirmed('BTCUSDT'))
+        self.assertTrue(owner.health()['connected'])
+        self.assertNotEqual(a._endpoint_index,b._endpoint_index)
+
+    def test_stale_peer_cannot_hide_a_real_interruption(self):
+        owner, shards, a,b,now = self.build()
+        b._good_quotes['BTCUSDT'] = now-3
+        a.queue_interruption(['BTCUSDT'],now)
+        self.assertEqual(owner.drain_quotes()[2],[(now,'BTCUSDT')])
+
+    def test_both_delayed_feeds_block_entry_and_mark_uncertainty(self):
+        owner, shards, a,b,now = self.build()
+        a._event_late = b._event_late = True
+        a.queue_delay(['BTCUSDT'],now)
+        self.assertFalse(owner.subscription_confirmed('BTCUSDT'))
+        self.assertEqual(owner.drain_quotes()[2],[(now,'BTCUSDT')])
+
+    def test_older_snapshot_from_backup_cannot_replace_newer_bid(self):
+        owner, shards, a,b,now = self.build()
+        def quote(update,bid):
+            return dict(stream='btcusdt@depth5@100ms',data=dict(lastUpdateId=update,bids=[[str(bid),'1']],asks=[[str(bid+1),'1']]))
+        a.ingest(quote(20,100),now)
+        b.ingest(quote(19,90),now+.1)
+        received,overflow,gaps=owner.drain_quotes()
+        self.assertEqual(len(received),1)
+        self.assertEqual(received[0][2],100)
+        self.assertFalse(overflow)
