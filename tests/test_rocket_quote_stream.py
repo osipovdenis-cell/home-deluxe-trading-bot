@@ -175,6 +175,7 @@ class RocketQuoteTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in self.stream._stop.wait.call_args_list],[1,2])
         self.assertEqual(self.stream.health()['disconnect_reasons'],{'receive:ValueError':2})
         self.assertFalse(self.stream.health()['connected'])
+        self.assertEqual(self.stream.health()['endpoint'], 'wss://data-stream.binance.vision:443')
 
     def test_slow_ingest_does_not_delay_dynamic_subscription_ack(self):
         entered, release = threading.Event(), threading.Event()

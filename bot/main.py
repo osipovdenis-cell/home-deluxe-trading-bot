@@ -71,7 +71,7 @@ def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None)
                                  round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
         from bot.rocket_entry_variants import EXECUTION_POLICY
         bundle['runtime']['rocket_entry_policy'] = EXECUTION_POLICY
-        bundle['runtime']['leader_flow'] = flow_health
+        bundle['runtime']['leader_flow'] = flow_health() if callable(flow_health) else flow_health
         try:
             import subprocess
             from pathlib import Path
@@ -917,7 +917,7 @@ def main() -> None:
             lambda snapshot_prices, snapshot_now: build_report_snapshot(
                 settings, snapshot_prices, snapshot_now,
                 position_worker.healthy() if position_worker else None,
-                order_flow_stream.health(),
+                order_flow_stream.health,
             )
         )
         report_worker.set_prices(prices)

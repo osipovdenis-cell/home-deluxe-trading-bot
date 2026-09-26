@@ -85,6 +85,9 @@ class QuoteIngestQueue:
 
 class RocketQuoteStream:
     max_symbols = 100
+    # Official public-market endpoints; independent routes for transient failures.
+    base_urls = ('wss://stream.binance.com:443',
+                 'wss://data-stream.binance.vision:443', 'wss://stream.binance.com:9443')
     idle_timeout = 30
     subscription_timeout = 30
 
@@ -96,6 +99,7 @@ class RocketQuoteStream:
         self._updates = {}
         self._confirmed = set()
         self._last_data_received = None
+        self._endpoint_index = 0
         self._quotes = deque(maxlen=100000)
         self._gaps = deque(maxlen=10000)
         self._overflow = False
@@ -107,7 +111,8 @@ class RocketQuoteStream:
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
                            last_disconnect_at=None, last_error_type=None,
-                           last_error_phase=None, last_close_code=None,
+                           last_error_phase=None, last_close_code=None, last_sent_close_code=None,
+                           endpoint=self.base_urls[0],
                            disconnect_reasons={})
 
     def set_symbols(self, symbols):
@@ -296,6 +301,7 @@ class RocketQuoteStream:
                         'OSError', 'ValueError', 'JSONDecodeError'):
             name = 'OtherError'
         code = getattr(getattr(error, 'rcvd', None), 'code', None)
+        sent_code = getattr(getattr(error, 'sent', None), 'code', None)
         with self._lock:
             reasons = self._stats['disconnect_reasons']
             key = phase + ':' + name
@@ -303,7 +309,8 @@ class RocketQuoteStream:
             self._stats.update(reconnects=self._stats['reconnects']+1,
                                last_disconnect_at=time.time(), last_error_type=name,
                                last_error_phase=phase,
-                               last_close_code=code if isinstance(code, int) else None)
+                               last_close_code=code if isinstance(code, int) else None,
+                               last_sent_close_code=sent_code if isinstance(sent_code, int) else None)
 
     def start(self):
         self._thread = threading.Thread(target=self.run, name='rocket-daily-quotes', daemon=True)
@@ -334,7 +341,10 @@ class RocketQuoteStream:
                 # A separate idle watchdog still reconnects a stalled data stream.
                 # Establish initial subscriptions in the handshake. No initial ACK
                 # is required; subsequent membership changes stay on this socket.
-                url = BINANCE_STREAM_BASE_URL + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
+                base_url = self.base_urls[self._endpoint_index]
+                with self._lock:
+                    self._stats['endpoint'] = base_url
+                url = base_url + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
                 with connect(url, open_timeout=10,
                              close_timeout=2, ping_interval=None, max_queue=256,
                              compression=None) as ws:
@@ -382,6 +392,7 @@ class RocketQuoteStream:
             except Exception as error:
                 if not self._stop.is_set():
                     self.record_error(error, phase)
+                    self._endpoint_index = (self._endpoint_index + 1) % len(self.base_urls)
             finally:
                 affected = subscribed | set().union(*(p['symbols'] for p in pending.values()))
                 self.queue_interruption(affected)
