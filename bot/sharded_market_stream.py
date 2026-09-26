@@ -18,7 +18,10 @@ class ShardedMarketStream:
             class Partition(RocketQuoteStream):
                 @staticmethod
                 def streams(symbols):
-                    return [s for s in owner.streams(symbols) if family(s) == kind]
+                    channels = [s for s in owner.streams(symbols) if family(s) == kind]
+                    if kind == 'quotes':
+                        channels += [s.lower()+'@kline_1s' for s in sorted(symbols)]
+                    return channels
                 def run(self):
                     # All channels share one receive-time FIFO and gap ordering.
                     self._ingest_worker = owner._ingest_worker
@@ -29,6 +32,7 @@ class ShardedMarketStream:
                     owner.interrupted(symbols, at)
             part = Partition()
             part.max_symbols = owner.max_symbols
+            part.require_clock = kind == 'quotes'
             return part
         for _ in range(self.count):
             self.parts.extend(make_part(kind) for kind in self.families)

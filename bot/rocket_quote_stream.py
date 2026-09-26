@@ -27,6 +27,7 @@ class QuoteIngestQueue:
         self.stopping = False
         self.overflows = self.errors = 0
         self.max_lag = 0.
+        self.gap_at = {}
         self.thread = threading.Thread(target=self.run, name='rocket-quote-ingest', daemon=True)
 
     def put(self, kind, payload, at):
@@ -63,9 +64,17 @@ class QuoteIngestQueue:
                 kind, payload, at = self.pending.popleft()
             try:
                 if kind == 'gap':
+                    for symbol in payload:
+                        self.gap_at[symbol] = max(at, self.gap_at.get(symbol, at))
                     self.stream.interrupted(payload, at)
                 else:
-                    self.stream.ingest(payload, at)
+                    item = payload if isinstance(payload, dict) else json.loads(payload)
+                    data = item.get('data', item)
+                    symbol = str(data.get('s') or item.get('stream', '').split('@')[0]).upper()
+                    # A different channel may enqueue an older frame after a gap.
+                    if at < self.gap_at.get(symbol, -math.inf):
+                        continue
+                    self.stream.ingest(item, at)
                 with self.ready:
                     self.max_lag = max(self.max_lag, time.time()-at)
             except Exception:
@@ -101,13 +110,15 @@ class RocketQuoteStream:
         self._last_data_received = None
         self._endpoint_index = 0
         self._event_late = False
+        self._event_seen_at = None
+        self.require_clock = False
         self._quotes = deque(maxlen=100000)
         self._gaps = deque(maxlen=10000)
         self._overflow = False
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v9-channel-partitions', subscription_reconciliations=0,
+                           version='rocket-quotes-v10-clock-checked', subscription_reconciliations=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
                            stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
@@ -235,18 +246,23 @@ class RocketQuoteStream:
     def timely_message(self, message, received_at):
         data = message.get('data', message)
         event_at = data.get('E')
+        late = self._event_late
         if isinstance(event_at, (int, float)):
+            self._event_seen_at = received_at
             lag = received_at-event_at/1000
             late = not math.isfinite(lag) or lag > 2 or lag < -2
             with self._lock:
                 if math.isfinite(lag):
                     self._stats['max_event_lag_seconds'] = max(
                         self._stats['max_event_lag_seconds'], lag)
+        elif self.require_clock and (self._event_seen_at is None or received_at-self._event_seen_at > 3):
+            late = True
+        if late and not self._event_late:
+            with self._lock:
                 symbols = set(self._symbols)
-            if late and not self._event_late:
-                self.queue_interruption(symbols, received_at)
-            self._event_late = late
-        if self._event_late:
+            self.queue_interruption(symbols, received_at)
+        self._event_late = late
+        if late:
             with self._lock:
                 self._stats['stale_data_messages'] += 1
             return False
@@ -256,6 +272,8 @@ class RocketQuoteStream:
         now = time.time() if received_at is None else received_at
         item = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
         data = item.get('data', item)
+        if data.get('e') == 'kline':
+            return  # Exchange clock witness only; never a substitute for bid/ask.
         depth = 'lastUpdateId' in data
         symbol = item.get('stream', '').split('@')[0].upper() if depth else data.get('s')
         if not symbol:
@@ -391,6 +409,7 @@ class RocketQuoteStream:
                     connected_at = last_received = time.monotonic()
                     self._last_data_received = None
                     self._event_late = False
+                    self._event_seen_at = None
                     with self._lock:
                         self._stats['connected'] = True
                         self._confirmed = set(subscribed)

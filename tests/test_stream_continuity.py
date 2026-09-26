@@ -173,7 +173,7 @@ class PartitionTests(unittest.TestCase):
         shards.set_symbols(owner._symbols)
         parts = shards.parts[shards.index('BTCUSDT'):shards.index('BTCUSDT')+3]
         channels = [p.streams(['BTCUSDT']) for p in parts]
-        self.assertEqual(sorted(c for group in channels for c in group), sorted(owner.streams(['BTCUSDT'])))
+        self.assertEqual(sorted(c for group in channels for c in group if '@kline_' not in c), sorted(owner.streams(['BTCUSDT'])))
         self.assertEqual(len(channels), 3)
         self.assertFalse(any(any('@aggTrade' in c for c in group) and any('@bookTicker' in c for c in group) for group in channels))
         for part in parts:
@@ -183,3 +183,31 @@ class PartitionTests(unittest.TestCase):
         parts[0]._confirmed.clear()
         self.assertFalse(owner.subscription_confirmed('BTCUSDT'))
         self.assertEqual(owner.health()['confirmed_symbols'], 0)
+
+
+class QuoteClockTests(unittest.TestCase):
+    def test_quote_channel_requires_a_recent_exchange_clock(self):
+        s = RocketQuoteStream(); s.set_symbols(['X']); s.require_clock = True
+        quote = {'data': {'s':'X','b':'100','a':'101','u':1}}
+        self.assertFalse(s.timely_message(quote,100))
+        clock = {'data': {'e':'kline','s':'X','E':100000,'k':{'i':'1s'}}}
+        self.assertTrue(s.timely_message(clock,100.1))
+        s.ingest(clock,100.1)
+        self.assertEqual(s.health()['invalid_messages'],0)
+        self.assertEqual(s.drain_quotes()[0],[])
+        self.assertTrue(s.timely_message(quote,101))
+        self.assertFalse(s.timely_message(quote,104))
+        self.assertFalse(s.timely_message(clock,105))
+        self.assertTrue(s.timely_message({'data':{'e':'kline','E':106000}},106.1))
+
+
+class SharedQueueGapTests(unittest.TestCase):
+    def test_older_frame_from_another_channel_cannot_cross_a_gap(self):
+        from bot.rocket_quote_stream import QuoteIngestQueue
+        s = RocketQuoteStream(); s.set_symbols(['X'])
+        queue = QuoteIngestQueue(s)
+        queue.put('gap', {'X'}, 100)
+        queue.put('data', {'s':'X','b':'99','a':'100','u':1}, 99)
+        queue.put('data', {'s':'X','b':'101','a':'102','u':2}, 101)
+        queue.thread.start(); queue.close()
+        self.assertEqual(s.drain_quotes()[0], [(101,'X',101.,102.)])
