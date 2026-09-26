@@ -107,7 +107,7 @@ class RocketQuoteStream:
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v8-partitioned', subscription_reconciliations=0,
+                           version='rocket-quotes-v9-channel-partitions', subscription_reconciliations=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
                            stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
@@ -349,7 +349,12 @@ class RocketQuoteStream:
         with self._lock:
             self._shards = ShardedMarketStream(self)
             self._shards.set_symbols(self._symbols)
-        self._shards.run()
+        worker = self._ingest_worker = QuoteIngestQueue(self)
+        worker.thread.start()
+        try:
+            self._shards.run()
+        finally:
+            worker.close()
 
     def run(self):
         worker = self._ingest_worker = QuoteIngestQueue(self)

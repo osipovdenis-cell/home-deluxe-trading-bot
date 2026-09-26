@@ -1,5 +1,7 @@
 """Six-minute public-data gate. No credentials, orders or production databases."""
 import json
+import os
+import resource
 import sys
 import time
 from pathlib import Path
@@ -9,7 +11,20 @@ from bot.streams import LeaderOrderFlowStream
 from bot.rocket_structure import StructureStream
 
 
+def resources():
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    data = dict(cpus=os.cpu_count(), load_average=os.getloadavg(),
+                cpu_seconds=usage.ru_utime+usage.ru_stime, max_rss_kb=usage.ru_maxrss)
+    for name in ('cpu.max', 'cpu.stat', 'cpu.pressure'):
+        try:
+            data[name] = Path('/sys/fs/cgroup', name).read_text().strip()
+        except OSError:
+            pass
+    return data
+
+
 def main():
+    print(json.dumps(dict(resources_start=resources())), flush=True)
     base = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT']
     flow, structure = LeaderOrderFlowStream(), StructureStream()
     for stream in (flow, structure):
@@ -43,6 +58,7 @@ def main():
             time.sleep(.5)
         result = dict(fresh=fresh, known_structure=known, quotes=quotes,
                       flow=flow.health(), structure=structure.health())
+        result['resources_end'] = resources()
         print(json.dumps(result), flush=True)
         transports = [result['flow']['transport'], result['structure']]
         if fresh < 20 or known < 2 or quotes < 100:

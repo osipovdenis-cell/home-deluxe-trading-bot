@@ -163,3 +163,23 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(owner.drain_quotes()[2], [(100,'BTCUSDT')])
         self.assertTrue(owner.subscription_confirmed('ETHUSDT'))
         self.assertEqual(owner.health()['subscription_replies'],0)
+
+
+    def test_price_trade_and_depth_channels_have_separate_sockets(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        owner = OrderFlowTransport(LeaderOrderFlowStream())
+        owner.set_symbols(['BTCUSDT'])
+        shards = owner._shards = ShardedMarketStream(owner)
+        shards.set_symbols(owner._symbols)
+        parts = shards.parts[shards.index('BTCUSDT'):shards.index('BTCUSDT')+3]
+        channels = [p.streams(['BTCUSDT']) for p in parts]
+        self.assertEqual(sorted(c for group in channels for c in group), sorted(owner.streams(['BTCUSDT'])))
+        self.assertEqual(len(channels), 3)
+        self.assertFalse(any(any('@aggTrade' in c for c in group) and any('@bookTicker' in c for c in group) for group in channels))
+        for part in parts:
+            part._stats['connected'] = True
+            part._confirmed = {'BTCUSDT'}
+        self.assertTrue(owner.subscription_confirmed('BTCUSDT'))
+        parts[0]._confirmed.clear()
+        self.assertFalse(owner.subscription_confirmed('BTCUSDT'))
+        self.assertEqual(owner.health()['confirmed_symbols'], 0)
