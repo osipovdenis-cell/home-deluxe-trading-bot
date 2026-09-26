@@ -71,6 +71,8 @@ def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None)
                                  round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
         from bot.rocket_entry_variants import EXECUTION_POLICY
         bundle['runtime']['rocket_entry_policy'] = EXECUTION_POLICY
+        from bot.market import SIGNAL_POLICY
+        bundle['runtime']['rocket_signal_policy'] = SIGNAL_POLICY
         bundle['runtime']['market_regime_shadow'] = 'rocket-market-regime-v1'
         bundle['runtime']['prewarm_policy'] = 'leaders-prewarm-v1-cap20'
         bundle['runtime']['leader_flow'] = flow_health() if callable(flow_health) else flow_health

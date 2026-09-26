@@ -9,6 +9,10 @@ import time
 import httpx
 
 
+# Version of signal classification; exported in reports to separate cohorts.
+SIGNAL_POLICY = 'leader-after-ordinary-v1'
+
+
 @dataclass(frozen=True)
 class PumpSignal:
     symbol: str
@@ -168,6 +172,9 @@ class MarketMonitor:
         self.anomaly_window_seconds = 600
         self.anomaly_history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.last_alert: dict[str, float] = {}
+        # Whether the last alert per symbol was a leader signal. An ordinary
+        # early/strong alert must not start the cooldown of a later leader.
+        self.last_alert_leader: dict[str, bool] = {}
         self.pending_candidates: dict[str, PendingCandidate] = {}
         self.rescue_candidates: dict[str, PendingCandidate] = {}
         self.leaders: dict[str, LeaderState] = {}
@@ -765,6 +772,8 @@ class MarketMonitor:
                 signal_window = self.anomaly_window_seconds
             rescue = self.rescue_candidates.get(symbol)
             if rescue is not None:
+                if leader is not None:
+                    rescue.signal_kind = leader.mode
                 prior_peak = rescue.peak_price
                 rescue.peak_price = max(rescue.peak_price, price)
                 rescue.samples.append((now, price))
@@ -781,6 +790,7 @@ class MarketMonitor:
                         change_5s, change_10s, rescue.signal_kind or "скальпинг",
                     ))
                     self.last_alert[symbol] = now
+                    self.last_alert_leader[symbol] = "лидер" in (rescue.signal_kind or "")
                     continue
                 recovered = (
                     change >= self.early_threshold_percent
@@ -833,10 +843,18 @@ class MarketMonitor:
             last_alert = self.last_alert.get(symbol)
             leader_reentry = bool(leader and leader.reentry_ready)
             pending = self.pending_candidates.get(symbol)
+            # A symbol that became a leader after an ordinary alert gets its
+            # first leader signal; afterwards the usual leader cooldown and
+            # pullback re-entry rules apply.
+            ordinary_cooldown_only = (
+                leader is not None
+                and not self.last_alert_leader.get(symbol, False)
+            )
             if (
                 last_alert is not None
                 and now - last_alert < self.cooldown_seconds
                 and not leader_reentry
+                and not ordinary_cooldown_only
                 and pending is None
             ):
                 continue
@@ -853,6 +871,9 @@ class MarketMonitor:
             pending.samples.append((now, price))
             if now - pending.started_at < self.entry_confirmation_seconds:
                 continue
+            if leader is not None:
+                # Classify at confirmation time, not when observation started.
+                pending.signal_kind = leader.mode
             progress = (price / pending.trigger_price - 1) * 100
             pullback = (price / pending.peak_price - 1) * 100
             change_5s = self._recent_candidate_change(pending, now, 5, price)
@@ -910,6 +931,7 @@ class MarketMonitor:
         signals = candidates[: self.max_signals_per_cycle]
         for signal in signals:
             self.last_alert[signal.symbol] = now
+            self.last_alert_leader[signal.symbol] = "лидер" in signal.kind
             leader = self.leaders.get(signal.symbol)
             if leader is not None:
                 leader.awaiting_pullback = True

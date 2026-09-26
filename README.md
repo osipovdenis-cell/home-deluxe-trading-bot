@@ -252,3 +252,8 @@ The final gate now requires positive last-5-second price change. A deferred full
 
 ### Fresh quality on every paper rocket admission
 Direct and short-wait entries require the existing leader_entry_quality verdict recomputed from fresh order flow to be explicitly true. The short-wait path checks this both before and after fetching the executable quote. A veto keeps the pending entry waiting within its original 90-second expiry; it does not repeat AI or 20-second confirmation. Unknown verdicts defer admission. Existing quality thresholds, stop distances and exits are unchanged; shadow cohort v5 separates this policy.
+
+### Leader after an ordinary signal (leader-after-ordinary-v1)
+A symbol may start confirmation before it qualifies as a leader. The signal kind is now taken at confirmation time, so a candidate that became a leader during the 20-second confirmation or the 90-second second chance is processed as a leader. An ordinary early/strong alert no longer starts the 30-minute cooldown for a later leader: the first leader signal is allowed, after which the usual leader cooldown and pullback re-entry rules apply. Confirmation, duplicate protection, entry filters, AI, stops and exits are unchanged. Reports export `runtime.rocket_signal_policy`; compare trades opened after the verified installation time separately from earlier trades. This report-level marker does not relabel historical trades.
+
+The live rocket stop is `ROCKET_STOP_LOSS_PERCENT` (default 1.0); `PAPER_STOP_LOSS_PERCENT` is not read.
