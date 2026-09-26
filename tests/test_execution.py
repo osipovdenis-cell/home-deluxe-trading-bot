@@ -194,7 +194,7 @@ class ExecutionTests(unittest.TestCase):
             try:
                 with patch('bot.main.analyze_momentum_with_retries',return_value=(analysis,None,1)), \
                         patch('bot.main.time.time',return_value=200), \
-                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':True,'reason':None,
+                        patch('bot.main.entry_probe',return_value={'fresh':True,'before_context':{'flow_buy_5s_usdt':100,'spread_bps':10},'after_flow':{'buy_5s_usdt':200,'sell_5s_usdt':100,'spread_bps':10},'changes':{'5':.1,'10':.2,'15':.1,'60':.1},'allowed':True,'reason':None,
                               'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}}}):
                     opened=process_signal(PumpSignal('R',100,3,300,'лидер'),{},100,
                         market,audit,trader,Mock(),Mock(),'owner',settings,
@@ -204,10 +204,14 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(row['entry_price'],100.05)
                 self.assertEqual((row['opened_at'],row['signal_timestamp']),(200,100))
                 self.assertEqual(audit.connection.execute('SELECT timestamp FROM signal_events').fetchone()[0],100)
-                # Other experimental shadow verdicts do not override approved fresh quality.
-                market.rocket_shadow_sink.assert_called_once_with(row['id'],{'fresh':True,'before_context':{'flow_buy_5s_usdt':100},'after_flow':{'buy_5s_usdt':200},'changes':{'5':.1,'10':.2},'allowed':True,'reason':None,
-                    'entry_variants':{'decisions':{'A':True,'B':False,'C':False,'D':False}},
-                    'entry_bid':99.95,'entry_quote_at':200})
+                # The final policy is recomputed from fresh numbers and linked to the fill.
+                from bot.rocket_entry_variants import EXECUTION_POLICY
+                market.rocket_shadow_sink.assert_called_once()
+                ident,probe=market.rocket_shadow_sink.call_args.args
+                self.assertEqual(ident,row['id'])
+                self.assertEqual(probe['entry_policy'],EXECUTION_POLICY)
+                self.assertTrue(probe['entry_variants']['decisions']['C'])
+                self.assertEqual((probe['entry_bid'],probe['entry_quote_at']),(99.95,200))
             finally:
                 trader.close()
                 audit.close()

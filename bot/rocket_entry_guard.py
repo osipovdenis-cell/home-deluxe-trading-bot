@@ -1,5 +1,6 @@
-"""Final paper-entry veto for fading buy activity, using an existing fresh probe."""
+"""Final paper-entry checks, including the prospectively compared C policy."""
 import math
+from bot.rocket_entry_variants import evaluate, EXECUTION_POLICY
 
 
 def finite(value):
@@ -33,4 +34,18 @@ def fading_buy_guard(probe):
     quality_ok, quality_reason = fresh_quality_guard(probe)
     if not quality_ok:
         return False, 'свежее рыночное качество: ' + quality_reason
+    # Same deterministic C conditions as the prospective comparison. Never trust
+    # cached decisions in a caller-provided probe; evaluate its current numbers.
+    variant = evaluate(probe)
+    probe['entry_variants'] = variant
+    probe['entry_policy'] = EXECUTION_POLICY
+    labels = {'price_5': 'цена за 5с не растёт',
+              'price_15': 'цена за 15с не растёт',
+              'price_60': 'цена за 60с не растёт',
+              'buys_5': 'покупки за 5с не превышают продажи',
+              'spread': 'спред расширился относительно анализа'}
+    for key, label in labels.items():
+        value = variant['checks'][key]
+        if value is not True:
+            return False, 'фильтр В: ' + (label if value is False else 'нет полных данных: ' + key)
     return True, None

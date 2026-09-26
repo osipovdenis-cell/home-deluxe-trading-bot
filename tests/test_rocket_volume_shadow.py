@@ -15,9 +15,9 @@ from bot.rocket_volume_shadow import capture, evaluate, report_data, report_text
 def snapshot(at=100):
     context = SignalMarketContext(1000,.7,100,65,spread_bps=10)
     probe = dict(at=at, fresh=True, allowed=True, reason=None,
-        trade_age=.1, quote_age=.2, changes={'5':.1,'10':.2,'20':.3,'60':.4},
+        trade_age=.1, quote_age=.2, changes={'5':.1,'10':.2,'15':.2,'20':.3,'60':.4},
         recovery_windows=dict(complete=True,windows=[dict(buy=50,sell=20)]),
-        before_context=dict(flow_buy_5s_usdt=50),
+        before_context=dict(flow_buy_5s_usdt=50,spread_bps=10),
         after_flow=dict(buy_5s_usdt=100,sell_5s_usdt=20,buy_60s_usdt=500,sell_60s_usdt=100,
             spread_bps=10,spread_change_bps=-1,cvd_60s_percent=20,trade_rate_acceleration=2,
             price_efficiency_per_10k=.3))

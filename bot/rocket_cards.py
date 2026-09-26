@@ -64,7 +64,7 @@ def entry_probe(market, signal, context, dynamics, started, probe_provider=None)
             probe['allowed'],probe['reason']=market.leader_entry_quality(fresh_context,fresh_dynamics)
             probe['after_flow']=asdict(snapshot)
     except Exception:
-        probe = dict(at=time.time(),allowed=None,reason='ошибка теневого снимка; сделка не изменена')
+        probe = dict(at=time.time(),allowed=None,reason='ошибка получения свежего снимка')
     probe['entry_variants'] = evaluate_variants(probe)
     probe['calculation_ms'] = (time.perf_counter() - calculation_started) * 1000
     return probe

@@ -143,6 +143,7 @@ class ReportingTests(unittest.TestCase):
         try:
             with patch.object(audit,'_probability_samples',return_value=[(1,{})]), \
                     patch('bot.audit.train_probability_model',return_value=model(.7)):
+                audit.refresh_probability_model(99)
                 key=audit.record_confirmation_event(ConfirmationEvent(100,120,'TEST',100,101,True,'ok',signal_kind='скальпинг'))
             meta=json.loads(audit.connection.execute('SELECT shadow_model_meta FROM confirmation_events WHERE id=?',(key,)).fetchone()[0])
             self.assertEqual(meta['predicted_at'],120)

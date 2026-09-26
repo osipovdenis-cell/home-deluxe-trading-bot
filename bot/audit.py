@@ -7,7 +7,7 @@ from statistics import median
 import time
 import json
 
-from bot.probability import FEATURE_NAMES, train_probability_model
+from bot.probability import FEATURE_NAMES, ProbabilityModel, train_probability_model
 from bot.rocket_comparison import RocketComparison
 from bot.rocket_spread_shadow import SpreadShadow
 from bot.scalp_shadow import ScalpShadow
@@ -839,6 +839,26 @@ class AuditLog:
         ]
 
     def _current_probability_model(self, now: float):
+        # Entry/report readers only consume a published model. Training is owned
+        # by the background worker and never holds up confirmation or purchase.
+        row = self.connection.execute(
+            'SELECT id,trained_at,parameters FROM probability_versions '
+            'WHERE kind=? AND trained_at<=? ORDER BY trained_at DESC,rowid DESC LIMIT 1',
+            ('mixed-legacy', now),
+        ).fetchone()
+        if row:
+            if row[0] != self._probability_model_id:
+                self._probability_cache = ProbabilityModel(**json.loads(row[2]))
+                self._probability_model_id = row[0]
+                self._probability_cache_at = row[1]
+            return self._probability_cache
+        # An in-memory model is usable only if it was known by this event time.
+        if self._probability_cache_at <= now:
+            return self._probability_cache
+        return None
+
+    def refresh_probability_model(self, now: float):
+        self._current_probability_model(now)
         if self._probability_cache is None or now - self._probability_cache_at >= 300:
             samples = self._probability_samples(now)
             self._probability_cache = train_probability_model(

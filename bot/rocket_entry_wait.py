@@ -140,7 +140,7 @@ class RocketEntryWaitWorker:
                 # No available slot/balance: keep observing until expiry.
                 continue
             # Remove before diagnostic/notification work so failures cannot repeat a buy.
-            self.finish(trader,job,'OPENED','восстановился рост за 5с; покупки выше продаж; свежее рыночное качество подтверждено',at)
+            self.finish(trader,job,'OPENED','восстановился рост; фильтр В и свежее рыночное качество подтверждены',at)
             row=trader.connection.execute('SELECT id FROM paper_positions WHERE symbol=? AND opened_at=? ORDER BY id DESC LIMIT 1',
                                          (symbol,at)).fetchone()
             sink=self.market.__dict__.get('rocket_shadow_sink')

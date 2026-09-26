@@ -5,6 +5,7 @@ from collections import defaultdict
 from statistics import median
 
 VERSION = 'rocket-entry-four-v5-fresh-quality'
+EXECUTION_POLICY = 'rocket-entry-C-live-v1'
 FIRST_REVIEW = 50
 
 
@@ -47,12 +48,15 @@ def report_data(db):
             p.realized_pnl_usdt,p.position_usdt FROM rocket_entry_probes e
             JOIN paper_positions p ON p.id=e.position_id WHERE p.signal_kind LIKE '%лидер%'
             ORDER BY p.closed_at,p.id''').fetchall()
-    versioned, paired, durations = [], [], []
+    versioned, paired, durations, live = [], [], [], []
     for payload, ident, symbol, status, closed, pnl, stake in rows:
         try:
             probe = json.loads(payload)
         except (ValueError, TypeError):
             continue
+        if probe.get('entry_policy') == EXECUTION_POLICY:
+            live.append((status, pnl, stake))
+            continue  # Do not mix selected live entries into the pre-activation A/B cohort.
         variant = probe.get('entry_variants') or {}
         if variant.get('version') != VERSION:
             continue
@@ -98,6 +102,9 @@ def report_data(db):
                 incomplete=sum(not complete for status,complete in versioned),
                 review_target=FIRST_REVIEW, review_ready=len(paired)>=FIRST_REVIEW,
                 variants=variants, calculation_samples=len(durations),
+                execution_policy=EXECUTION_POLICY, live_entries=len(live),
+                live_closed=sum(s=='CLOSED' for s,p,n in live),
+                live_pnl_usdt=sum(p for s,p,n in live if s=='CLOSED' and number(p)),
                 calculation_p50_ms=median(durations) if durations else None,
                 calculation_p95_ms=durations[max(0,math.ceil(.95*len(durations))-1)] if durations else None,
                 calculation_max_ms=max(durations) if durations else None)
@@ -105,7 +112,9 @@ def report_data(db):
 
 def report_text(db):
     data = report_data(db)
-    lines = ['⚖️ Четыре варианта входа ракет — только тень',
+    lines = ['⚖️ Проверка свежести входа ракет',
+             f"Фильтр В включён для виртуальных входов ({EXECUTION_POLICY}). Новых входов {data['live_entries']}; закрыто {data['live_closed']}; фактический PnL {data['live_pnl_usdt']:+.3f} USDT.",
+             'Ниже архив сравнения до включения фильтра; новые сделки в него не добавляются.',
              f"Версия {VERSION}; только новые фактические входы после включения версии.",
              f"Записано {data['recorded']}; общих закрытых {data['paired_closed']}; открытых {data['open']}; неполных {data['incomplete']}.",
              'А — текущие; Б — объём ≥×1; В — свежий импульс; Г — оба условия.',
@@ -121,6 +130,6 @@ def report_text(db):
         lines.append(f"Время перепроверки, n={data['calculation_samples']}: медиана {data['calculation_p50_ms']:.3f}, p95 {data['calculation_p95_ms']:.3f}, максимум {data['calculation_max_ms']:.3f} мс.")
     else:
         lines.append('Замер задержки появится с первым новым входом; дополнительных запросов AI/REST нет.')
-    lines.append(f"Предварительный разбор: {data['paired_closed']}/{FIRST_REVIEW} общих закрытых; " + ('выборка для первого разбора накоплена.' if data['review_ready'] else 'сбор продолжается.'))
+    lines.append(f"Архив: {data['paired_closed']} общих закрытых. Это предварительное сравнение, не доказательство прибыльности.")
     lines.append('Все варианты на одинаковых полных примерах: условно 50 USDT, фактические выходы и издержки; отказ = 0. Неизвестные условия исключены из всех четырёх. Просадка — по закрытым результатам, без открытых позиций. Занятость банка и замещающие сделки не моделируются. Старые примеры не переоцениваются. Автовключения торговли нет.')
     return '\n'.join(lines)

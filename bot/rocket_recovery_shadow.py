@@ -3,7 +3,7 @@ import json
 import math
 from bot.recording_gaps import read_gaps
 
-VERSION = 'recovery-two-windows-v1'
+VERSION = 'recovery-two-windows-v2-entry-C'
 WAIT, HORIZON, MAX_GAP = 90, 3600, 5
 
 

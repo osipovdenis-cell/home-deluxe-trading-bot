@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from bot.rocket_entry_guard import finite, fading_buy_guard
 from bot.rocket_cards import entry_probe
 
-VERSION = 'rocket-volume-continuation-v1'
+VERSION = 'rocket-volume-continuation-v2-entry-C'
 
 
 def number(value):
@@ -163,7 +163,7 @@ def report_data(items, now):
 
 
 def report_text(data):
-    lines=['🧪 Ракеты: объём ниже ×1 — только тень (v1)',
+    lines=['🧪 Ракеты: объём ниже ×1 — только тень (v2, с фильтром В)',
            'B: цена растёт за 5/20/60с; покупки > продаж за 5 и 60с. Сохраняются проверки свежести, рыночного качества, роста за 12ч, спреда и шага цены.']
     for key,label in [('daily','24 часа'),('seven_days','7 дней')]:
         d=data[key]; b=d['selected']; states=d['execution_states']; all_=d['all_low_volume']
