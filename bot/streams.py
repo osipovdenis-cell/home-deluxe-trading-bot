@@ -41,15 +41,19 @@ class LeaderOrderFlowStream:
         self._quotes = defaultdict(deque)
         self._depth_changes = defaultdict(deque)
         self._depth = defaultdict(lambda: {"bid": {}, "ask": {}})
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._changed = threading.Event()
         self._thread: threading.Thread | None = None
+        self._transport = None
+        self._trade_ids = {}
+        self._last_gaps = {}
+        self._gap_count = 0
 
     def set_symbols(self, symbols) -> None:
         normalized = tuple(dict.fromkeys(str(s).upper() for s in symbols))[:self.max_symbols]
         with self._lock:
-            if normalized == self._symbols:
+            if set(normalized) == set(self._symbols):
                 return
             removed = set(self._symbols) - set(normalized)
             self._symbols = normalized
@@ -58,7 +62,27 @@ class LeaderOrderFlowStream:
                 self._quotes.pop(symbol, None)
                 self._depth_changes.pop(symbol, None)
                 self._depth.pop(symbol, None)
+                self._trade_ids.pop(symbol, None)
+                self._last_gaps.pop(symbol, None)
+            if self._transport is not None:
+                self._transport.set_symbols(normalized)
         self._changed.set()
+
+    def interrupted(self, symbols, at=None):
+        at = time.time() if at is None else at
+        with self._lock:
+            for symbol in symbols:
+                for cache in (self._trades, self._quotes, self._depth_changes,
+                              self._depth, self._trade_ids):
+                    cache.pop(symbol, None)
+                self._last_gaps[symbol] = at
+                self._gap_count += 1
+
+    def health(self):
+        with self._lock:
+            transport, gaps = self._transport, self._gap_count
+        return dict(version='leader-flow-v2-continuous', gaps=gaps,
+                    transport=transport.health() if transport else None)
 
     def subscription_url(self) -> str | None:
         with self._lock:
@@ -88,11 +112,23 @@ class LeaderOrderFlowStream:
             if symbol not in self._symbols:
                 return
             event = item.get("e")
+            event_at = float(item.get('T', item.get('E', now*1000)))/1000
+            if not math.isfinite(event_at):
+                raise ValueError('invalid market event time')
             if event == "aggTrade":
+                ident = item.get('a')
+                if ident is not None:
+                    ident = int(ident)
+                    previous = self._trade_ids.get(symbol)
+                    if previous is not None and ident <= previous:
+                        return
+                    if previous is not None and ident != previous + 1:
+                        self.interrupted([symbol], now)
+                    self._trade_ids[symbol] = ident
                 price = float(item["p"])
                 notional = price * float(item["q"])
                 buyer_initiated = not bool(item.get("m"))
-                self._trades[symbol].append((now, price, notional, buyer_initiated))
+                self._trades[symbol].append((event_at, price, notional, buyer_initiated, now))
             elif event == "depthUpdate":
                 added = {"bid": 0.0, "ask": 0.0}
                 removed = {"bid": 0.0, "ask": 0.0}
@@ -113,7 +149,7 @@ class LeaderOrderFlowStream:
                         else:
                             levels.pop(price, None)
                 self._depth_changes[symbol].append((
-                    now, added["bid"], removed["bid"], added["ask"], removed["ask"]
+                    event_at, added["bid"], removed["bid"], added["ask"], removed["ask"], now
                 ))
             elif "b" in item and "a" in item:
                 bid = float(item["b"])
@@ -129,9 +165,9 @@ class LeaderOrderFlowStream:
         now = time.time() if now is None else now
         symbol = symbol.upper()
         with self._lock:
-            trades = list(self._trades.get(symbol, ()))
-            quotes = list(self._quotes.get(symbol, ()))
-            depth = list(self._depth_changes.get(symbol, ()))
+            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now and (len(r) < 5 or r[4] <= now)]
+            quotes = [r for r in self._quotes.get(symbol, ()) if r[0] <= now]
+            depth = [r for r in self._depth_changes.get(symbol, ()) if r[0] <= now and (len(r) < 6 or r[5] <= now)]
         if not trades:
             return None
 
@@ -180,8 +216,10 @@ class LeaderOrderFlowStream:
     def entry_probe(self, symbol, now):
         """Read-only fresh windows for diagnostic comparison, no REST or trading."""
         with self._lock:
-            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now]
+            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now and (len(r) < 5 or r[4] <= now)]
             quotes = [r for r in self._quotes.get(symbol, ()) if r[0] <= now]
+            gap = self._last_gaps.get(symbol)
+            transport = self._transport
         changes = {}
         for seconds in (5, 10, 15, 20, 60):
             anchor = next((r for r in reversed(trades) if r[0] <= now-seconds), None)
@@ -197,6 +235,12 @@ class LeaderOrderFlowStream:
             freshness_reasons.append('нет свежей котировки за 2 секунды')
         if missing_windows:
             freshness_reasons.append('нет опорной цены для окон: ' + ','.join(missing_windows))
+        if transport is not None and not transport.subscription_confirmed(symbol):
+            freshness_reasons.append('подписка на монету не подтверждена')
+            fresh = False
+        if gap is not None and now-gap < 60:
+            freshness_reasons.append('окно 60с после разрыва ещё не накоплено')
+            fresh = False
         return dict(at=now, fresh=fresh, changes=changes,
                     recovery_windows=window_snapshot(trades, quotes, now),
                     freshness_reasons=freshness_reasons, missing_windows=missing_windows,
@@ -211,33 +255,27 @@ class LeaderOrderFlowStream:
         self._thread.start()
 
     def _run(self) -> None:
-        delay = 1.0
-        while not self._stop.is_set():
-            url = self.subscription_url()
-            if url is None:
-                self._changed.wait(1)
-                self._changed.clear()
-                continue
-            try:
-                with connect(url, open_timeout=10, close_timeout=2) as websocket:
-                    delay = 1.0
-                    self._changed.clear()
-                    while not self._stop.is_set() and not self._changed.is_set():
-                        try:
-                            self.ingest(websocket.recv(timeout=1))
-                        except TimeoutError:
-                            continue
-            except Exception as error:
-                if not self._stop.is_set():
-                    print(f"Поток order flow лидеров переподключается: {error}", flush=True)
-                    self._stop.wait(delay)
-                    delay = min(delay * 2, 30.0)
+        # Local import avoids a module cycle. The transport owns one socket and
+        # its FIFO; changing members no longer restarts every leader's history.
+        from bot.order_flow_transport import OrderFlowTransport
+        with self._lock:
+            transport = self._transport = OrderFlowTransport(self)
+            transport.set_symbols(self._symbols)
+        if self._stop.is_set():
+            return
+        try:
+            transport.run_sharded()
+        finally:
+            self.interrupted(self._symbols)
 
     def close(self) -> None:
         self._stop.set()
-        self._changed.set()
+        with self._lock:
+            transport = self._transport
+        if transport is not None:
+            transport.close()
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=5)
 
 
 class AllMarketMiniTickerStream:

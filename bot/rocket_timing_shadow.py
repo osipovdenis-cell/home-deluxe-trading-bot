@@ -4,6 +4,7 @@ import math
 import sqlite3
 import threading
 import time
+from bot.warm_symbols import WarmSymbols
 from collections import deque, Counter
 from dataclasses import asdict, replace
 from queue import Queue, Empty, Full
@@ -228,7 +229,7 @@ class TimingWorker:
         session_errors=0
         last_error_type=last_error_code=''
         pending=deque()
-        retained={}
+        warm_symbols=WarmSymbols(40)
         recorder_failed=False
         try:
             while not self.stop.is_set():
@@ -253,10 +254,7 @@ class TimingWorker:
                     next_jobs={k:v for k,v in next_jobs.items() if v[0] in active_ids}
                     with self.lock:
                         watch=self.watch
-                    clock=time.time()
-                    retained.update((symbol,clock) for symbol in watch)
-                    retained={symbol:t for symbol,t in retained.items() if clock-t<=120}
-                    desired=tuple(dict.fromkeys((*sorted(active),*watch,*retained)))[:40]
+                    desired=warm_symbols.select(sorted(active),watch)
                     self.stream.set_symbols(desired)
                     events,overflow,gaps=self.stream.drain()
                     quotes={}

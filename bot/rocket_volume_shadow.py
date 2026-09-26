@@ -122,7 +122,7 @@ def summarize(items, now, seconds):
     rows = [s for s in items if now-seconds <= s['at'] <= now
             and (s.get('volume_experiment') or {}).get('version') == VERSION]
     selected = [s for s in rows if s.get('volume_execution',{}).get('state')=='ENTERED']
-    new_feed = [s for s in rows if s['volume_experiment'].get('feed_version')==2]
+    new_feed = [s for s in rows if s['volume_experiment'].get('feed_version')==3]
     known = [s for s in rows if s['volume_experiment']['state'] != 'UNKNOWN']
     groups = {}
     for name, key in [('symbols', lambda s:s['symbol']),

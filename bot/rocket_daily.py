@@ -13,6 +13,7 @@ from copy import deepcopy
 from bot.rocket_recovery_shadow import new_leg, advance
 from bot import rocket_volume_shadow as volume_shadow
 from bot import rocket_structure as structure
+from bot.warm_symbols import WarmSymbols
 
 SUFFIX = '.rocket_daily.sqlite3'
 HORIZON = 3600
@@ -52,7 +53,7 @@ class DailyModel:
             return
         if not all(math.isfinite(event[k]) for k in ('at','stop','cost')) or event['stop']<=0 or event['cost']<0:
             raise ValueError('invalid decision')
-        s = dict(deepcopy(event), quote_version=2, leg=dict(status='WAIT', net=None))
+        s = dict(deepcopy(event), quote_version=3, quote_sampling_ms=100, leg=dict(status='WAIT', net=None))
         experiment = s.get('volume_experiment')
         if experiment:
             stamp = experiment.get('evaluated_at')
@@ -123,6 +124,7 @@ class DailyWorker:
         self.stop=threading.Event()
         self.stream=structure.StructureStream()
         self.watch=()
+        self.warm_symbols=WarmSymbols(self.stream.max_symbols)
         self.thread=None
 
     def capture(self, symbol, signal_at, at, reason, opened, stop, cost, source='signal',
@@ -155,6 +157,7 @@ class DailyWorker:
                     for event in pending:
                         if 'structure' not in event:
                             try:
+                                event['collector_version'] = self.stream.health()['version']
                                 event['structure'] = self.stream.snapshot(event['symbol'], event['at'])
                             except Exception:
                                 event['structure'] = structure.unknown(event['at'], 'ошибка снимка')
@@ -162,7 +165,7 @@ class DailyWorker:
                     db.commit()
                     pending.clear()
                     active=sorted({s['symbol'] for s in model.active.values()})
-                    symbols=tuple(dict.fromkeys((*active,*self.watch)))[:100]
+                    symbols=self.warm_symbols.select(active,self.watch)
                     self.stream.set_symbols(symbols)
                     quotes,overflow,gaps=self.stream.drain_quotes()
                     now=time.time()
@@ -170,7 +173,7 @@ class DailyWorker:
                     degraded=False
                     db.executemany('INSERT OR REPLACE INTO health VALUES(?,?)',
                         [('last_tick',str(now)),('errors',str(errors)),('queued',str(len(pending))),
-                         ('quote_version','2'),('stream',json.dumps(self.stream.health()))])
+                         ('quote_version','3'),('stream',json.dumps(self.stream.health()))])
                     db.commit()
                 except Exception as error:
                     db.rollback()
@@ -284,6 +287,14 @@ def report_text(main, now):
                      f"переподключений с запуска {stream_health.get('reconnects',0)}; "
                      f"сверок подписок {stream_health.get('subscription_reconciliations',0)}; "
                      f"ошибок обработки/БД {d['health'].get('errors','—')}.")
+        session_start = stream_health.get('started_at', now)
+        current = [s for s in rejected if s['at'] >= session_start]
+        current_outcome = outcome(current)
+        lines.append(f"С текущего запуска потока: отказов {len(current)}, полных закрытых "
+                     f"{current_outcome['profitable']+current_outcome['losing']+current_outcome['flat']}, "
+                     f"неполных {current_outcome['incomplete']}, ещё наблюдаются {current_outcome['pending']}.")
+        lines.append(f"Тайм-аутов управления при живых котировках: {stream_health.get('control_timeouts',0)}; "
+                     f"неподтверждённых запросов: {stream_health.get('pending_subscription_requests',0)}.")
         if stream_health.get('last_error_type'):
             lines.append(f"Последний разрыв: {stream_health.get('last_error_phase')} / "
                          f"{stream_health['last_error_type']}; код {stream_health.get('last_close_code') or '—'}.")
@@ -293,5 +304,9 @@ def report_text(main, now):
     v2=[s for s in rejected if s.get('quote_version')==2]
     if v2:
         g=outcome(v2)
-        lines.insert(5, f"Новый сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
+        lines.insert(5, f"Предыдущий сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
+    v3 = [s for s in rejected if s.get('quote_version') == 3]
+    if v3:
+        g = outcome(v3)
+        lines.append(f"Сбор v3, реальные снимки 100 мс: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}. Движения между снимками не восстанавливаются.")
     return '\n'.join(lines) + '\n\n' + structure.report_text(ep)

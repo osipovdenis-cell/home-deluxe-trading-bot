@@ -1,7 +1,7 @@
 """Continuous quotes for rocket analytics; never connected to the order engine.
 
-bookTicker preserves intrasecond changes. Actual depth5 snapshots supply a
-once-per-second quote even when the best prices don't change. No forward fill,
+Actual depth5 snapshots supply bid/ask observations every 100 milliseconds.
+Movements between snapshots are not reconstructed. No forward fill,
 REST backfill or interpolation. Known connection interruptions stay explicit.
 """
 import json
@@ -11,8 +11,8 @@ import time
 from collections import deque
 from urllib.parse import quote
 
-from websockets.sync.client import connect
-from bot.streams import BINANCE_STREAM_BASE_URL
+from bot.async_market_socket import connect
+from bot.connection_budget import PUBLIC_CONNECTION_BUDGET
 
 
 class QuoteIngestQueue:
@@ -28,6 +28,7 @@ class QuoteIngestQueue:
         self.stopping = False
         self.overflows = self.errors = 0
         self.max_lag = 0.
+        self.gap_at = {}
         self.thread = threading.Thread(target=self.run, name='rocket-quote-ingest', daemon=True)
 
     def put(self, kind, payload, at):
@@ -37,7 +38,7 @@ class QuoteIngestQueue:
                 with self.stream._lock:
                     affected = set(self.stream._symbols)
                 for previous_kind, previous_payload, _ in self.pending:
-                    if previous_kind == 'gap':
+                    if previous_kind in ('gap', 'delay'):
                         affected.update(previous_payload)
                     elif isinstance(previous_payload, dict):
                         data = previous_payload.get('data', previous_payload)
@@ -64,9 +65,19 @@ class QuoteIngestQueue:
                 kind, payload, at = self.pending.popleft()
             try:
                 if kind == 'gap':
+                    for symbol in payload:
+                        self.gap_at[symbol] = max(at, self.gap_at.get(symbol, at))
                     self.stream.interrupted(payload, at)
+                elif kind == 'delay':
+                    self.stream.delayed(payload, at)
                 else:
-                    self.stream.ingest(payload, at)
+                    item = payload if isinstance(payload, dict) else json.loads(payload)
+                    data = item.get('data', item)
+                    symbol = str(data.get('s') or item.get('stream', '').split('@')[0]).upper()
+                    # A different channel may enqueue an older frame after a gap.
+                    if at < self.gap_at.get(symbol, -math.inf):
+                        continue
+                    self.stream.ingest(item, at)
                 with self.ready:
                     self.max_lag = max(self.max_lag, time.time()-at)
             except Exception:
@@ -85,6 +96,9 @@ class QuoteIngestQueue:
 
 class RocketQuoteStream:
     max_symbols = 100
+    # Official public-market endpoints; independent routes for transient failures.
+    base_urls = ('wss://stream.binance.com:443',
+                 'wss://data-stream.binance.vision:443', 'wss://stream.binance.com:9443')
     idle_timeout = 30
     subscription_timeout = 30
 
@@ -92,19 +106,29 @@ class RocketQuoteStream:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        self._shards = None
         self._symbols = set()
         self._updates = {}
+        self._confirmed = set()
+        self._last_data_received = None
+        self._endpoint_index = 0
+        self._event_late = False
+        self._event_seen_at = None
+        self.require_clock = False
         self._quotes = deque(maxlen=100000)
         self._gaps = deque(maxlen=10000)
         self._overflow = False
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v5', subscription_reconciliations=0,
+                           version='rocket-quotes-v13-redundant-depth100ms', subscription_reconciliations=0,
+                           control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
+                           stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
                            last_disconnect_at=None, last_error_type=None,
-                           last_error_phase=None, last_close_code=None,
+                           last_error_phase=None, last_close_code=None, last_sent_close_code=None,
+                           endpoint=self.base_urls[0],
                            disconnect_reasons={})
 
     def set_symbols(self, symbols):
@@ -115,11 +139,13 @@ class RocketQuoteStream:
             for symbol in self._symbols - wanted:
                 self._updates.pop(symbol, None)
             self._symbols = wanted
+            if self._shards is not None:
+                self._shards.set_symbols(wanted)
 
     @staticmethod
     def streams(symbols):
         return [stream for s in sorted(symbols) for stream in
-                (s.lower() + '@bookTicker', s.lower() + '@depth5')]
+                (s.lower() + '@depth5@100ms',)]
 
     def sync_subscriptions(self, ws, subscribed, request_id, pending):
         # Only one outstanding mutation. Membership may change while its ACK is
@@ -143,7 +169,22 @@ class RocketQuoteStream:
             return request_id
         if any(p['method']=='LIST_SUBSCRIPTIONS' for p in pending.values()):
             if any(p['method']=='LIST_SUBSCRIPTIONS' for p in expired):
-                raise TimeoutError('subscription reconciliation missing')
+                # An unresponsive control plane doesn't erase already confirmed,
+                # continuously arriving data. Keep that history; new subscriptions
+                # remain unconfirmed and cannot authorize a trading entry.
+                if not subscribed or self._last_data_received is None or now-self._last_data_received > 2:
+                    raise TimeoutError('subscription reconciliation missing')
+                uncertain = set().union(*(p['symbols'] for p in pending.values())) - subscribed
+                self.queue_interruption(uncertain)
+                for ident in [i for i,p in pending.items() if p['method']=='LIST_SUBSCRIPTIONS']:
+                    pending.pop(ident)
+                request_id += 1
+                ws.send(json.dumps(dict(method='LIST_SUBSCRIPTIONS', id=request_id)))
+                pending[request_id] = dict(sent=now, method='LIST_SUBSCRIPTIONS', symbols=set())
+                with self._lock:
+                    self._stats['control_timeouts'] += 1
+                    self._stats['subscription_reconciliations'] += 1
+                return request_id
             return request_id
         # An ACK can be lost while quotes keep flowing. Verify server state once;
         # do not tear down every healthy subscription just to repeat the request.
@@ -155,8 +196,13 @@ class RocketQuoteStream:
         return request_id
 
     def subscription_reply(self, message, subscribed, pending):
-        request = pending.get(message.get('id'))
+        ident = message.get('id')
+        if isinstance(ident, str) and ident.isdecimal():
+            ident = int(ident)
+        request = pending.get(ident)
         if request is None:
+            with self._lock:
+                self._stats['unmatched_replies'] += 1
             return subscribed  # Late reply after an authoritative reconciliation.
         with self._lock:
             self._stats['subscription_replies'] += 1
@@ -178,15 +224,65 @@ class RocketQuoteStream:
             return confirmed
         if message.get('result','error') is not None:
             raise ValueError('subscription rejected')
-        pending.pop(message['id'])
+        pending.pop(ident)
         if request['method']=='SUBSCRIBE':
             return subscribed | request['symbols']
         return subscribed - request['symbols']
+
+    def subscription_confirmed(self, symbol):
+        if self._shards is not None:
+            return self._shards.confirmed(symbol)
+        with self._lock:
+            return (self._stats['connected'] and symbol in self._confirmed
+                    and not self._event_late
+                    and (not self.require_clock or (self._event_seen_at is not None
+                         and time.time()-self._event_seen_at <= 3)))
+
+    def control_message(self, message):
+        # Some combined-stream gateways wrap control replies in data, too.
+        if any(k in message for k in ('id', 'result', 'code')):
+            return message
+        inner = message.get('data')
+        if isinstance(inner, dict) and any(k in inner for k in ('id', 'result', 'code')):
+            with self._lock:
+                self._stats['wrapped_replies'] += 1
+            return inner
+        return None
+
+    def timely_message(self, message, received_at):
+        data = message.get('data', message)
+        event_at = data.get('E')
+        late = self._event_late
+        if isinstance(event_at, (int, float)):
+            self._event_seen_at = received_at
+            lag = received_at-event_at/1000
+            late = not math.isfinite(lag) or lag > 2 or lag < -2
+            with self._lock:
+                if math.isfinite(lag):
+                    self._stats['max_event_lag_seconds'] = max(
+                        self._stats['max_event_lag_seconds'], lag)
+        elif self.require_clock and (self._event_seen_at is None or received_at-self._event_seen_at > 3):
+            late = True
+        if late and not self._event_late:
+            with self._lock:
+                symbols = set(self._symbols)
+            if self.require_clock:
+                self.queue_delay(symbols, received_at)
+        self._event_late = late
+        if late:
+            with self._lock:
+                self._stats['stale_data_messages'] += 1
+            # Preserve sequenced, timestamped trades/depth for historical windows.
+            # Current entry is blocked by subscription_confirmed until caught up.
+            return not self.require_clock and data.get('e') in ('aggTrade', 'depthUpdate')
+        return True
 
     def ingest(self, payload, received_at=None):
         now = time.time() if received_at is None else received_at
         item = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
         data = item.get('data', item)
+        if data.get('e') == 'kline':
+            return  # Exchange clock witness only; never a substitute for bid/ask.
         depth = 'lastUpdateId' in data
         symbol = item.get('stream', '').split('@')[0].upper() if depth else data.get('s')
         if not symbol:
@@ -240,9 +336,27 @@ class RocketQuoteStream:
     def health(self):
         # Lock order is queue -> stream; never hold stream while taking the queue.
         ingest = self._ingest_worker.health() if self._ingest_worker else {}
+        if self._shards is not None:
+            ingest.update(self._shards.health())
         with self._lock:
-            return dict(self._stats, disconnect_reasons=dict(self._stats['disconnect_reasons']),
-                        subscribed_symbols=len(self._symbols), **ingest)
+            return {**self._stats, 'disconnect_reasons': dict(self._stats['disconnect_reasons']),
+                    'subscribed_symbols': len(self._symbols), **ingest}
+
+    def delayed(self, symbols, at=None):
+        # Quote-path uncertainty is explicit, but a late delivery isn't a missing
+        # trade sequence. Keep timestamped trade history and update-ID fences.
+        at = time.time() if at is None else at
+        with self._lock:
+            for symbol in symbols:
+                if len(self._gaps) == self._gaps.maxlen:
+                    self._overflow = True
+                self._gaps.append((at, symbol))
+
+    def queue_delay(self, symbols, at):
+        if self._ingest_worker is None:
+            self.delayed(symbols, at)
+        else:
+            self._ingest_worker.put('delay', set(symbols), at)
 
     def queue_interruption(self, symbols, at=None):
         at = time.time() if at is None else at
@@ -258,6 +372,7 @@ class RocketQuoteStream:
                         'OSError', 'ValueError', 'JSONDecodeError'):
             name = 'OtherError'
         code = getattr(getattr(error, 'rcvd', None), 'code', None)
+        sent_code = getattr(getattr(error, 'sent', None), 'code', None)
         with self._lock:
             reasons = self._stats['disconnect_reasons']
             key = phase + ':' + name
@@ -265,11 +380,24 @@ class RocketQuoteStream:
             self._stats.update(reconnects=self._stats['reconnects']+1,
                                last_disconnect_at=time.time(), last_error_type=name,
                                last_error_phase=phase,
-                               last_close_code=code if isinstance(code, int) else None)
+                               last_close_code=code if isinstance(code, int) else None,
+                               last_sent_close_code=sent_code if isinstance(sent_code, int) else None)
 
     def start(self):
-        self._thread = threading.Thread(target=self.run, name='rocket-daily-quotes', daemon=True)
+        self._thread = threading.Thread(target=self.run_sharded, name='rocket-daily-quotes', daemon=True)
         self._thread.start()
+
+    def run_sharded(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        with self._lock:
+            self._shards = ShardedMarketStream(self)
+            self._shards.set_symbols(self._symbols)
+        worker = self._ingest_worker = QuoteIngestQueue(self)
+        worker.thread.start()
+        try:
+            self._shards.run()
+        finally:
+            worker.close()
 
     def run(self):
         worker = self._ingest_worker = QuoteIngestQueue(self)
@@ -296,13 +424,22 @@ class RocketQuoteStream:
                 # A separate idle watchdog still reconnects a stalled data stream.
                 # Establish initial subscriptions in the handshake. No initial ACK
                 # is required; subsequent membership changes stay on this socket.
-                url = BINANCE_STREAM_BASE_URL + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
+                if not PUBLIC_CONNECTION_BUDGET.acquire(self._stop):
+                    break
+                base_url = self.base_urls[self._endpoint_index]
+                with self._lock:
+                    self._stats['endpoint'] = base_url
+                url = base_url + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
                 with connect(url, open_timeout=10,
                              close_timeout=2, ping_interval=None, max_queue=256,
                              compression=None) as ws:
                     connected_at = last_received = time.monotonic()
+                    self._last_data_received = None
+                    self._event_late = False
+                    self._event_seen_at = None
                     with self._lock:
                         self._stats['connected'] = True
+                        self._confirmed = set(subscribed)
                     last_sync = -math.inf
                     while not self._stop.is_set():
                         now = time.monotonic()
@@ -323,25 +460,34 @@ class RocketQuoteStream:
                                 raise TimeoutError('market stream idle')
                             continue
                         last_received = time.monotonic()
-                        if 'id' in message:
+                        control = self.control_message(message)
+                        if control is not None:
                             phase = 'subscription_ack'
-                            subscribed = self.subscription_reply(message, subscribed, pending)
+                            if 'code' in control:
+                                raise ValueError('subscription rejected')
+                            subscribed = self.subscription_reply(control, subscribed, pending)
                         else:
+                            self._last_data_received = last_received
                             phase = 'ingest'
-                            self._ingest_worker.put('data', message, time.time())
+                            received_at = time.time()
+                            if self.timely_message(message, received_at):
+                                self._ingest_worker.put('data', message, received_at)
                         phase = 'subscription_ack'
                         request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, last_received)
                         with self._lock:
+                            self._confirmed = set(subscribed)
                             self._stats.update(confirmed_symbols=len(subscribed),
                                                pending_subscription_requests=len(pending))
             except Exception as error:
                 if not self._stop.is_set():
                     self.record_error(error, phase)
+                    self._endpoint_index = (self._endpoint_index + 1) % len(self.base_urls)
             finally:
                 affected = subscribed | set().union(*(p['symbols'] for p in pending.values()))
                 self.queue_interruption(affected)
                 with self._lock:
                     self._stats['connected'] = False
+                    self._confirmed.clear()
             if connected_at is not None and time.monotonic() - connected_at >= 60:
                 delay = 1
             if self._stop.wait(delay):

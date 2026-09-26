@@ -48,13 +48,13 @@ class RocketQuoteTests(unittest.TestCase):
         ws=Mock(); pending={}
         subscribed, ident=self.stream.sync_subscriptions(ws,set(),0,pending)
         self.assertEqual(subscribed,set())  # Sending isn't acknowledgement.
-        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['x@bookTicker','x@depth5'])
+        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['x@depth5@100ms'])
         self.stream.set_symbols(['X','Y'])
         self.stream.sync_subscriptions(ws,subscribed,ident,pending)
         self.assertEqual(ws.send.call_count,1)
         subscribed=self.stream.subscription_reply({'id':ident,'result':None},subscribed,pending)
         subscribed,ident=self.stream.sync_subscriptions(ws,subscribed,ident,pending)
-        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['y@bookTicker','y@depth5'])
+        self.assertEqual(json.loads(ws.send.call_args.args[0])['params'],['y@depth5@100ms'])
         subscribed=self.stream.subscription_reply({'id':ident,'result':None},subscribed,pending)
         self.stream.set_symbols(['X'])
         subscribed,ident=self.stream.sync_subscriptions(ws,subscribed,ident,pending)
@@ -144,7 +144,7 @@ class RocketQuoteTests(unittest.TestCase):
         def recv(**kw):
             raise OSError('private URL must not be exported')
         ws,connect=self.run_socket(recv,clock)
-        self.assertTrue(connect.call_args.args[0].endswith('/stream?streams=x@bookTicker/x@depth5'))
+        self.assertTrue(connect.call_args.args[0].endswith('/stream?streams=x@depth5@100ms'))
         ws.send.assert_not_called()
         self.assertEqual(self.stream.health()['last_error_phase'],'receive')
         self.assertNotIn('private',json.dumps(self.stream.health()))
@@ -175,6 +175,7 @@ class RocketQuoteTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in self.stream._stop.wait.call_args_list],[1,2])
         self.assertEqual(self.stream.health()['disconnect_reasons'],{'receive:ValueError':2})
         self.assertFalse(self.stream.health()['connected'])
+        self.assertEqual(self.stream.health()['endpoint'], 'wss://data-stream.binance.vision:443')
 
     def test_slow_ingest_does_not_delay_dynamic_subscription_ack(self):
         entered, release = threading.Event(), threading.Event()

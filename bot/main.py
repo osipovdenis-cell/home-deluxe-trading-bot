@@ -57,7 +57,7 @@ def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
                   + audit.scalp_shadow.learning_status(now))
 
 
-def build_report_snapshot(settings, prices, now, exit_healthy):
+def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None):
     # Created and closed in the export thread, never shared with entry/exit workers.
     export_audit = AuditLog(settings.audit_db_path)
     export_trader = None
@@ -71,6 +71,17 @@ def build_report_snapshot(settings, prices, now, exit_healthy):
                                  round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
         from bot.rocket_entry_variants import EXECUTION_POLICY
         bundle['runtime']['rocket_entry_policy'] = EXECUTION_POLICY
+        bundle['runtime']['leader_flow'] = flow_health() if callable(flow_health) else flow_health
+        try:
+            import subprocess
+            from pathlib import Path
+            revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1],
+                                      capture_output=True, text=True, timeout=2)
+            value = revision.stdout.strip()
+            bundle['runtime']['deployed_commit'] = value if revision.returncode == 0 and len(value) == 40 and all(c in '0123456789abcdef' for c in value) else None
+        except (OSError, subprocess.TimeoutExpired):
+            bundle['runtime']['deployed_commit'] = None
+        bundle['collection_completed_at_unix'] = time.time()
         return bundle
     finally:
         export_audit.close()
@@ -906,6 +917,7 @@ def main() -> None:
             lambda snapshot_prices, snapshot_now: build_report_snapshot(
                 settings, snapshot_prices, snapshot_now,
                 position_worker.healthy() if position_worker else None,
+                order_flow_stream.health,
             )
         )
         report_worker.set_prices(prices)

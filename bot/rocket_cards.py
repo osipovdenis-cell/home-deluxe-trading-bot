@@ -12,6 +12,7 @@ from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.rocket_quote_stream import RocketQuoteStream
 from bot.recording_gaps import read_gaps
+from bot.warm_symbols import WarmSymbols
 from bot.rocket_entry_variants import evaluate as evaluate_variants, report_text as variants_report
 
 from bot.rocket_recovery_shadow import RecoveryShadow, report_text as recovery_report
@@ -303,6 +304,7 @@ class RocketPathWorker:
         self.notifications=SimpleQueue()
         self._acks=SimpleQueue()
         self._watch=()
+        self.warm_symbols=WarmSymbols(128)
 
     def watch_symbols(self, symbols):
         # Prewarm before entry. Actual open/recent positions retain first priority.
@@ -346,7 +348,7 @@ class RocketPathWorker:
                     now=time.time()
                     if now-last_refresh>=1:
                         rows=db.execute("SELECT symbol FROM paper_positions WHERE signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=?) ORDER BY id DESC",(now-3605,)).fetchall()
-                        self.stream.set_symbols(tuple(dict.fromkeys((*[r[0] for r in rows], *self._watch)))[:128])
+                        self.stream.set_symbols(self.warm_symbols.select([r[0] for r in rows], self._watch))
                         last_refresh=now
                     if isinstance(self.stream, RecordedBidStream):
                         events,overflow,interruptions=self.stream.drain_recording_batch()
@@ -397,7 +399,7 @@ class RocketPathWorker:
                 except Exception as error:
                     db.rollback()
                     retry_errors += 1
-                    last_error_type = type(error).__name__
+                    last_error_type = type(error).__name__ + ':' + str(getattr(error, 'sqlite_errorname', ''))
                     print('Rocket diagnostics: '+type(error).__name__,flush=True)
                     self._stop.wait(1)
         finally:

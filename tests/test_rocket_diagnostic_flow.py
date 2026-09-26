@@ -16,7 +16,7 @@ class DiagnosticFlowTests(unittest.TestCase):
 
     def trade(self,at,price=100,ident=None):
         self.stream.ingest(dict(e='aggTrade',s='X',p=str(price),q='2',m=False,
-                               a=int(at*100) if ident is None else ident),at)
+                               a=int(at) if ident is None else ident),at)
 
     def book(self,at,bid=100,update=None):
         self.stream.ingest(dict(s='X',b=str(bid),a=str(bid+.01),u=int(at*100) if update is None else update),at)
@@ -35,7 +35,7 @@ class DiagnosticFlowTests(unittest.TestCase):
         p=self.stream.entry_probe('X',161.2)
         self.assertTrue(p['fresh']);self.assertTrue(p['recovery_windows']['complete'])
         self.assertIsNotNone(p['snapshot'])
-        self.assertEqual(p['feed_version'],2)
+        self.assertEqual(p['feed_version'],3)
         self.assertFalse(self.stream.entry_probe('X',164)['fresh'])
 
     def test_live_subscription_changes_preserve_existing_history(self):
