@@ -121,8 +121,8 @@ class RocketQuoteStream:
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v13-redundant-depth100ms', subscription_reconciliations=0,
-                           control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
+                           version='rocket-quotes-v14-idle-heartbeat', subscription_reconciliations=0,
+                           control_timeouts=0, unmatched_replies=0, wrapped_replies=0, idle_liveness_checks=0,
                            stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
@@ -457,7 +457,12 @@ class RocketQuoteStream:
                             request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, now)
                             if subscribed and now - last_received > self.idle_timeout:
                                 phase = 'idle'
-                                raise TimeoutError('market stream idle')
+                                # A quiet trade/depth channel is not a lost socket.
+                                # A pong proves liveness, never market-data freshness.
+                                ws.heartbeat(timeout=5)
+                                last_received = time.monotonic()
+                                with self._lock:
+                                    self._stats['idle_liveness_checks'] += 1
                             continue
                         last_received = time.monotonic()
                         control = self.control_message(message)

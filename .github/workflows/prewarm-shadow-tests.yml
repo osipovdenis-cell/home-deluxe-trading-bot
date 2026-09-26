@@ -1,7 +1,7 @@
 name: Prewarm and shadow checks
 on:
   push:
-    branches: [feat/prewarm-market-shadow-20260926]
+    branches: [feat/prewarm-market-shadow-20260926, fix/quiet-market-heartbeat-20260926]
 permissions:
   contents: read
 jobs:

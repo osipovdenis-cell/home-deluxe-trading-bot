@@ -146,7 +146,7 @@ class ShardedMarketStream:
                           if (p._group,p._family)==group) for group in groups)
         summed = ['reconnects','subscription_reconciliations','control_timeouts',
                   'unmatched_replies','wrapped_replies','subscription_replies',
-                  'pending_subscription_requests','stale_data_messages']
+                  'pending_subscription_requests','stale_data_messages','idle_liveness_checks']
         result = {k: sum(r.get(k,0) for r in rows) for k in summed}
         for key in ['subscription_ack_max_seconds','max_event_lag_seconds']:
             result[key] = max((r.get(key,0) for r in rows), default=0)

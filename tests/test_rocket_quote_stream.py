@@ -110,9 +110,10 @@ class RocketQuoteTests(unittest.TestCase):
         quotes,_,gaps=self.stream.drain_quotes()
         self.assertEqual(quotes,[]);self.assertEqual(gaps,[(102,'X')])
 
-    def run_socket(self, recv, clock, attempts=1):
+    def run_socket(self, recv, clock, attempts=1, heartbeat_error=None):
         ws=Mock()
         ws.recv.side_effect=recv
+        ws.heartbeat.side_effect=heartbeat_error
         cm=Mock()
         cm.__enter__=Mock(return_value=ws)
         cm.__exit__=Mock(return_value=False)
@@ -124,7 +125,7 @@ class RocketQuoteTests(unittest.TestCase):
             self.stream.run()
         return ws,connect
 
-    def test_idle_watchdog_still_reconnects_without_client_pings(self):
+    def test_idle_watchdog_reconnects_when_pong_is_missing(self):
         clock=[0]
         answers=iter([json.dumps({'id':1,'result':None}),None])
         def recv(**kw):
@@ -133,11 +134,27 @@ class RocketQuoteTests(unittest.TestCase):
                 clock[0]=31
                 raise TimeoutError()
             return answer
-        _,connect=self.run_socket(recv,clock)
+        _,connect=self.run_socket(recv,clock,heartbeat_error=TimeoutError())
         self.assertIsNone(connect.call_args.kwargs['ping_interval'])
         self.assertEqual(connect.call_args.kwargs['max_queue'],256)
         self.assertEqual(self.stream.health()['last_error_phase'],'idle')
         self.assertEqual(len(self.stream.drain_quotes()[2]),1)
+
+    def test_quiet_live_socket_preserves_history_without_faking_quotes(self):
+        clock=[0]
+        calls=[0]
+        def recv(**kw):
+            calls[0]+=1
+            clock[0]=31+calls[0]
+            if calls[0]>1:self.stream._stop.is_set.return_value=True
+            raise TimeoutError()
+        ws,_=self.run_socket(recv,clock)
+        ws.heartbeat.assert_called_once_with(timeout=5)
+        health=self.stream.health()
+        self.assertEqual(health['reconnects'],0)
+        self.assertEqual(health['idle_liveness_checks'],1)
+        self.assertEqual(health['last_quote_at'],0)
+        self.assertEqual(health['depth_quotes'],0)
 
     def test_initial_subscription_is_in_url_without_pending_ack(self):
         clock=[0]

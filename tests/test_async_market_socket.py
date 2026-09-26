@@ -71,8 +71,27 @@ class AsyncSocketTests(unittest.TestCase):
                     self.assertTrue(ping_answered.wait(2))
                     with self.assertRaises(TimeoutError):
                         socket.recv(timeout=.01)
+                    pending = socket.receive
+                    socket.heartbeat(timeout=1)
+                    self.assertIs(socket.receive,pending)
                     socket.send('subscribe')
                     self.assertEqual(socket.recv(timeout=2), 'subscribe')
             finally:
                 server.shutdown()
                 thread.join(timeout=2)
+
+class HeartbeatTimeoutTests(unittest.TestCase):
+    def test_missing_pong_times_out_without_consuming_pending_data(self):
+        class Silent(FakeSocket):
+            async def ping(self):
+                return asyncio.get_running_loop().create_future()
+        ws=Silent()
+        async def opened(*args,**kwargs):return ws
+        with patch('bot.async_market_socket.async_connect',opened):
+            with AsyncMarketSocket('wss://example.invalid') as socket:
+                with self.assertRaises(TimeoutError):socket.recv(timeout=.01)
+                pending=socket.receive
+                with self.assertRaises(TimeoutError):socket.heartbeat(timeout=.01)
+                self.assertIs(socket.receive,pending)
+                socket.send('still intact')
+                self.assertEqual(socket.recv(timeout=1),'still intact')

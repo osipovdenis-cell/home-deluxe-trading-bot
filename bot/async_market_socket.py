@@ -45,6 +45,18 @@ class AsyncMarketSocket:
     def send(self, payload):
         asyncio.run_coroutine_threadsafe(self.ws.send(payload), self.loop).result(timeout=10)
 
+    async def _heartbeat(self, timeout):
+        pong = await self.ws.ping()
+        await asyncio.wait_for(pong, timeout)
+
+    def heartbeat(self, timeout=5):
+        future = asyncio.run_coroutine_threadsafe(self._heartbeat(timeout), self.loop)
+        try:
+            future.result(timeout=timeout+1)
+        except FutureTimeout:
+            future.cancel()
+            raise TimeoutError('market heartbeat deadline') from None
+
     def recv(self, timeout=None):
         if self.receive is None:
             self.receive = asyncio.run_coroutine_threadsafe(self.ws.recv(), self.loop)
