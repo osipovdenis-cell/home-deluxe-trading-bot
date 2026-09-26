@@ -19,7 +19,7 @@ jobs:
           .venv-check/bin/python -m pip install -r requirements.txt
       - name: Unit tests
         run: .venv-check/bin/python -m unittest discover -s tests -q
-      - name: Compare official market-data routes
-        run: .venv-check/bin/python ops/probe-market-routes.py
+      - name: Compare delayed control replies under load
+        run: .venv-check/bin/python ops/probe-duplex-streams.py
       - name: Check continuous public data and dynamic subscriptions
         run: .venv-check/bin/python ops/check-stream-continuity.py
