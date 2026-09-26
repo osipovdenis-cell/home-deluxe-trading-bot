@@ -66,6 +66,8 @@ def entry_probe(market, signal, context, dynamics, started, probe_provider=None)
             probe['after_flow']=asdict(snapshot)
     except Exception:
         probe = dict(at=time.time(),allowed=None,reason='ошибка получения свежего снимка')
+    from bot.rocket_market_regime import freeze as freeze_market_regime
+    probe['market_regime'] = freeze_market_regime(market.__dict__.get('_market_regime_snapshot'),time.time())
     probe['entry_variants'] = evaluate_variants(probe)
     probe['calculation_ms'] = (time.perf_counter() - calculation_started) * 1000
     return probe
