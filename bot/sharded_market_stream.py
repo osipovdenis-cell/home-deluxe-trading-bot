@@ -1,72 +1,106 @@
-"""Stable symbol partitions: unrelated symbols keep their own socket history."""
+"""Bounded, stable symbol groups with independent quote/trade/depth channels."""
 import threading
-import zlib
 
 
 class ShardedMarketStream:
-    count = 4
+    symbols_per_group = 3
 
     def __init__(self, owner):
-        from bot.rocket_quote_stream import RocketQuoteStream
         self.owner = owner
-        def family(stream):
-            channel = stream.split('@', 1)[1]
-            return 'trades' if channel == 'aggTrade' else ('depth' if channel.startswith('depth@') else 'quotes')
-        self.families = sorted({family(s) for s in owner.streams(['X'])})
+        self._lock = threading.RLock()
+        self.running = False
         self.parts = []
-        def make_part(kind):
-            class Partition(RocketQuoteStream):
-                @staticmethod
-                def streams(symbols):
-                    channels = [s for s in owner.streams(symbols) if family(s) == kind]
-                    if kind == 'quotes':
-                        channels += [s.lower()+'@kline_1s' for s in sorted(symbols)]
-                    return channels
-                def run(self):
-                    # All channels share one receive-time FIFO and gap ordering.
-                    self._ingest_worker = owner._ingest_worker
-                    self.run_socket()
-                def ingest(self, payload, received_at=None):
-                    owner.ingest(payload, received_at)
-                def interrupted(self, symbols, at=None):
-                    owner.interrupted(symbols, at)
-            part = Partition()
-            part.max_symbols = owner.max_symbols
-            part.require_clock = kind == 'quotes'
-            return part
-        for _ in range(self.count):
-            self.parts.extend(make_part(kind) for kind in self.families)
+        self.assignments = {}
+        self.families = sorted({self.family(s) for s in owner.streams(['X'])})
+
+    @staticmethod
+    def family(stream):
+        channel = stream.split('@', 1)[1]
+        return 'trades' if channel == 'aggTrade' else ('depth' if channel.startswith('depth@') else 'quotes')
+
+    def _make_part(self, kind):
+        from bot.rocket_quote_stream import RocketQuoteStream
+        owner, family = self.owner, self.family
+        class Partition(RocketQuoteStream):
+            @staticmethod
+            def streams(symbols):
+                channels = [s for s in owner.streams(symbols) if family(s) == kind]
+                if kind == 'quotes':
+                    channels += [s.lower()+'@kline_1s' for s in sorted(symbols)]
+                return channels
+            def run(self):
+                self._ingest_worker = owner._ingest_worker
+                self.run_socket()
+            def ingest(self, payload, received_at=None):
+                owner.ingest(payload, received_at)
+            def interrupted(self, symbols, at=None):
+                owner.interrupted(symbols, at)
+        part = Partition()
+        part.max_symbols = owner.max_symbols
+        part.require_clock = kind == 'quotes'
+        return part
+
+    def _start(self, part):
+        part._thread = threading.Thread(target=part.run, name='market-partition', daemon=True)
+        part._thread.start()
 
     def index(self, symbol):
-        return (zlib.crc32(symbol.encode('utf-8')) % self.count)*len(self.families)
+        return self.assignments[symbol]*len(self.families)
 
     def set_symbols(self, symbols):
-        groups = [set() for _ in self.parts]
-        for symbol in symbols:
-            for offset in range(len(self.families)):
-                groups[self.index(symbol)+offset].add(symbol)
-        for part, group in zip(self.parts, groups):
-            part.set_symbols(group)
+        with self._lock:
+            wanted = set(symbols)
+            self.assignments = {s:g for s,g in self.assignments.items() if s in wanted}
+            groups = [set() for _ in range(len(self.parts)//len(self.families))]
+            for symbol, group in self.assignments.items():
+                groups[group].add(symbol)
+            for symbol in sorted(wanted-self.assignments.keys()):
+                available = [i for i,g in enumerate(groups) if len(g) < self.symbols_per_group]
+                if available:
+                    group = min(available, key=lambda i: len(groups[i]))
+                else:
+                    group = len(groups)
+                    groups.append(set())
+                    new = [self._make_part(kind) for kind in self.families]
+                    self.parts.extend(new)
+                    if self.running:
+                        for part in new:
+                            self._start(part)
+                groups[group].add(symbol)
+                self.assignments[symbol] = group
+            for i, group in enumerate(groups):
+                for offset in range(len(self.families)):
+                    self.parts[i*len(self.families)+offset].set_symbols(group)
 
     def confirmed(self, symbol):
-        return all(self.parts[self.index(symbol)+offset].subscription_confirmed(symbol)
-                   for offset in range(len(self.families)))
+        with self._lock:
+            if symbol not in self.assignments:
+                return False
+            start = self.index(symbol)
+            parts = tuple(self.parts[start:start+len(self.families)])
+        return all(p.subscription_confirmed(symbol) for p in parts)
 
     def run(self):
-        for i, part in enumerate(self.parts):
-            part._thread = threading.Thread(target=part.run, name=f'market-partition-{i}', daemon=True)
-            part._thread.start()
+        with self._lock:
+            self.running = True
+            for part in self.parts:
+                self._start(part)
         try:
             self.owner._stop.wait()
         finally:
-            # Signal every partition before joining any one of them.
-            for part in self.parts:
+            with self._lock:
+                self.running = False
+                parts = tuple(self.parts)
+            for part in parts:
                 part._stop.set()
-            for part in self.parts:
+            for part in parts:
                 part.close()
 
     def health(self):
-        rows = [p.health() for p in self.parts]
+        with self._lock:
+            parts = tuple(self.parts)
+            symbols = tuple(self.assignments)
+        rows = [p.health() for p in parts]
         active = [r for r in rows if r['subscribed_symbols']]
         summed = ['reconnects','subscription_reconciliations','control_timeouts',
                   'unmatched_replies','wrapped_replies','subscription_replies',
@@ -78,12 +112,11 @@ class ShardedMarketStream:
         for r in rows:
             for key, value in r['disconnect_reasons'].items():
                 reasons[key] = reasons.get(key,0)+value
-        with self.owner._lock:
-            symbols = set(self.owner._symbols)
         result['confirmed_symbols'] = sum(self.confirmed(s) for s in symbols)
-        latest = max(rows, key=lambda r: r.get('last_disconnect_at') or 0)
+        latest = max(rows, key=lambda r: r.get('last_disconnect_at') or 0, default={})
         for key in ['last_disconnect_at','last_error_type','last_error_phase','last_close_code','last_sent_close_code']:
             result[key] = latest.get(key)
         result.update(connected=bool(active) and all(r['connected'] for r in active),
-                      disconnect_reasons=reasons, partitions=rows)
+                      disconnect_reasons=reasons, partitions=rows,
+                      symbols_per_group=self.symbols_per_group, quote_sampling_ms=100)
         return result

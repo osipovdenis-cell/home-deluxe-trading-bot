@@ -1,7 +1,7 @@
 """Continuous quotes for rocket analytics; never connected to the order engine.
 
-bookTicker preserves intrasecond changes. Actual depth5 snapshots supply a
-once-per-second quote even when the best prices don't change. No forward fill,
+Actual depth5 snapshots supply bid/ask observations every 100 milliseconds.
+Movements between snapshots are not reconstructed. No forward fill,
 REST backfill or interpolation. Known connection interruptions stay explicit.
 """
 import json
@@ -12,6 +12,7 @@ from collections import deque
 from urllib.parse import quote
 
 from bot.async_market_socket import connect
+from bot.connection_budget import PUBLIC_CONNECTION_BUDGET
 
 
 class QuoteIngestQueue:
@@ -37,7 +38,7 @@ class QuoteIngestQueue:
                 with self.stream._lock:
                     affected = set(self.stream._symbols)
                 for previous_kind, previous_payload, _ in self.pending:
-                    if previous_kind == 'gap':
+                    if previous_kind in ('gap', 'delay'):
                         affected.update(previous_payload)
                     elif isinstance(previous_payload, dict):
                         data = previous_payload.get('data', previous_payload)
@@ -67,6 +68,8 @@ class QuoteIngestQueue:
                     for symbol in payload:
                         self.gap_at[symbol] = max(at, self.gap_at.get(symbol, at))
                     self.stream.interrupted(payload, at)
+                elif kind == 'delay':
+                    self.stream.delayed(payload, at)
                 else:
                     item = payload if isinstance(payload, dict) else json.loads(payload)
                     data = item.get('data', item)
@@ -118,7 +121,7 @@ class RocketQuoteStream:
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v10-clock-checked', subscription_reconciliations=0,
+                           version='rocket-quotes-v12-depth100ms', subscription_reconciliations=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
                            stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
@@ -142,7 +145,7 @@ class RocketQuoteStream:
     @staticmethod
     def streams(symbols):
         return [stream for s in sorted(symbols) for stream in
-                (s.lower() + '@bookTicker', s.lower() + '@depth5')]
+                (s.lower() + '@depth5@100ms',)]
 
     def sync_subscriptions(self, ws, subscribed, request_id, pending):
         # Only one outstanding mutation. Membership may change while its ACK is
@@ -230,7 +233,10 @@ class RocketQuoteStream:
         if self._shards is not None:
             return self._shards.confirmed(symbol)
         with self._lock:
-            return self._stats['connected'] and symbol in self._confirmed
+            return (self._stats['connected'] and symbol in self._confirmed
+                    and not self._event_late
+                    and (not self.require_clock or (self._event_seen_at is not None
+                         and time.time()-self._event_seen_at <= 3)))
 
     def control_message(self, message):
         # Some combined-stream gateways wrap control replies in data, too.
@@ -260,12 +266,15 @@ class RocketQuoteStream:
         if late and not self._event_late:
             with self._lock:
                 symbols = set(self._symbols)
-            self.queue_interruption(symbols, received_at)
+            if self.require_clock:
+                self.queue_delay(symbols, received_at)
         self._event_late = late
         if late:
             with self._lock:
                 self._stats['stale_data_messages'] += 1
-            return False
+            # Preserve sequenced, timestamped trades/depth for historical windows.
+            # Current entry is blocked by subscription_confirmed until caught up.
+            return not self.require_clock and data.get('e') in ('aggTrade', 'depthUpdate')
         return True
 
     def ingest(self, payload, received_at=None):
@@ -333,6 +342,22 @@ class RocketQuoteStream:
             return {**self._stats, 'disconnect_reasons': dict(self._stats['disconnect_reasons']),
                     'subscribed_symbols': len(self._symbols), **ingest}
 
+    def delayed(self, symbols, at=None):
+        # Quote-path uncertainty is explicit, but a late delivery isn't a missing
+        # trade sequence. Keep timestamped trade history and update-ID fences.
+        at = time.time() if at is None else at
+        with self._lock:
+            for symbol in symbols:
+                if len(self._gaps) == self._gaps.maxlen:
+                    self._overflow = True
+                self._gaps.append((at, symbol))
+
+    def queue_delay(self, symbols, at):
+        if self._ingest_worker is None:
+            self.delayed(symbols, at)
+        else:
+            self._ingest_worker.put('delay', set(symbols), at)
+
     def queue_interruption(self, symbols, at=None):
         at = time.time() if at is None else at
         if self._ingest_worker is None:
@@ -399,6 +424,8 @@ class RocketQuoteStream:
                 # A separate idle watchdog still reconnects a stalled data stream.
                 # Establish initial subscriptions in the handshake. No initial ACK
                 # is required; subsequent membership changes stay on this socket.
+                if not PUBLIC_CONNECTION_BUDGET.acquire(self._stop):
+                    break
                 base_url = self.base_urls[self._endpoint_index]
                 with self._lock:
                     self._stats['endpoint'] = base_url

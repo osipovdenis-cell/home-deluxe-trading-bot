@@ -13,7 +13,7 @@ def finite(v):
 
 def window_snapshot(trades, quotes, now):
     """Disjoint (t-10,t-5], (t-5,t]; anchors never use future observations."""
-    trades = [r for r in trades if r[0] <= now]
+    trades = [r for r in trades if r[0] <= now and (len(r) < 5 or r[4] <= now)]
     quotes = [r for r in quotes if r[0] <= now]
     times = (now-10, now-5, now)
     anchors = [next((r for r in reversed(quotes) if r[0] <= t), None) for t in times]

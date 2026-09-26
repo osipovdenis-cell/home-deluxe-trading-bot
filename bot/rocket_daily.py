@@ -53,7 +53,7 @@ class DailyModel:
             return
         if not all(math.isfinite(event[k]) for k in ('at','stop','cost')) or event['stop']<=0 or event['cost']<0:
             raise ValueError('invalid decision')
-        s = dict(deepcopy(event), quote_version=2, leg=dict(status='WAIT', net=None))
+        s = dict(deepcopy(event), quote_version=3, quote_sampling_ms=100, leg=dict(status='WAIT', net=None))
         experiment = s.get('volume_experiment')
         if experiment:
             stamp = experiment.get('evaluated_at')
@@ -173,7 +173,7 @@ class DailyWorker:
                     degraded=False
                     db.executemany('INSERT OR REPLACE INTO health VALUES(?,?)',
                         [('last_tick',str(now)),('errors',str(errors)),('queued',str(len(pending))),
-                         ('quote_version','2'),('stream',json.dumps(self.stream.health()))])
+                         ('quote_version','3'),('stream',json.dumps(self.stream.health()))])
                     db.commit()
                 except Exception as error:
                     db.rollback()
@@ -304,5 +304,9 @@ def report_text(main, now):
     v2=[s for s in rejected if s.get('quote_version')==2]
     if v2:
         g=outcome(v2)
-        lines.insert(5, f"Новый сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
+        lines.insert(5, f"Предыдущий сбор котировок v2: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}; ещё наблюдаются {g['pending']}.")
+    v3 = [s for s in rejected if s.get('quote_version') == 3]
+    if v3:
+        g = outcome(v3)
+        lines.append(f"Сбор v3, реальные снимки 100 мс: отказов {g['count']}; закрыто плюс/минус {g['profitable']}/{g['losing']}; неполных {g['incomplete']}. Движения между снимками не восстанавливаются.")
     return '\n'.join(lines) + '\n\n' + structure.report_text(ep)

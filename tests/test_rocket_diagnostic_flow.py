@@ -35,7 +35,7 @@ class DiagnosticFlowTests(unittest.TestCase):
         p=self.stream.entry_probe('X',161.2)
         self.assertTrue(p['fresh']);self.assertTrue(p['recovery_windows']['complete'])
         self.assertIsNotNone(p['snapshot'])
-        self.assertEqual(p['feed_version'],2)
+        self.assertEqual(p['feed_version'],3)
         self.assertFalse(self.stream.entry_probe('X',164)['fresh'])
 
     def test_live_subscription_changes_preserve_existing_history(self):

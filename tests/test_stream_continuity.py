@@ -136,7 +136,7 @@ class WatchTests(unittest.TestCase):
 
 class ExchangeClockTests(unittest.TestCase):
     def test_backlogged_frames_do_not_become_fresh_on_arrival(self):
-        s = RocketQuoteStream(); s.set_symbols(['X', 'Y'])
+        s = RocketQuoteStream(); s.set_symbols(['X', 'Y']); s.require_clock = True
         self.assertTrue(s.timely_message({'data': {'E': 100000}}, 100.5))
         self.assertFalse(s.timely_message({'data': {'E': 101000}}, 110))
         self.assertFalse(s.timely_message({'data': {'s': 'X', 'b': '1'}}, 110.1))
@@ -149,15 +149,15 @@ class ExchangeClockTests(unittest.TestCase):
 class PartitionTests(unittest.TestCase):
     def test_symbol_changes_and_gaps_are_local_to_one_partition(self):
         from bot.sharded_market_stream import ShardedMarketStream
-        owner = RocketQuoteStream(); owner.set_symbols(['BTCUSDT','ETHUSDT'])
+        owner = RocketQuoteStream(); owner.set_symbols(['BNBUSDT','BTCUSDT','DOGEUSDT','ETHUSDT'])
         shards = owner._shards = ShardedMarketStream(owner)
         shards.set_symbols(owner._symbols)
         btc = shards.parts[shards.index('BTCUSDT')]
         eth = shards.parts[shards.index('ETHUSDT')]
         self.assertIsNot(btc,eth)
-        eth._stats['connected'] = True; eth._confirmed = {'ETHUSDT'}
-        owner.set_symbols(['BTCUSDT','ETHUSDT','ARBUSDT'])
-        self.assertEqual(eth._symbols, {'ETHUSDT'})
+        eth._stats['connected'] = True; eth._confirmed = {'ETHUSDT'}; eth._event_seen_at = __import__('time').time()
+        owner.set_symbols(['BNBUSDT','BTCUSDT','DOGEUSDT','ETHUSDT','ARBUSDT'])
+        self.assertEqual(eth._symbols, {'ETHUSDT','ARBUSDT'})
         self.assertTrue(owner.subscription_confirmed('ETHUSDT'))
         btc.interrupted(['BTCUSDT'], 100)
         self.assertEqual(owner.drain_quotes()[2], [(100,'BTCUSDT')])
@@ -178,6 +178,7 @@ class PartitionTests(unittest.TestCase):
         self.assertFalse(any(any('@aggTrade' in c for c in group) and any('@bookTicker' in c for c in group) for group in channels))
         for part in parts:
             part._stats['connected'] = True
+            part._event_seen_at = __import__('time').time()
             part._confirmed = {'BTCUSDT'}
         self.assertTrue(owner.subscription_confirmed('BTCUSDT'))
         parts[0]._confirmed.clear()
@@ -211,3 +212,90 @@ class SharedQueueGapTests(unittest.TestCase):
         queue.put('data', {'s':'X','b':'101','a':'102','u':2}, 101)
         queue.thread.start(); queue.close()
         self.assertEqual(s.drain_quotes()[0], [(101,'X',101.,102.)])
+
+
+class EventTimeTests(unittest.TestCase):
+    def test_delayed_trade_is_historical_not_a_fresh_buy_and_does_not_leak_backwards(self):
+        s = LeaderOrderFlowStream(); s.set_symbols(['X'])
+        for at in range(100,162):
+            s.ingest(dict(e='aggTrade',s='X',a=at,E=at*1000,p='1',q='2',m=False),at)
+            s.ingest(dict(s='X',b='1',a='1.01'),at)
+        before = s.snapshot('X',163)
+        s.ingest(dict(e='aggTrade',s='X',a=162,E=162000,p='1',q='999',m=False),168)
+        self.assertEqual(s.snapshot('X',163), before)
+        self.assertEqual(s.snapshot('X',168.1).buy_5s_usdt, 0)
+        self.assertFalse(s.entry_probe('X',168.1)['fresh'])
+        s.ingest(dict(e='aggTrade',s='X',a=163,E=169000,p='1',q='2',m=False),169)
+        s.ingest(dict(s='X',b='1',a='1.01'),169)
+        self.assertEqual(s.snapshot('X',169.1).buy_5s_usdt, 2)
+        self.assertTrue(s.entry_probe('X',169.1)['fresh'])
+        self.assertEqual(s.health()['gaps'], 0)
+
+    def test_delayed_transport_keeps_sequence_but_blocks_current_entry(self):
+        s = RocketQuoteStream(); s.set_symbols(['X'])
+        s._confirmed = {'X'}; s._stats['connected'] = True
+        self.assertTrue(s.timely_message({'e':'aggTrade','E':100000},104))
+        self.assertFalse(s.subscription_confirmed('X'))
+        self.assertEqual(s.drain_quotes()[2], [])
+        self.assertTrue(s.timely_message({'e':'aggTrade','E':105000},105.1))
+        self.assertTrue(s.subscription_confirmed('X'))
+
+    def test_structure_uses_exchange_time_and_availability_for_late_trades(self):
+        from bot.rocket_structure import StructureStream
+        s = StructureStream(); s.set_symbols(['X'])
+        s.ingest(dict(e='aggTrade',s='X',a=1,p='1',q='1',m=False),-1)
+        for second in range(300):
+            s.ingest(dict(s='X',u=second+1,b='100',a='101'),second+.1)
+            if second < 295:
+                s.ingest(dict(e='aggTrade',s='X',a=second+2,E=second*1000+200,p='1',q='2',m=False),second+.2)
+        before = s.snapshot('X',300.3)
+        self.assertEqual(before['state'],'KNOWN')
+        s.ingest(dict(e='aggTrade',s='X',a=297,E=295200,p='1',q='2',m=False),302.3)
+        self.assertEqual(s.snapshot('X',300.3),before)
+        for second in range(300,303):
+            s.ingest(dict(s='X',u=second+1,b='100',a='101'),second+.1)
+        current = s.snapshot('X',303)
+        self.assertEqual(current['state'],'KNOWN')
+        self.assertEqual(current['chart'][-1][5],0)
+        self.assertEqual(next(row for row in current['chart'] if row[0]==293)[5],6)
+
+    def test_quote_delay_marks_path_without_erasing_sequenced_flow(self):
+        owner = LeaderOrderFlowStream(); owner.set_symbols(['X'])
+        transport = OrderFlowTransport(owner)
+        trade(owner,100,1)
+        transport.delayed(['X'],101)
+        self.assertEqual(len(owner._trades['X']),1)
+        self.assertEqual(transport.drain_quotes()[2],[(101,'X')])
+        transport.interrupted(['X'],102)
+        self.assertEqual(len(owner._trades['X']),0)
+
+
+class CapacityTests(unittest.TestCase):
+    def test_groups_stay_bounded_and_existing_members_do_not_move(self):
+        from bot.sharded_market_stream import ShardedMarketStream
+        owner = RocketQuoteStream()
+        symbols = [f'S{i:03d}' for i in range(20)]
+        owner.set_symbols(symbols)
+        shards = owner._shards = ShardedMarketStream(owner)
+        shards.set_symbols(symbols)
+        before = dict(shards.assignments)
+        owner.set_symbols(symbols+['NEW'])
+        self.assertEqual({s:shards.assignments[s] for s in symbols},before)
+        self.assertTrue(all(len(p._symbols)<=3 for p in shards.parts))
+        self.assertEqual(set().union(*(p._symbols for p in shards.parts)),set(symbols+['NEW']))
+
+    def test_reconnect_attempts_respect_a_rolling_budget_and_shutdown(self):
+        from bot.connection_budget import ConnectionBudget
+        clock = [0.]
+        budget = ConnectionBudget(limit=2,seconds=10,clock=lambda:clock[0])
+        stop = Mock(); stop.is_set.return_value=False
+        def wait(delay):
+            clock[0] += delay
+            return False
+        stop.wait.side_effect=wait
+        for _ in range(5):
+            self.assertTrue(budget.acquire(stop))
+        self.assertEqual(clock[0],20)
+        self.assertLessEqual(len(budget.attempts),2)
+        stop.is_set.return_value=True
+        self.assertFalse(budget.acquire(stop))

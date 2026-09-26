@@ -15,8 +15,8 @@ class OrderFlowTransport(RocketQuoteStream):
     @staticmethod
     def streams(symbols):
         return [channel for s in sorted(symbols) for channel in
-                (s.lower()+'@aggTrade', s.lower()+'@bookTicker',
-                 s.lower()+'@depth5', s.lower()+'@depth@100ms')]
+                (s.lower()+'@aggTrade', s.lower()+'@depth5@100ms',
+                 s.lower()+'@depth@100ms')]
 
     def ingest(self, payload, received_at=None):
         at = time.time() if received_at is None else received_at

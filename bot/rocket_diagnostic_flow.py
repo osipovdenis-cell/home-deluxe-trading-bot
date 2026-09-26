@@ -24,8 +24,8 @@ class DiagnosticFlowStream(RocketQuoteStream):
     @staticmethod
     def streams(symbols):
         return [channel for s in sorted(symbols) for channel in
-                (s.lower()+'@aggTrade', s.lower()+'@bookTicker',
-                 s.lower()+'@depth5', s.lower()+'@depth@100ms')]
+                (s.lower()+'@aggTrade', s.lower()+'@depth5@100ms',
+                 s.lower()+'@depth@100ms')]
 
     def set_symbols(self, symbols):
         wanted=tuple(dict.fromkeys(str(s).upper() for s in symbols))[:self.max_symbols]
@@ -84,10 +84,14 @@ class DiagnosticFlowStream(RocketQuoteStream):
             probe=view.entry_probe(symbol,now)
             observed=view.snapshot(symbol,now)
             probe['observed_flow']=asdict(observed) if observed else None
-            probe['feed_version']=2
+            probe['feed_version']=3
             reasons=probe['freshness_reasons']
             if symbol not in self.flow._symbols:
                 reasons.append('нет подписки на монету')
+            if self._shards is not None and not self.subscription_confirmed(symbol):
+                reasons.append('поток ещё не догнал время биржи')
+                probe['fresh']=False
+                probe['snapshot']=None
             gap=self._last_gaps.get(symbol)
             if gap is not None and now-gap<60:
                 reasons.append('окно 60с после разрыва ещё не накоплено')

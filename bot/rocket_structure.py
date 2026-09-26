@@ -2,11 +2,12 @@
 import json
 import math
 import time
+from collections import deque
 from statistics import median
 
 from bot.rocket_quote_stream import RocketQuoteStream
 
-VERSION = 'rocket-structure-v1'
+VERSION = 'rocket-structure-v2-event-time'
 LOOKBACK = 300
 
 
@@ -69,6 +70,7 @@ class StructureStream(RocketQuoteStream):
         self.bars = {}
         self.first_trade = {}
         self.trade_ids = {}
+        self.trades = {}
 
     @staticmethod
     def streams(symbols):
@@ -77,7 +79,7 @@ class StructureStream(RocketQuoteStream):
     def set_symbols(self, symbols):
         super().set_symbols(symbols)
         with self._lock:
-            for cache in (self.bars, self.first_trade, self.trade_ids):
+            for cache in (self.bars, self.first_trade, self.trade_ids, self.trades):
                 for symbol in list(cache):
                     if symbol not in self._symbols:
                         del cache[symbol]
@@ -122,23 +124,33 @@ class StructureStream(RocketQuoteStream):
             if previous is not None and ident != previous+1:
                 self.bars.pop(symbol, None)
                 self.first_trade.pop(symbol, None)
+                self.trades.pop(symbol, None)
             self.trade_ids[symbol] = ident
             self.first_trade.setdefault(symbol, at)
-            self._bar(symbol, at)[6 if data['m'] else 5] += price*quantity
+            event_at = float(data.get('T', data.get('E', at*1000)))/1000
+            if not math.isfinite(event_at):
+                raise ValueError('invalid trade time')
+            trades = self.trades.setdefault(symbol, deque())
+            trades.append((event_at, at, price*quantity, data['m']))
+            while trades and trades[0][1] < at-610:
+                trades.popleft()
 
     def interrupted(self, symbols, at=None):
         symbols = tuple(symbols)
         super().interrupted(symbols, at)
         with self._lock:
             for symbol in symbols:
-                for cache in (self.bars, self.first_trade, self.trade_ids):
+                for cache in (self.bars, self.first_trade, self.trade_ids, self.trades):
                     cache.pop(symbol, None)
 
     def snapshot(self, symbol, at):
+        if self._shards is not None and not self.subscription_confirmed(symbol):
+            return unknown(at, 'поток ещё не догнал время биржи')
         end, start = int(at), int(at)-LOOKBACK
         with self._lock:
             rows = [list(r) for sec,r in self.bars.get(symbol, {}).items() if start <= sec < end]
             first_trade = self.first_trade.get(symbol)
+            trades = [r for r in self.trades.get(symbol, ()) if start <= r[0] < end and r[1] <= at]
         rows.sort(key=lambda r:r[0])
         quotes = [r for r in rows if r[1] is not None]
         if (first_trade is None or first_trade > start or not quotes
@@ -153,7 +165,8 @@ class StructureStream(RocketQuoteStream):
                 return unknown(at, 'разрыв цены')
             chart.append([low, prices[0][1], max(r[2] for r in prices),
                           min(r[3] for r in prices), prices[-1][4],
-                          sum(r[5] for r in part), sum(r[6] for r in part)])
+                          sum(r[2] for r in trades if low <= r[0] < low+5 and not r[3]),
+                          sum(r[2] for r in trades if low <= r[0] < low+5 and r[3])])
         return describe(chart, at)
 
 
@@ -178,5 +191,6 @@ def report_text(episodes):
                   for sign in (1,-1)]
         display = [f'{median(v):+.2f}% (n={len(v)})' if v else 'нет данных' for v in values]
         lines.append(f'{label}, медиана плюс/минус: {display[0]} / {display[1]}.')
+    lines.append('Bid/ask — реальные снимки стакана каждые 100 мс; движения между снимками не восстанавливаются. Сделки учитываются по времени биржи и доступности на момент решения.')
     lines.append('5 мин до решения; закрытые 5с-свечи bid + исполненные покупки/продажи. Без будущих свечей. Второй ряд — часть первого, не складывать. По 50 USDT с издержками, без глубины/лимита банка. Правила торговли не меняются.')
     return '\n'.join(lines)

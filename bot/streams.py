@@ -112,6 +112,9 @@ class LeaderOrderFlowStream:
             if symbol not in self._symbols:
                 return
             event = item.get("e")
+            event_at = float(item.get('T', item.get('E', now*1000)))/1000
+            if not math.isfinite(event_at):
+                raise ValueError('invalid market event time')
             if event == "aggTrade":
                 ident = item.get('a')
                 if ident is not None:
@@ -125,7 +128,7 @@ class LeaderOrderFlowStream:
                 price = float(item["p"])
                 notional = price * float(item["q"])
                 buyer_initiated = not bool(item.get("m"))
-                self._trades[symbol].append((now, price, notional, buyer_initiated))
+                self._trades[symbol].append((event_at, price, notional, buyer_initiated, now))
             elif event == "depthUpdate":
                 added = {"bid": 0.0, "ask": 0.0}
                 removed = {"bid": 0.0, "ask": 0.0}
@@ -146,7 +149,7 @@ class LeaderOrderFlowStream:
                         else:
                             levels.pop(price, None)
                 self._depth_changes[symbol].append((
-                    now, added["bid"], removed["bid"], added["ask"], removed["ask"]
+                    event_at, added["bid"], removed["bid"], added["ask"], removed["ask"], now
                 ))
             elif "b" in item and "a" in item:
                 bid = float(item["b"])
@@ -162,9 +165,9 @@ class LeaderOrderFlowStream:
         now = time.time() if now is None else now
         symbol = symbol.upper()
         with self._lock:
-            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now]
+            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now and (len(r) < 5 or r[4] <= now)]
             quotes = [r for r in self._quotes.get(symbol, ()) if r[0] <= now]
-            depth = [r for r in self._depth_changes.get(symbol, ()) if r[0] <= now]
+            depth = [r for r in self._depth_changes.get(symbol, ()) if r[0] <= now and (len(r) < 6 or r[5] <= now)]
         if not trades:
             return None
 
@@ -213,7 +216,7 @@ class LeaderOrderFlowStream:
     def entry_probe(self, symbol, now):
         """Read-only fresh windows for diagnostic comparison, no REST or trading."""
         with self._lock:
-            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now]
+            trades = [r for r in self._trades.get(symbol, ()) if r[0] <= now and (len(r) < 5 or r[4] <= now)]
             quotes = [r for r in self._quotes.get(symbol, ()) if r[0] <= now]
             gap = self._last_gaps.get(symbol)
             transport = self._transport
