@@ -1,0 +1,23 @@
+name: Rocket entry fix checks
+on:
+  push:
+    branches: [fix/rocket-fresh-entry-20260926]
+permissions:
+  contents: read
+jobs:
+  tests:
+    if: github.actor == 'osipovdenis-cell'
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install isolated test dependencies
+        run: |
+          python3 -m venv .venv-check
+          .venv-check/bin/python -m pip install -r requirements.txt
+      - name: Test isolated checkout
+        run: .venv-check/bin/python -m unittest discover -s tests -q
+      - name: Check public stream acknowledgements
+        run: .venv-check/bin/python ops/check-market-stream.py

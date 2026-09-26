@@ -1,9 +1,11 @@
 import json
 import sqlite3
 import unittest
+import threading
+import time
 from unittest.mock import Mock, patch
 
-from bot.rocket_quote_stream import RocketQuoteStream
+from bot.rocket_quote_stream import RocketQuoteStream, QuoteIngestQueue
 from bot.rocket_daily import DailyModel
 
 
@@ -173,3 +175,45 @@ class RocketQuoteTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in self.stream._stop.wait.call_args_list],[1,2])
         self.assertEqual(self.stream.health()['disconnect_reasons'],{'receive:ValueError':2})
         self.assertFalse(self.stream.health()['connected'])
+
+    def test_slow_ingest_does_not_delay_dynamic_subscription_ack(self):
+        entered, release = threading.Event(), threading.Event()
+        original = self.stream.ingest
+        def ingest(payload, at=None):
+            entered.set();release.wait(2)
+            original(payload,at)
+        self.stream.ingest=ingest
+        clock=[0];step=[0]
+        def recv(**kw):
+            step[0]+=1
+            if step[0]==1:
+                return json.dumps({'s':'X','b':'100','a':'101','u':1})
+            if step[0]==2:
+                self.assertTrue(entered.wait(1))
+                self.stream.set_symbols(['X','Y']);clock[0]=1
+                return json.dumps({'s':'X','b':'101','a':'102','u':2})
+            if step[0]==3:
+                return json.dumps({'id':1,'result':None})
+            self.assertEqual(self.stream.health()['subscription_replies'],1)
+            self.assertEqual(self.stream.health()['confirmed_symbols'],2)
+            release.set();self.stream._stop.is_set.return_value=True
+            return json.dumps({'s':'Y','b':'100','a':'101','u':1})
+        try:
+            self.run_socket(recv,clock)
+        finally:
+            release.set()
+        quotes,overflow,gaps=self.stream.drain_quotes()
+        self.assertEqual([q[2] for q in quotes],[100,101,100])
+        self.assertFalse(overflow)
+        self.assertEqual(self.stream.health()['reconnects'],0)
+
+    def test_ingest_overflow_marks_all_dropped_symbols_and_keeps_receive_times(self):
+        worker=QuoteIngestQueue(self.stream,capacity=2)
+        worker.put('data',{'s':'OLD','b':'1','a':'2','u':1},100)
+        worker.put('data',{'s':'X','b':'1','a':'2','u':1},101)
+        worker.put('data',{'s':'X','b':'3','a':'4','u':2},102)
+        worker.thread.start();worker.close()
+        quotes,_,gaps=self.stream.drain_quotes()
+        self.assertEqual(quotes,[(102,'X',3.,4.)])
+        self.assertEqual(set(gaps),{(100,'X'),(100,'OLD')})
+        self.assertEqual(worker.health()['ingest_overflows'],1)

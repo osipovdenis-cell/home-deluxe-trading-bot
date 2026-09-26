@@ -11,6 +11,7 @@ from bot.rocket_volume_shadow import capture as capture_volume_shadow
 from bot.rocket_timing_shadow import TimingWorker, report_text as timing_report
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_signal_worker import RocketSignalWorker
+from bot.probability_worker import ProbabilityTrainingWorker
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.ai import AIAnalyst, AIError, AIUnavailable
 from bot.audit import AuditLog, detect_pumps
@@ -68,6 +69,8 @@ def build_report_snapshot(settings, prices, now, exit_healthy):
         bundle['runtime'] = dict(paper_trading_enabled=settings.paper_trading_enabled,
                                  stop_loss_percent=settings.paper_stop_loss_percent,
                                  round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
+        from bot.rocket_entry_variants import EXECUTION_POLICY
+        bundle['runtime']['rocket_entry_policy'] = EXECUTION_POLICY
         return bundle
     finally:
         export_audit.close()
@@ -212,22 +215,25 @@ def process_signal(
 
 
 def handle_ready_rocket(job, audit, trader, telegram, ai, chat_id, settings, flow):
-    started, clock = time.time(), time.perf_counter()
+    started = time.time()
+    stages = {}
     context = None
     try:
-        context = job.market.fetch_signal_context(job.signal.symbol)
+        context = timed_entry_call({'stages': stages}, 'контекст рынка',
+                                   job.market.fetch_signal_context, job.signal.symbol)
         context = job.market.with_order_flow(context, flow.snapshot(job.signal.symbol, time.time()))
     except (httpx.HTTPError, ValueError) as error:
         audit.record_error('Ready rocket context: ' + type(error).__name__, job.at)
     if job.confirmation is not None:
-        audit.record_confirmation_event(job.confirmation, context,
+        timed_entry_call({'stages': stages}, 'запись подтверждения',
+            audit.record_confirmation_event, job.confirmation, context,
             job.market.entry_dynamics(job.signal.symbol, job.at),
             scalp_now=time.time(), scalp_cost=settings.estimated_round_trip_cost_percent)
     if job.market._entry_cancelled():
         return False
     return process_signal(job.signal, job.prices, job.at, job.market, audit, trader,
                           ai, telegram, chat_id, settings, context, processing_started=started,
-                          initial_stages={'контекст и запись подтверждения':time.perf_counter()-clock})
+                          initial_stages=stages)
 
 
 def _process_signal(
@@ -825,6 +831,7 @@ def main() -> None:
     timing_worker = None
     daily_worker = None
     signal_worker = None
+    probability_worker = None
     try:
         # Start protection before slow account checks, market history and AI checks.
         position_stream = PositionBookTickerStream(settings.paper_max_open_positions)
@@ -878,7 +885,7 @@ def main() -> None:
                 worker_trader = make_paper_trader(settings) if trader is not None else None
                 if worker_trader is not None:
                     worker_trader.exit_monitor_healthy = position_worker.healthy
-                client = httpx.Client(base_url=settings.market_data_base_url, timeout=15)
+                client = httpx.Client(base_url=settings.market_data_base_url, timeout=2)
                 return worker_audit, worker_trader, client
             except Exception:
                 worker_audit.close()
@@ -889,6 +896,8 @@ def main() -> None:
             lambda job, worker_audit, worker_trader, notices: handle_ready_rocket(
                 job, worker_audit, worker_trader, notices, ai, chat_id, settings, order_flow_stream))
         signal_worker.start()
+        probability_worker = ProbabilityTrainingWorker(lambda: AuditLog(settings.audit_db_path))
+        probability_worker.start()
         scalp_stream = ScalpQuoteStream()
         audit.scalp_shadow.expire(time.time())
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
@@ -950,6 +959,8 @@ def main() -> None:
             "CVD, ускорение и эффективность покупок сохраняются в обучение.\n"
             "Вероятностная модель: теневой прогноз по прошлым исходам; "
             "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
+            "Финальный фильтр ракет В: рост за 5/15/60с, покупки за 5с выше продаж, "
+            "спред не шире снимка анализа. При отказе — короткое ожидание без нового AI/20с.\n"
             "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
             "повторный вход ищется после отката и нового ускорения; AI оценивает, "
             "но после рыночных фильтров не блокирует тестовый вход.\n"
@@ -974,6 +985,8 @@ def main() -> None:
             now = time.time()
             try:
                 report_worker.set_prices(prices)
+                while not probability_worker.errors.empty():
+                    audit.record_error(probability_worker.errors.get(), now)
                 while not signal_worker.errors.empty():
                     audit.record_error(signal_worker.errors.get(), now)
                 while not signal_worker.messages.empty():
@@ -1195,6 +1208,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if probability_worker:
+            probability_worker.close()
         if signal_worker:
             signal_worker.close()
         if daily_worker:

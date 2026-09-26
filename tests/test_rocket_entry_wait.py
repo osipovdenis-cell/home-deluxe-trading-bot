@@ -20,15 +20,15 @@ class ShortWaitTests(unittest.TestCase):
         self.worker.prepare(self.trader)
         with patch('bot.rocket_entry_wait.time.time',return_value=100):
             self.worker.submit(PumpSignal('R',100,3,300,'лидер'),None,None,80,80)
-        self.good=dict(fresh=True,allowed=True,changes={'5':.1,'10':.1},
-                       before_context={'flow_buy_5s_usdt':10},
-                       after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10})
+        self.good=dict(fresh=True,allowed=True,changes={'5':.1,'10':.1,'15':.1,'60':.1},
+                       before_context={'flow_buy_5s_usdt':10,'spread_bps':10},
+                       after_flow={'buy_5s_usdt':20,'sell_5s_usdt':10,'spread_bps':10})
 
     def fading_probe(self):
         # Observed EPIC case: small 5s uptick despite fading buys and a 10s decline.
-        return dict(self.good, before_context={'flow_buy_5s_usdt':6205.55853},
-                    after_flow={'buy_5s_usdt':91.41469,'sell_5s_usdt':85.31244},
-                    changes={'5':.0849076629,'10':-.0212044105})
+        return dict(self.good, before_context={'flow_buy_5s_usdt':6205.55853,'spread_bps':10},
+                    after_flow={'buy_5s_usdt':91.41469,'sell_5s_usdt':85.31244,'spread_bps':10},
+                    changes={'5':.0849076629,'10':-.0212044105,'15':.1,'60':.1})
 
     def test_fading_buys_defer_then_recover_without_resetting_wait(self):
         weak = self.fading_probe()
@@ -38,7 +38,7 @@ class ShortWaitTests(unittest.TestCase):
         self.assertEqual(self.worker._pending['R'].queued_at, 100)
         self.assertIn('ослабление покупок', self.worker._last_block['R'])
         # Lower volume alone is not a veto once the 10s decline has stopped.
-        recovered = dict(weak, changes={'5':.1,'10':0.0})
+        recovered = dict(weak, changes={'5':.1,'10':0.0,'15':.1,'60':.1})
         self.assertEqual(self.tick([recovered,recovered], 102), 1)
         self.assertEqual(self.trader.open_symbols(), ('R',))
         self.assertEqual(self.worker.symbols(), ())
@@ -98,6 +98,15 @@ class ShortWaitTests(unittest.TestCase):
         self.tick([self.good,dict(fresh=False)])
         self.assertEqual(self.trader.open_symbols(),())
         self.assertEqual(self.worker.symbols(),('R',))
+
+    def test_widening_spread_during_quote_waits_and_can_recover_without_ai(self):
+        bad={**self.good,'after_flow':{**self.good['after_flow'],'spread_bps':11}}
+        self.assertEqual(self.tick([self.good,bad]),1)
+        self.assertEqual(self.trader.open_symbols(),())
+        self.assertEqual(self.worker._pending['R'].queued_at,100)
+        self.assertEqual(self.tick([self.good,self.good],102),1)
+        self.assertEqual(self.trader.open_symbols(),('R',))
+        self.assertEqual(self.worker.symbols(),())
 
     def test_expiry_does_not_buy(self):
         self.assertEqual(self.tick([],190),0)

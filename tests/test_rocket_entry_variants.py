@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from bot.rocket_entry_variants import evaluate, report_data, report_text, VERSION
+from bot.rocket_entry_variants import evaluate, report_data, report_text, VERSION, EXECUTION_POLICY
 from bot.rocket_cards import entry_probe
 from bot.market import EntryDynamics, SignalMarketContext
 
@@ -71,11 +71,20 @@ class RocketEntryVariantsTests(unittest.TestCase):
         self.assertEqual(result['variants']['C']['missed_profit_usdt'],.5)
         self.assertEqual(result['variants']['A']['top_profit_symbol'],'X')
         self.assertEqual(result['calculation_p50_ms'],2.5)
-        self.assertIn('3/50',report_text(db))
+        self.assertIn('Архив: 3 общих',report_text(db))
         for ident in range(6,53):
             add(ident,'X',.1,50,dict(A=True,B=True,C=True,D=True))
         self.assertTrue(report_data(db)['review_ready'])
         self.assertEqual(list(db.execute('SELECT * FROM paper_positions WHERE id<=5')),before)
+        db.execute('INSERT INTO paper_positions VALUES(?,?,?,?,?,?,?)',
+                   (100,'LIVE','CLOSED',1000,2,50,'лидер'))
+        db.execute('INSERT INTO rocket_entry_probes VALUES(?,?)',(100,json.dumps(
+            {'entry_policy':EXECUTION_POLICY,'entry_variants':evaluate(probe())})))
+        result=report_data(db)
+        self.assertEqual(result['paired_closed'],50)
+        self.assertEqual(result['live_entries'],1)
+        self.assertEqual(result['live_closed'],1)
+        self.assertEqual(result['live_pnl_usdt'],2)
 
     def test_probe_measures_whole_calculation_without_rest_and_records_new_version(self):
         @dataclass

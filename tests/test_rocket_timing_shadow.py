@@ -12,8 +12,8 @@ from bot.rocket_timing_shadow import (TimingModel, TimingFlowStream, report_data
 
 def probe(now, bid=100, ask=100.01, growing=True, fresh=True):
     return dict(at=now,fresh=fresh,allowed=True,growth_12h=True,
-        before_context={'flow_buy_5s_usdt':10},after_flow={'buy_5s_usdt':20,'sell_5s_usdt':5},
-        changes={'5':.1,'10':.1},
+        before_context={'flow_buy_5s_usdt':10,'spread_bps':10},after_flow={'buy_5s_usdt':20,'sell_5s_usdt':5,'spread_bps':10},
+        changes={'5':.1,'10':.1,'15':.1,'60':.1},
         recovery_windows=dict(complete=True,quote_at=now,bid=bid,ask=ask,bid_5s=bid-.01,
             windows=[dict(buy=10 if growing else 30,sell=5),dict(buy=20,sell=5)]))
 

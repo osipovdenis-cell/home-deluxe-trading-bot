@@ -103,7 +103,8 @@ class SignalWorkerTests(unittest.TestCase):
         self.assertEqual(process.call_args.args[2],100)
         self.assertEqual(process.call_args.args[-1],context)
         self.assertGreaterEqual(process.call_args.kwargs['processing_started'],100)
-        self.assertIn('контекст и запись подтверждения',process.call_args.kwargs['initial_stages'])
+        self.assertIn('контекст рынка',process.call_args.kwargs['initial_stages'])
+        self.assertIn('запись подтверждения',process.call_args.kwargs['initial_stages'])
 
     def test_two_admission_connections_cannot_overbook_or_duplicate_position(self):
         with tempfile.TemporaryDirectory() as folder:

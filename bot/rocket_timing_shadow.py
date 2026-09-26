@@ -15,7 +15,7 @@ from bot.rocket_entry_guard import fading_buy_guard
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_recovery_shadow import new_leg, advance
 
-VERSION = 'rocket-timing-v3'
+VERSION = 'rocket-timing-v4-entry-C'
 SUFFIX = '.rocket_timing.sqlite3'
 WAIT, HORIZON = 90, 3600
 
