@@ -11,8 +11,7 @@ import time
 from collections import deque
 from urllib.parse import quote
 
-from websockets.sync.client import connect
-from bot.streams import BINANCE_STREAM_BASE_URL
+from bot.async_market_socket import connect
 
 
 class QuoteIngestQueue:
@@ -106,7 +105,7 @@ class RocketQuoteStream:
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v6', subscription_reconciliations=0,
+                           version='rocket-quotes-v7-async', subscription_reconciliations=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
