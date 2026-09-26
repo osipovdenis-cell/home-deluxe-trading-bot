@@ -94,13 +94,16 @@ class RocketQuoteStream:
         self._thread = None
         self._symbols = set()
         self._updates = {}
+        self._confirmed = set()
+        self._last_data_received = None
         self._quotes = deque(maxlen=100000)
         self._gaps = deque(maxlen=10000)
         self._overflow = False
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v5', subscription_reconciliations=0,
+                           version='rocket-quotes-v6', subscription_reconciliations=0,
+                           control_timeouts=0, unmatched_replies=0, wrapped_replies=0,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
                            confirmed_symbols=0, pending_subscription_requests=0, started_at=time.time(),
                            last_disconnect_at=None, last_error_type=None,
@@ -143,7 +146,22 @@ class RocketQuoteStream:
             return request_id
         if any(p['method']=='LIST_SUBSCRIPTIONS' for p in pending.values()):
             if any(p['method']=='LIST_SUBSCRIPTIONS' for p in expired):
-                raise TimeoutError('subscription reconciliation missing')
+                # An unresponsive control plane doesn't erase already confirmed,
+                # continuously arriving data. Keep that history; new subscriptions
+                # remain unconfirmed and cannot authorize a trading entry.
+                if not subscribed or self._last_data_received is None or now-self._last_data_received > 2:
+                    raise TimeoutError('subscription reconciliation missing')
+                uncertain = set().union(*(p['symbols'] for p in pending.values())) - subscribed
+                self.queue_interruption(uncertain)
+                for ident in [i for i,p in pending.items() if p['method']=='LIST_SUBSCRIPTIONS']:
+                    pending.pop(ident)
+                request_id += 1
+                ws.send(json.dumps(dict(method='LIST_SUBSCRIPTIONS', id=request_id)))
+                pending[request_id] = dict(sent=now, method='LIST_SUBSCRIPTIONS', symbols=set())
+                with self._lock:
+                    self._stats['control_timeouts'] += 1
+                    self._stats['subscription_reconciliations'] += 1
+                return request_id
             return request_id
         # An ACK can be lost while quotes keep flowing. Verify server state once;
         # do not tear down every healthy subscription just to repeat the request.
@@ -155,8 +173,13 @@ class RocketQuoteStream:
         return request_id
 
     def subscription_reply(self, message, subscribed, pending):
-        request = pending.get(message.get('id'))
+        ident = message.get('id')
+        if isinstance(ident, str) and ident.isdecimal():
+            ident = int(ident)
+        request = pending.get(ident)
         if request is None:
+            with self._lock:
+                self._stats['unmatched_replies'] += 1
             return subscribed  # Late reply after an authoritative reconciliation.
         with self._lock:
             self._stats['subscription_replies'] += 1
@@ -178,10 +201,25 @@ class RocketQuoteStream:
             return confirmed
         if message.get('result','error') is not None:
             raise ValueError('subscription rejected')
-        pending.pop(message['id'])
+        pending.pop(ident)
         if request['method']=='SUBSCRIBE':
             return subscribed | request['symbols']
         return subscribed - request['symbols']
+
+    def subscription_confirmed(self, symbol):
+        with self._lock:
+            return self._stats['connected'] and symbol in self._confirmed
+
+    def control_message(self, message):
+        # Some combined-stream gateways wrap control replies in data, too.
+        if any(k in message for k in ('id', 'result', 'code')):
+            return message
+        inner = message.get('data')
+        if isinstance(inner, dict) and any(k in inner for k in ('id', 'result', 'code')):
+            with self._lock:
+                self._stats['wrapped_replies'] += 1
+            return inner
+        return None
 
     def ingest(self, payload, received_at=None):
         now = time.time() if received_at is None else received_at
@@ -301,8 +339,10 @@ class RocketQuoteStream:
                              close_timeout=2, ping_interval=None, max_queue=256,
                              compression=None) as ws:
                     connected_at = last_received = time.monotonic()
+                    self._last_data_received = None
                     with self._lock:
                         self._stats['connected'] = True
+                        self._confirmed = set(subscribed)
                     last_sync = -math.inf
                     while not self._stop.is_set():
                         now = time.monotonic()
@@ -323,15 +363,20 @@ class RocketQuoteStream:
                                 raise TimeoutError('market stream idle')
                             continue
                         last_received = time.monotonic()
-                        if 'id' in message:
+                        control = self.control_message(message)
+                        if control is not None:
                             phase = 'subscription_ack'
-                            subscribed = self.subscription_reply(message, subscribed, pending)
+                            if 'code' in control:
+                                raise ValueError('subscription rejected')
+                            subscribed = self.subscription_reply(control, subscribed, pending)
                         else:
+                            self._last_data_received = last_received
                             phase = 'ingest'
                             self._ingest_worker.put('data', message, time.time())
                         phase = 'subscription_ack'
                         request_id = self.reconcile_timeout(ws, subscribed, request_id, pending, last_received)
                         with self._lock:
+                            self._confirmed = set(subscribed)
                             self._stats.update(confirmed_symbols=len(subscribed),
                                                pending_subscription_requests=len(pending))
             except Exception as error:
@@ -342,6 +387,7 @@ class RocketQuoteStream:
                 self.queue_interruption(affected)
                 with self._lock:
                     self._stats['connected'] = False
+                    self._confirmed.clear()
             if connected_at is not None and time.monotonic() - connected_at >= 60:
                 delay = 1
             if self._stop.wait(delay):
