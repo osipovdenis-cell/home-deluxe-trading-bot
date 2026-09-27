@@ -1,0 +1,70 @@
+name: Encrypted restart diagnosis
+on:
+  push:
+    branches: [diagnose/restarts-20260927]
+permissions:
+  contents: read
+concurrency:
+  group: home-deluxe-restart-diagnosis
+  cancel-in-progress: false
+jobs:
+  diagnosis:
+    if: github.repository == 'osipovdenis-cell/home-deluxe-trading-bot' && github.actor == 'osipovdenis-cell'
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Collect read-only diagnostics and encrypt locally
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, subprocess, time
+          commands = {
+              'service': ['systemctl', 'show', 'home-deluxe-trading-bot.service', '--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts,ActiveEnterTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp,MainPID,MemoryCurrent,MemoryPeak,MemoryMax,MemoryHigh,TasksCurrent,TasksMax,CPUUsageNSec,ControlGroup,OOMPolicy,Restart,RestartUSec'],
+              'memory': ['free', '-b'],
+              'uptime': ['uptime', '-s'],
+              'disk': ['df', '-h', '/'],
+              'service_journal': ['journalctl', '-u', 'home-deluxe-trading-bot.service', '--since', '2026-09-27 08:00:00 UTC', '--no-pager', '-n', '3000'],
+              'kernel': ['journalctl', '-k', '--since', '2026-09-27 08:00:00 UTC', '--no-pager', '-n', '500'],
+              'boot_history': ['journalctl', '--list-boots', '--no-pager', '-n', '5'],
+              'process_memory': ['ps', '-eo', 'pid,ppid,comm,rss,vsz,etimes', '--sort=-rss'],
+              'installed_diagnosis': ['sudo', '-n', '/usr/local/sbin/diagnose-home-deluxe-bot'],
+          }
+          bundle = {'generated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'generated_at_unix': time.time(), 'diagnostics': {}}
+          for name, command in commands.items():
+              try:
+                  proc = subprocess.run(command, capture_output=True, timeout=240 if name == 'installed_diagnosis' else 30)
+                  out = proc.stdout.decode('utf-8', errors='replace')
+                  err = proc.stderr.decode('utf-8', errors='replace')
+                  if name == 'process_memory':
+                      out = '\n'.join(out.splitlines()[:25])
+                  bundle['diagnostics'][name] = {'returncode': proc.returncode, 'stdout': out[-1500000:], 'stderr': err[-10000:]}
+              except subprocess.TimeoutExpired:
+                  bundle['diagnostics'][name] = {'error': 'timeout'}
+          service_text = bundle['diagnostics'].get('service', {}).get('stdout', '')
+          properties = dict(line.split('=', 1) for line in service_text.splitlines() if '=' in line)
+          cgroup = properties.get('ControlGroup', '')
+          if cgroup.startswith('/system.slice/') and '..' not in cgroup:
+              for name in ['memory.events', 'memory.events.local', 'memory.current', 'memory.peak', 'memory.max', 'memory.high', 'memory.swap.current']:
+                  p = pathlib.Path('/sys/fs/cgroup') / cgroup.lstrip('/') / name
+                  try:
+                      bundle['diagnostics']['cgroup_' + name] = p.read_text()[:10000]
+                  except OSError as exc:
+                      bundle['diagnostics']['cgroup_' + name] = {'error': type(exc).__name__}
+          bundle['collection_completed_at_unix'] = time.time()
+          encrypted = subprocess.run(['openssl', 'cms', '-encrypt', '-binary', '-aes-256-gcm', '-outform', 'DER', '-recip', 'ops/report-reader-cert.pem', '-keyopt', 'rsa_padding_mode:oaep'], input=json.dumps(bundle, ensure_ascii=False).encode(), capture_output=True, timeout=30)
+          if encrypted.returncode:
+              raise SystemExit('Encryption failed; no diagnostics published')
+          pathlib.Path('restart-diagnosis.p7m').write_bytes(encrypted.stdout)
+          os.chmod('restart-diagnosis.p7m', 0o600)
+          print('Read-only diagnostics collected; ciphertext ready.')
+          PY
+      - name: Upload ciphertext only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: restart-diagnosis.p7m
+          retention-days: 3
+          if-no-files-found: error
