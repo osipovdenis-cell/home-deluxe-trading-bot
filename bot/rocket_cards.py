@@ -382,9 +382,13 @@ class RocketPathWorker:
                         except Empty: break
                         pending_acks.append((position_id,minutes,now))
                     db.executemany('INSERT OR REPLACE INTO rocket_card_deliveries VALUES(?,?,?)',pending_acks)
-                    recovery.tick(now)
                     db.commit()
                     pending_probes.clear(); pending_acks.clear()
+                    # Recovery may fetch market context. Release the recorder's
+                    # transaction first, and do not discard acknowledged probes
+                    # if that independent analysis fails.
+                    recovery.tick(now)
+                    db.commit()
                     if now-last_cards>=60:
                         for card in cards(db,now,100):
                             db.execute('INSERT OR REPLACE INTO rocket_trade_cards VALUES(?,?,?)',(card['position_id'],now,json.dumps(card)))

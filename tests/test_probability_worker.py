@@ -53,7 +53,7 @@ class ProbabilityWorkerTests(unittest.TestCase):
             def refresh(now):
                 self.assertEqual(threading.get_ident(),owner[0])
                 entered.set();release.wait(2)
-            return SimpleNamespace(refresh_probability_model=refresh,close=closed.set,connection=Mock())
+            return SimpleNamespace(refresh_probability_model=refresh,scalp_shadow=Mock(),close=closed.set,connection=Mock())
         worker=ProbabilityTrainingWorker(factory)
         self.addCleanup(worker.close);self.addCleanup(release.set)
         worker.start();self.assertTrue(entered.wait(1))

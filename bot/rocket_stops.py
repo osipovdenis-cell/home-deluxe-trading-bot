@@ -3,6 +3,7 @@ import json
 import math
 
 from bot.reporting import utc_stamp
+from bot.sqlite_safety import write_batches
 
 
 STOPS = (0.5, 1.0, 1.5, 2.0)
@@ -129,6 +130,7 @@ class RocketStopAudit:
             "AND opened_at<=? ORDER BY opened_at,id", (now,),
         ).fetchall()
         complete, pending, incomplete = [], 0, 0
+        updates = []
         version = f"{VERSION}:{minutes}m"
         for row in rows:
             if row["closed_at"] is None or now < row["closed_at"] + minutes * 60:
@@ -150,15 +152,12 @@ class RocketStopAudit:
             if case is None:
                 case = self._evaluate(row, now, minutes)
                 if case is not None:
-                    self.db.execute(
-                        "INSERT OR REPLACE INTO rocket_stop_replays VALUES(?,?,?,?,?)",
-                        (version, row["id"], now, "DONE", json.dumps(case)),
-                    )
+                    updates.append((version, row["id"], now, "DONE", json.dumps(case)))
             if case is not None:
                 complete.append(case)
             else:
                 incomplete += 1
-        self.db.commit()
+        write_batches(self.db, "INSERT OR REPLACE INTO rocket_stop_replays VALUES(?,?,?,?,?)", updates)
         return complete, pending, incomplete
 
     def report_texts(self, now):
