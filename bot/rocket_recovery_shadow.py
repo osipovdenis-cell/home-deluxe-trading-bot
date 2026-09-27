@@ -100,6 +100,7 @@ class RecoveryShadow:
 
     def tick(self,now):
         rows=self.db.execute('SELECT position_id,payload FROM rocket_recovery_pairs WHERE version=? AND finished IS NULL',(VERSION,)).fetchall()
+        updates=[]
         for ident,payload in rows:
             s=json.loads(payload)
             b,end=s['B'],s['start']+HORIZON
@@ -149,8 +150,9 @@ class RecoveryShadow:
                         (s['symbol'],leg['last_at'],min(now,end))).fetchall()
                     advance(leg,points,now,end,s['stop'],s['cost'])
             done=now>=end or all(s[k]['status'] in ('CLOSED','NO_ENTRY','INCOMPLETE') for k in ('A','B'))
-            self.db.execute('UPDATE rocket_recovery_pairs SET finished=?,payload=? WHERE position_id=?',
-                            (now if done else None,json.dumps(s),ident))
+            updates.append((now if done else None,json.dumps(s),ident))
+        # All provider/network work above must finish before acquiring a writer.
+        self.db.executemany('UPDATE rocket_recovery_pairs SET finished=?,payload=? WHERE position_id=?',updates)
 
 
 def report_data(db):

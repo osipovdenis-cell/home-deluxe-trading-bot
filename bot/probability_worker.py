@@ -22,6 +22,7 @@ class ProbabilityTrainingWorker:
             while not self._stop.is_set():
                 try:
                     audit.refresh_probability_model(time.time())
+                    audit.scalp_shadow.refresh_probability_model(time.time())
                 except Exception as error:
                     audit.connection.rollback()
                     self.errors.put('Фоновое обучение: ' + type(error).__name__)

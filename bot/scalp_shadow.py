@@ -9,7 +9,7 @@ import math
 from collections import deque
 import time
 
-from bot.probability import train_probability_model
+from bot.probability import ProbabilityModel, train_probability_model
 from bot.streams import PositionBookTickerStream
 from bot.reporting import ModelJournal
 
@@ -120,6 +120,7 @@ class ScalpShadow:
         if now - state["snapshot_at"] > self.MAX_GAP:
             state["reason"] = "decision delayed; features stale"
             self._save(row[0], state, "INCOMPLETE", now)
+            self.db.commit()
             return
         state["ready"] = max(now, state["ready"])
         if allowed is not None:
@@ -129,6 +130,7 @@ class ScalpShadow:
         if reason is not None:
             state["reason"] = reason
         self._save(row[0], state)
+        self.db.commit()
 
     def _save(self, key, state, status="ACTIVE", finished=None):
         self.db.execute("UPDATE scalp_shadow SET state=?,status=?,finished=? WHERE id=?",
@@ -219,6 +221,22 @@ class ScalpShadow:
                       key=lambda row: row[2]["ready"])
 
     def predict(self, now, features):
+        # Quote batches can already own a write transaction. Never fit a model
+        # here: only consume a version published by the training worker.
+        row = self.db.execute(
+            'SELECT id,trained_at,parameters FROM probability_versions '
+            'WHERE kind=? AND trained_at<=? ORDER BY trained_at DESC,rowid DESC LIMIT 1',
+            ('scalp-v1', now),
+        ).fetchone()
+        if not row:
+            return None
+        if row[0] != self.model_id:
+            self.model_id, self.cache_at = row[0], row[1]
+            self.cache = ProbabilityModel(**json.loads(row[2]))
+        return self.cache.predict_percent(features)
+
+    def refresh_probability_model(self, now):
+        # The owning background connection has no quote/decision writes.
         if now - self.cache_at >= 300:
             rows = self.samples(now)
             self.cache = train_probability_model([
@@ -229,7 +247,7 @@ class ScalpShadow:
                 'scalp-v1', now, self.cache, sum(s['label'] for _,_,s,_ in rows)/len(rows)
             ) if self.cache else None)
             self.cache_at = now
-        return self.cache.predict_percent(features) if self.cache else None
+        return self.cache
 
     def learning_status(self, now):
         self.predict(now, {})

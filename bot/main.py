@@ -31,6 +31,7 @@ from bot.reporting import rocket_totals, scalp_totals
 from bot.execution import PositionExitWorker, fresh_entry
 from bot.report_export import ReportExportWorker, collect_reports
 from bot.rocket_cards import RocketPathWorker, entry_probe, cards, format_card, shadow_summary
+from bot.sqlite_safety import recover_busy
 
 
 def make_paper_trader(settings):
@@ -915,6 +916,7 @@ def main() -> None:
         probability_worker.start()
         scalp_stream = ScalpQuoteStream()
         audit.scalp_shadow.expire(time.time())
+        audit.connection.commit()
         scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
         scalp_stream.start()
         report_worker = ReportExportWorker(
@@ -1217,8 +1219,16 @@ def main() -> None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
                     telegram.send(chat_id, audit.scalp_shadow.report(now))
                 time.sleep(0.1)
+            except sqlite3.OperationalError as error:
+                recover_busy(error, audit.connection, trader.connection if trader else None)
+                # Resume with fresh market data; never replay this iteration or
+                # an already committed purchase. Independent exits stay alive.
+                time.sleep(.2)
             except httpx.HTTPError as error:
-                audit.record_error(str(error))
+                try:
+                    audit.record_error(str(error))
+                except sqlite3.OperationalError as database_error:
+                    recover_busy(database_error, audit.connection, trader.connection if trader else None)
                 print(f"Временная ошибка внешнего API: {error}", flush=True)
                 time.sleep(1)
     except KeyboardInterrupt:

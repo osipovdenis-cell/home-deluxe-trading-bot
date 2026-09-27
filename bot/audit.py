@@ -12,6 +12,7 @@ from bot.rocket_comparison import RocketComparison
 from bot.rocket_spread_shadow import SpreadShadow
 from bot.scalp_shadow import ScalpShadow
 from bot.reporting import ModelJournal, period_label
+from bot.sqlite_safety import write_batches
 
 
 @dataclass(frozen=True)
@@ -1200,7 +1201,7 @@ class AuditLog:
             "AND started_at <= ? ORDER BY id",
             (now - horizon_seconds,),
         ).fetchall()
-        updated = 0
+        updates = []
         for event_id, started_at, resolved_at, symbol, trigger, resolved, accepted in rows:
             points = self.connection.execute(
                 "SELECT timestamp,price FROM confirmation_samples WHERE symbol=? "
@@ -1222,26 +1223,28 @@ class AuditLog:
                 delayed = self._path_outcome(
                     delayed_prices, float(resolved), target_percent, stop_percent
                 )
-            self.connection.execute(
+            updates.append(
+                (now, int(immediate[0]), int(immediate[1]), immediate[2], immediate[3],
+                 None if delayed[0] is None else int(delayed[0]),
+                 None if delayed[1] is None else int(delayed[1]),
+                 delayed[2], delayed[3], event_id)
+            )
+        write_batches(self.connection,
                 "UPDATE confirmation_events SET evaluated_at=?,"
                 "immediate_success=?,immediate_stopped_first=?,"
                 "immediate_max_return_percent=?,immediate_min_return_percent=?,"
                 "delayed_success=?,delayed_stopped_first=?,"
                 "delayed_max_return_percent=?,delayed_min_return_percent=? "
-                "WHERE id=?",
-                (now, int(immediate[0]), int(immediate[1]), immediate[2], immediate[3],
-                 None if delayed[0] is None else int(delayed[0]),
-                 None if delayed[1] is None else int(delayed[1]),
-                 delayed[2], delayed[3], event_id),
-            )
-            updated += 1
-        if updated:
-            self.connection.execute(
-                "DELETE FROM confirmation_samples WHERE timestamp < ?",
-                (now - 172800,),
-            )
-            self.connection.commit()
-        return updated
+                "WHERE id=?", updates)
+        if updates:
+            with self.connection:
+                # Bounded retention cleanup cannot monopolize the live writer.
+                self.connection.execute(
+                    "DELETE FROM confirmation_samples WHERE rowid IN "
+                    "(SELECT rowid FROM confirmation_samples WHERE timestamp < ? LIMIT 1000)",
+                    (now - 172800,),
+                )
+        return len(updates)
 
     def build_confirmation_audit(self, now: float, lookback_seconds: int = 86400) -> ConfirmationAudit:
         rows = self.connection.execute(
@@ -1384,7 +1387,7 @@ class AuditLog:
             "WHERE timestamp <= ?",
             (now - 15 * 60,),
         ).fetchall()
-        inserted = 0
+        updates = []
         for signal_id, timestamp, symbol, entry_price in rows:
             current_price = prices.get(str(symbol))
             if current_price is None:
@@ -1402,24 +1405,19 @@ class AuditLog:
                     continue
                 gross_return = (current_price / float(entry_price) - 1) * 100
                 net_return = gross_return - estimated_round_trip_cost_percent
-                self.connection.execute(
-                    "INSERT INTO signal_outcomes("
-                    "signal_id, horizon_minutes, measured_at, exit_price, "
-                    "gross_return_percent, net_return_percent"
-                    ") VALUES(?, ?, ?, ?, ?, ?)",
-                    (
+                updates.append((
                         signal_id,
                         minutes,
                         now,
                         current_price,
                         gross_return,
                         net_return,
-                    ),
-                )
-                inserted += 1
-        if inserted:
-            self.connection.commit()
-        return inserted
+                    ))
+        write_batches(self.connection,
+            "INSERT OR IGNORE INTO signal_outcomes("
+            "signal_id,horizon_minutes,measured_at,exit_price,gross_return_percent,net_return_percent) "
+            "VALUES(?,?,?,?,?,?)", updates)
+        return len(updates)
 
     def refresh_learning_examples(
         self,
@@ -1442,7 +1440,7 @@ class AuditLog:
             "AND s.timestamp <= ? ORDER BY s.timestamp",
             (now - horizon_seconds,),
         ).fetchall()
-        inserted = 0
+        updates = []
         for row in rows:
             signal_id = int(row[0])
             event_at = float(row[1])
@@ -1469,7 +1467,12 @@ class AuditLog:
                 if first_hit and change >= second_target_percent:
                     second_hit = True
                     break
-            self.connection.execute(
+            updates.append((
+                    signal_id, now, event_at, symbol, int(first_hit),
+                    int(second_hit), max(changes), min(changes), float(row[4]),
+                    row[5], row[6], row[7], row[8], row[9], row[10], row[11],
+                ))
+        write_batches(self.connection,
                 "INSERT OR IGNORE INTO learning_examples("
                 "signal_id, matured_at, signal_timestamp, symbol, "
                 "success_before_stop, reached_second_target, "
@@ -1477,17 +1480,8 @@ class AuditLog:
                 "setup_change_percent, volume_ratio_5m, "
                 "taker_buy_ratio_percent, order_book_imbalance_percent, "
                 "change_60s_percent, pullback_from_high_percent, ai_score, "
-                "ai_decision) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    signal_id, now, event_at, symbol, int(first_hit),
-                    int(second_hit), max(changes), min(changes), float(row[4]),
-                    row[5], row[6], row[7], row[8], row[9], row[10], row[11],
-                ),
-            )
-            inserted += 1
-        if inserted:
-            self.connection.commit()
-        return inserted
+                "ai_decision) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", updates)
+        return len(updates)
 
     @staticmethod
     def _similar_learning_example(row: tuple, current: dict) -> bool:
