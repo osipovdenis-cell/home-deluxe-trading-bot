@@ -1,0 +1,17 @@
+name: Bot liveness only
+on:
+  push:
+    branches: [diagnose/liveness-20260927]
+permissions:
+  contents: read
+jobs:
+  liveness:
+    if: github.repository == 'osipovdenis-cell/home-deluxe-trading-bot' && github.actor == 'osipovdenis-cell'
+    runs-on: [self-hosted, home-deluxe-bot]
+    timeout-minutes: 1
+    steps:
+      - name: Check service state and automatic restart counter only
+        shell: bash
+        run: |
+          systemctl is-active --quiet home-deluxe-trading-bot.service
+          systemctl show home-deluxe-trading-bot.service --property=ActiveState,SubState,NRestarts,ExecMainStartTimestamp
