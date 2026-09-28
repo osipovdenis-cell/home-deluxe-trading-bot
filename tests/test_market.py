@@ -31,6 +31,23 @@ from bot.market import EntryDynamics, MarketMonitor, SignalMarketContext
 
 
 class MarketMonitorTests(unittest.TestCase):
+    def test_rockets_only_skips_scalping_but_keeps_leader_confirmation(self):
+        monitor = MarketMonitor('https://api.binance.com', ('AAAUSDT',),
+                                300, 3, 1800, early_threshold_percent=.5,
+                                scalp_enabled=False)
+        try:
+            for at in range(0, 301, 15):
+                self.assertEqual(monitor.update({'AAAUSDT': 100 if at < 300 else 100.6}, now=at), [])
+            self.assertEqual(monitor.pending_candidates, {})
+            self.assertEqual(monitor.drain_confirmation_events(), [])
+            monitor.market_stats['AAAUSDT'] = (2_000_000, 10)
+            monitor.update({'AAAUSDT':100.7}, now=305)
+            signals = monitor.update({'AAAUSDT':100.9}, now=326)
+            self.assertEqual(len(signals), 1)
+            self.assertIn('лидер', signals[0].kind)
+        finally:
+            monitor.close()
+
     def test_leader_quality_requires_effective_order_flow(self) -> None:
         monitor = MarketMonitor(
             "https://api.binance.com", ("LEADERUSDT",), 300, 3, 1800

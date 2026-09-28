@@ -2,12 +2,13 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from bot.audit import AuditLog
 from bot.rocket_recovery_shadow import RecoveryShadow, VERSION
-from bot.sqlite_safety import recover_busy, write_batches
+from bot.sqlite_safety import recover_busy, write_batches, retry_initialization
 from bot.trading import PaperTrader
 
 
@@ -28,6 +29,76 @@ class ContentionTests(unittest.TestCase):
         # A second real SQLite connection models the exit/quote writer.
         with self.other:
             self.other.execute('INSERT INTO competing_writer VALUES(1)')
+
+    def test_scalp_batch_releases_writer_before_next_batch(self):
+        from bot.scalp_shadow import ScalpShadow
+        model = ScalpShadow(self.db)
+        calls = []
+        def quote(*args):
+            if len(calls) % 100 == 0:
+                self.competing_write()
+            self.db.execute('INSERT INTO competing_writer VALUES(2)')
+            calls.append(args)
+        with patch.object(model, 'quote', side_effect=quote):
+            model.process_quotes([(1, 'X', 100, 101)] * 205, 1)
+        self.assertEqual(len(calls), 205)
+        self.assertFalse(self.db.in_transaction)
+        self.assertEqual(self.other.execute('SELECT count(*) FROM competing_writer WHERE value=1').fetchone()[0], 3)
+
+    def test_retention_preserves_recent_rows_and_bounds_each_symbol(self):
+        from bot.rocket_cards import schema, prune_bid_paths
+        schema(self.db)
+        self.db.executemany('INSERT INTO rocket_bid_path VALUES(?,?,?)',
+            [(s,t,100) for s in ('X','Y') for t in range(12)])
+        self.db.commit()
+        prune_bid_paths(self.db, 10, batch_size=3)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM rocket_bid_path').fetchone()[0], 18)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM rocket_bid_path WHERE timestamp>=10').fetchone()[0], 4)
+        self.competing_write()
+
+    def test_initialization_retries_real_lock_and_closes_failed_connections(self):
+        ready = threading.Event()
+        release = threading.Event()
+        def hold_writer():
+            with sqlite3.connect(self.path) as db:
+                db.execute('INSERT INTO competing_writer VALUES(7)')
+                ready.set()
+                release.wait(2)
+        thread = threading.Thread(target=hold_writer)
+        thread.start()
+        self.assertTrue(ready.wait(1))
+        attempts = []
+        class Resource:
+            @retry_initialization
+            def __init__(resource, path):
+                resource.connection = sqlite3.connect(path, timeout=.001)
+                attempts.append(resource.connection)
+                resource.connection.execute('INSERT INTO competing_writer VALUES(8)')
+                resource.connection.commit()
+        def unblock(_):
+            release.set()
+            thread.join(2)
+        try:
+            with patch('bot.sqlite_safety.time.sleep', side_effect=unblock), patch('builtins.print'):
+                resource = Resource(self.path)
+            self.addCleanup(resource.connection.close)
+            self.assertEqual(len(attempts), 2)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                attempts[0].execute('SELECT 1')
+            self.assertEqual(self.other.execute('SELECT count(*) FROM competing_writer WHERE value=8').fetchone()[0], 1)
+        finally:
+            release.set(); thread.join(2)
+
+    def test_initialization_does_not_retry_non_lock_errors(self):
+        class Resource:
+            @retry_initialization
+            def __init__(resource):
+                resource.connection = sqlite3.connect(':memory:')
+                resource.connection.execute('SELECT * FROM missing')
+        with patch('bot.sqlite_safety.time.sleep') as sleep:
+            with self.assertRaises(sqlite3.OperationalError):
+                Resource()
+            sleep.assert_not_called()
 
     def test_report_replay_does_not_lock_writer_during_next_case_calculation(self):
         for symbol in ('X', 'Y'):

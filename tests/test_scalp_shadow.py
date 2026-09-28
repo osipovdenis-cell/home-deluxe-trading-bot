@@ -9,6 +9,22 @@ from bot.probability import train_probability_model
 
 
 class ScalpShadowTests(unittest.TestCase):
+    def test_stop_archives_active_observations_without_outcome(self):
+        audit = AuditLog(':memory:')
+        try:
+            audit.scalp_shadow.candidate('TEST', 'скальпинг', 100, {}, True, .2)
+            audit.scalp_shadow.stop(101)
+            audit.scalp_shadow.stop(102)
+            status, finished, raw = audit.connection.execute(
+                'SELECT status,finished,state FROM scalp_shadow').fetchone()
+            self.assertEqual((status, finished), ('INCOMPLETE', 101))
+            state = json.loads(raw)
+            self.assertIsNone(state['label'])
+            self.assertEqual(state['reason'], 'scalping disabled by user')
+            self.assertEqual(audit.scalp_shadow.active_symbols(), ())
+        finally:
+            audit.close()
+
     def test_monitor_events_reach_scalp_audit_without_manual_kind(self):
         from bot.market import MarketMonitor
         # Exercise the production producer -> audit -> shadow chain. Hand-made
