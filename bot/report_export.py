@@ -160,7 +160,8 @@ def write_encrypted_report(bundle, path=REPORT_PATH, certificate=CERT_PATH):
 
 class ReportExportWorker:
     """Independent DB connections in the factory keep reporting off the trading loop."""
-    def __init__(self, collect, path=REPORT_PATH, interval=900, retry_interval=60):
+    def __init__(self, collect, path=REPORT_PATH, interval=900, retry_interval=60, on_export=None):
+        self.on_export = on_export
         self.collect = collect
         self.path = path
         self.interval = interval
@@ -186,6 +187,10 @@ class ReportExportWorker:
                     prices = dict(self._prices)
                 bundle = self.collect(prices, time.time())
                 write_encrypted_report(bundle, self.path)
+                if self.on_export is not None:
+                    until_due = self.on_export(bundle)
+                    if until_due is not None:
+                        delay = min(delay, max(1, until_due))
             except Exception as error:
                 # Exceptions may contain SQL/data; only the type may reach public diagnostics.
                 print('Encrypted report export failed: ' + type(error).__name__, flush=True)
