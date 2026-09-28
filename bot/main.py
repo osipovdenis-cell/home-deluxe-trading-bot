@@ -29,6 +29,7 @@ from bot.audit import SymbolBehavior
 from bot.reporting import rocket_totals
 from bot.execution import PositionExitWorker, fresh_entry
 from bot.report_export import ReportExportWorker, collect_reports
+from bot.report_digest import DigestSender
 from bot.rocket_cards import RocketPathWorker, entry_probe, cards, format_card, shadow_summary
 from bot.sqlite_safety import recover_busy
 
@@ -65,6 +66,22 @@ def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None)
             export_trader = make_paper_trader(settings)
         bundle = collect_reports(export_audit, export_trader, prices, now,
                                  handle_observer_commands, exit_healthy)
+        bundle['digest_extra_reports'] = [
+            export_audit.observer_report_text(now, now - 43200) or '',
+            export_audit.build_signal_performance(now).telegram_text(),
+        ]
+        if export_trader is not None:
+            bank = export_trader.summary(prices, now)
+            counts = export_trader.connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(realized_pnl_usdt>0),0),"
+                "COALESCE(SUM(realized_pnl_usdt<0),0),COALESCE(SUM(realized_pnl_usdt),0) "
+                "FROM paper_positions WHERE status='CLOSED' AND closed_at>=? AND closed_at<?",
+                (now-43200, now)).fetchone()
+            bundle['notification_summary'] = dict(closed=counts[0], wins=counts[1],
+                losses=counts[2], pnl=counts[3], equity=bank.equity_usdt)
+            intelligence = export_trader.build_intelligence(now)
+            bundle['digest_extra_reports'] += [intelligence.telegram_text(),
+                *intelligence.trade_breakdown_texts()]
         bundle['runtime'] = dict(paper_trading_enabled=settings.paper_trading_enabled,
                                  stop_loss_percent=settings.paper_stop_loss_percent,
                                  round_trip_cost_percent=settings.estimated_round_trip_cost_percent)
@@ -74,6 +91,7 @@ def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None)
         bundle['runtime']['rocket_signal_policy'] = SIGNAL_POLICY
         bundle['runtime']['market_regime_shadow'] = 'rocket-market-regime-v1'
         bundle['runtime']['prewarm_policy'] = 'leaders-prewarm-v1-cap20'
+        bundle['runtime']['telegram_reports'] = 'single-document-12h-v1'
         bundle['runtime']['leader_flow'] = flow_health() if callable(flow_health) else flow_health
         try:
             import subprocess
@@ -688,71 +706,6 @@ def _process_signal(
     return notice is not None
 
 
-def send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id):
-    if trader is not None and trader.report_due(now):
-        bank = trader.summary(prices, now)
-        intelligence = trader.build_intelligence(now)
-        ai_text = ""
-        if ai is not None and intelligence.closed_positions:
-            try:
-                result = ai.analyze_performance({
-                    "report_type": "paper_trading",
-                    "bank": {"starting_balance_usdt": bank.starting_balance_usdt,
-                             "current_equity_usdt": bank.equity_usdt},
-                    "trade_intelligence": intelligence.as_dict(),
-                })
-                ai_text = (f"\n\n🤖 ИИ-вывод по сделкам\nОценка: {result.score}/100 "
-                           f"({result.verdict}).\nВывод: {result.reason}\nРиск: {result.risk}")
-            except (httpx.HTTPError, AIError) as error:
-                if not isinstance(error, AIUnavailable) or error.attempted:
-                    audit.record_error(f"OpenAI trading audit: {error}", now)
-            finally:
-                audit.record_ai_health(ai.health())
-        telegram.send(chat_id, bank.telegram_text() + "\n\n" + intelligence.telegram_text() + ai_text)
-        for details_text in intelligence.trade_breakdown_texts():
-            telegram.send(chat_id, details_text)
-        trader.finish_report(prices, now)
-    if not audit.report_due(now):
-        return
-    started = audit.period_started_at()
-    symbols = tuple(sorted(market.symbols))
-    events = {}
-    for symbol in symbols:
-        candles = market.fetch_minute_candles(
-            symbol, started - settings.pump_window_seconds, now
-        )
-        detected = detect_pumps(
-            candles, settings.pump_window_seconds,
-            settings.pump_threshold_percent, settings.alert_cooldown_seconds,
-        )
-        events[symbol] = [event for event in detected if event >= started]
-    summary = audit.build_summary(
-        now, symbols, events, settings.poll_interval_seconds,
-        settings.pump_threshold_percent,
-    )
-    performance = audit.build_signal_performance(now)
-    learning = audit.build_learning_report(now)
-    confirmation = audit.build_confirmation_audit(now)
-    ai_text = ""
-    if ai is not None and performance.signal_count:
-        try:
-            result = ai.analyze_performance(performance.as_dict())
-            ai_text = (f"\n\n🤖 ИИ-вывод по статистике\nОценка: {result.score}/100 "
-                       f"({result.verdict}).\nВывод: {result.reason}\nРиск: {result.risk}")
-        except (httpx.HTTPError, AIError) as error:
-            if not isinstance(error, AIUnavailable) or error.attempted:
-                audit.record_error(f"OpenAI daily audit: {error}", now)
-        finally:
-            audit.record_ai_health(ai.health())
-    telegram.send(
-        chat_id,
-        summary.telegram_text() + "\n\n" + performance.telegram_text()
-        + "\n\n" + learning.telegram_text()
-        + "\n\n" + confirmation.telegram_text() + ai_text,
-    )
-    audit.finish_period(now)
-
-
 def handle_observer_commands(commands, now, prices, audit, trader, telegram, chat_id):
     for command in commands:
         if command == "/status":
@@ -911,12 +864,37 @@ def main() -> None:
         probability_worker = ProbabilityTrainingWorker(lambda: AuditLog(settings.audit_db_path))
         probability_worker.start()
         audit.scalp_shadow.stop(time.time())
+        def send_digest(caption, document):
+            # A separate HTTP client belongs to the export thread.
+            client = TelegramClient(settings.telegram_bot_token)
+            try:
+                client.send_document(chat_id, 'Home_Deluxe_Report.txt', document, caption)
+            finally:
+                client.close()
+
+        def finish_digest(bundle):
+            # Preserve report-period bookkeeping and existing history cleanup.
+            report_audit = AuditLog(settings.audit_db_path)
+            try:
+                stamp = bundle['generated_at_unix']
+                report_audit.finish_period(stamp)
+                summary = bundle.get('notification_summary')
+                if summary is not None:
+                    report_audit.connection.execute(
+                        'UPDATE paper_account SET report_started_at=?, report_start_equity_usdt=? WHERE id=1',
+                        (stamp, summary['equity']))
+                    report_audit.connection.commit()
+            finally:
+                report_audit.close()
+
+        digest_sender = DigestSender(settings.audit_db_path, send_digest, on_sent=finish_digest)
         report_worker = ReportExportWorker(
             lambda snapshot_prices, snapshot_now: build_report_snapshot(
                 settings, snapshot_prices, snapshot_now,
                 position_worker.healthy() if position_worker else None,
                 order_flow_stream.health,
-            )
+            ),
+            on_export=digest_sender,
         )
         report_worker.set_prices(prices)
         report_worker.start()
@@ -974,7 +952,7 @@ def main() -> None:
             "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
             "повторный вход ищется после отката и нового ускорения; AI оценивает, "
             "но после рыночных фильтров не блокирует тестовый вход.\n"
-            f"Наблюдатель: каждые {settings.observer_report_interval_seconds // 3600} ч; "
+            "Единый отчёт: каждые 12 ч, одним файлом; "
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций: обычный "
@@ -987,10 +965,9 @@ def main() -> None:
             + f"ИИ-аналитик: {ai_status}.\nСуточный аудит: включён.",
         )
         print(f"Потоки рынка запущены. TELEGRAM_CHAT_ID={chat_id}", flush=True)
-        last_market = last_audit = last_fallback = last_report = 0.0
+        last_market = last_audit = last_fallback = 0.0
         last_12h_refresh = time.time()
         last_command_poll = time.time()
-        last_observer = time.time()
         while True:
             now = time.time()
             try:
@@ -1143,47 +1120,6 @@ def main() -> None:
                 if now - last_12h_refresh >= 300:
                     market.refresh_12h_changes(prices, now)
                     last_12h_refresh = now
-                if now - last_report >= 1:
-                    send_due_reports(now, prices, settings, market, audit, trader, ai, telegram, chat_id)
-                    last_report = now
-                if now - last_observer >= settings.observer_report_interval_seconds:
-                    send_overall_reports(now, prices, audit, trader, telegram, chat_id)
-                    observer_text = audit.observer_report_text(
-                        now, last_observer
-                    )
-                    if observer_text:
-                        rocket_text = (
-                            "\n\n" + trader.rocket_report_text(
-                                prices, now, last_observer
-                            )
-                            + "\n\n" + trader.post_stop_report_text(
-                                now, last_observer
-                            ) if trader is not None else ""
-                        )
-                        telegram.send(
-                            chat_id,
-                            observer_text + "\n\n"
-                            + audit.build_learning_report(now).telegram_text()
-                            + "\n\n"
-                            + audit.build_confirmation_audit(now).telegram_text()
-                            + "\n\n"
-                            + audit.leader_funnel_report_text(
-                                now, last_observer
-                            )
-                            + "\n\n" + audit.order_flow_report_text(now)
-                            + "\n\n" + audit.leader_path_report_text(
-                                now, now - last_observer
-                            )
-                            + rocket_text,
-                        )
-                    last_observer = now
-                    telegram.send(chat_id, audit.rocket_comparison.report())
-                    telegram.send(chat_id, audit.rocket_spread.report(now))
-                    telegram.send(chat_id, timing_report(audit.connection))
-                    telegram.send(chat_id, daily_report(audit.connection, now))
-                    telegram.send(chat_id, volume_report_text(audit.connection, now))
-                    if trader is not None:
-                        telegram.send(chat_id, shadow_summary(trader.connection))
                 time.sleep(0.1)
             except sqlite3.OperationalError as error:
                 recover_busy(error, audit.connection, trader.connection if trader else None)

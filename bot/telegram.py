@@ -60,5 +60,16 @@ class TelegramClient:
             )
             response.raise_for_status()
 
+    def send_document(self, chat_id, filename, content, caption):
+        # A document and its caption are one Telegram message, not a text batch.
+        response = self.client.post(
+            '/sendDocument', data={'chat_id': chat_id, 'caption': caption},
+            files={'document': (filename, content, 'text/plain; charset=utf-8')},
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        if response.json().get('ok') is not True:
+            raise RuntimeError('Telegram document was not accepted')
+
     def close(self) -> None:
         self.client.close()
