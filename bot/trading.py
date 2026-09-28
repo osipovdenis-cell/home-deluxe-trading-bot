@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import json
-from bot.exit_policy import new_policy, policy_for
+from bot.exit_policy import new_policy, policy_for, protective_floor
 import sqlite3
 import threading
 
@@ -637,13 +637,14 @@ class PaperTrader:
                         "SELECT * FROM paper_positions WHERE id=?", (row["id"],)
                     ).fetchone()
                 if int(row["take_1_done"]):
-                    protection = max(policy["protect_percent"], highest_change - policy["trail_pp"])
+                    floor = protective_floor(policy, highest_change)
+                    protection = max(floor, highest_change - policy["trail_pp"])
                     if change + 1e-9 < highest_change and change <= protection + 1e-9:
                         notices.append(
                             self._sell(
                                 row, float(row["remaining_quantity"]), price, now,
                                 f"ракета: откат {policy['trail_pp']:g} п.п. от максимума "
-                                f"{highest_change:+.2f}%; защита +{policy['protect_percent']:g}%, "
+                                f"{highest_change:+.2f}%; защита +{floor:g}%, "
                                 f"уровень выхода {protection:+.2f}%",
                             )
                         )

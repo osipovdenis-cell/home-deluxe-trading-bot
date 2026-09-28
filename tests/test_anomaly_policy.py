@@ -80,3 +80,41 @@ class AnomalyPolicyTests(unittest.TestCase):
         result=cards(db,10*86400,limit=1)
         self.assertEqual(len(result),2)
         self.assertEqual(next(c for c in result if c['symbol']=='A')['path_summary']['count'],1)
+
+
+class LeaderStepTests(unittest.TestCase):
+    def test_second_floor_survives_restart_and_trail_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=str(Path(directory)/'db')
+            t=trader(path)
+            t.open_on_signal('L',100,'лидер',80,0)
+            self.assertEqual(t.update_positions({'L':101},1),[])
+            self.assertEqual(t.update_positions({'L':102},2),[])
+            self.assertEqual(t.update_positions({'L':102.5},3),[])
+            t.close()
+            t=trader(path);self.addCleanup(t.close)
+            notices=t.update_positions({'L':102},4)
+            self.assertEqual(len(notices),1)
+            self.assertIn('защита +2%',notices[0].reason)
+            t.open_on_signal('NEXT',100,'лидер',80,5)
+            self.assertEqual(t.update_positions({'NEXT':104},6),[])
+            self.assertEqual(t.update_positions({'NEXT':103.1},7),[])
+            self.assertEqual(len(t.update_positions({'NEXT':103},8)),1)
+
+    def test_legacy_and_anomaly_unchanged_and_step_policy_exported(self):
+        t=trader();self.addCleanup(t.close);db=t.connection;schema(db)
+        t.open_on_signal('L',100,'лидер',80,0)
+        row=db.execute('SELECT * FROM paper_positions').fetchone()
+        card=build_card(db,row,1)
+        self.assertEqual(card['exit_policy']['protect_steps'],[1.,2.])
+        self.assertIn('Ступени защиты',format_card(card))
+        self.assertEqual(t.stop_audit.collect(5000),([],0,0))
+        t.update_positions({'L':101.5},1)
+        self.assertEqual(len(t.update_positions({'L':101},2)),1)
+        t.open_on_signal('OLD',100,'лидер',80,3)
+        db.execute("UPDATE paper_positions SET exit_policy_json=NULL WHERE symbol='OLD'")
+        t.update_positions({'OLD':102.5},4)
+        self.assertEqual(t.update_positions({'OLD':102},5),[])
+        t.open_on_signal('A',100,'аномальный лидер',80,6)
+        t.update_positions({'A':102},7)
+        self.assertEqual(t.update_positions({'A':101},8),[])

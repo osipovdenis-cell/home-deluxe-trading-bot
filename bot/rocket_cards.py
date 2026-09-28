@@ -8,7 +8,7 @@ from pathlib import Path
 from queue import SimpleQueue, Empty
 from dataclasses import asdict, replace
 
-from bot.exit_policy import policy_for, ANOMALY_VERSION
+from bot.exit_policy import policy_for, ANOMALY_VERSION, LEADER_STEPS_VERSION
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.rocket_quote_stream import RocketQuoteStream
@@ -135,7 +135,7 @@ def window_result(points, entry, exit_at, exit_price, minutes, now, cost):
 
 
 def build_card(db, row, now):
-    if policy_for(row)['version']==ANOMALY_VERSION:
+    if policy_for(row)['version'] in (ANOMALY_VERSION, LEADER_STEPS_VERSION):
         from bot.anomaly_path import build_anomaly_card
         return build_anomaly_card(db,row,now)
     row = dict(row)
@@ -217,6 +217,8 @@ def format_card(card):
     policy=card.get('exit_policy')
     if policy:
         lines.append(f"Условия этой позиции: стоп −{policy['stop_percent']:g}%, защита +{policy['protect_percent']:g}%, откат {policy['trail_pp']:g} п.п.")
+    if policy and policy.get('protect_steps'):
+        lines.append('Ступени защиты: достигнут +1% → защищаем +1%; достигнут +2% → защищаем +2%.')
     path=card.get('path_summary',{})
     if path.get('count'):
         quality='наблюдаемый путь' if path['status']=='complete_observed' else 'НЕПОЛНЫЙ путь'

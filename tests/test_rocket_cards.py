@@ -21,6 +21,9 @@ class RocketCardsTests(unittest.TestCase):
         self.db=self.trader.connection
         schema(self.db)
         self.trader.open_on_signal('R',100,'лидер',80,0)
+        # This fixture exercises the legacy +1% exit contract.
+        self.trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+        self.trader.connection.commit()
         self.trader.update_positions({'R':99.4},10)
         self.row=self.db.execute('SELECT * FROM paper_positions').fetchone()
 
@@ -77,6 +80,9 @@ class RocketCardsTests(unittest.TestCase):
         self.db.execute('CREATE TABLE samples(symbol TEXT,timestamp REAL,price REAL)')
         self.db.executemany('INSERT INTO samples VALUES(?,?,?)',[('R',t,100) for t in range(1,3611)])
         self.trader.open_on_signal('R',102,'лидер',80,100)
+        # This fixture exercises the legacy +1% exit contract.
+        self.trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+        self.trader.connection.commit()
         result=cards(self.db,3610)
         self.assertEqual([c['position_id'] for c in result],[2,1])
         self.assertEqual(result[0]['status'],'open')
@@ -125,6 +131,9 @@ class RocketCardsTests(unittest.TestCase):
             path=str(Path(folder)/'test.db')
             live=trader(path)
             live.open_on_signal('R',100,'лидер',80,time.time())
+            # This fixture exercises the legacy +1% exit contract.
+            live.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+            live.connection.commit()
             stream=LocalStream(128)
             worker=RocketPathWorker(path,stream)
             worker.start()
