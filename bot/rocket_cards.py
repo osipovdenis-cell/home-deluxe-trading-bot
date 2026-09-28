@@ -8,6 +8,7 @@ from pathlib import Path
 from queue import SimpleQueue, Empty
 from dataclasses import asdict, replace
 
+from bot.exit_policy import policy_for, ANOMALY_VERSION
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.rocket_quote_stream import RocketQuoteStream
@@ -51,10 +52,14 @@ def prune_bid_paths(db, cutoff, batch_size=1000):
     """
     symbols = [r[0] for r in db.execute('SELECT DISTINCT symbol FROM rocket_bid_path')]
     for symbol in symbols:
+        keep_from=cutoff
+        if exists(db,'paper_positions'):
+            active=db.execute("SELECT MIN(opened_at) FROM paper_positions WHERE symbol=? AND signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=?)",(symbol,cutoff)).fetchone()[0]
+            if active is not None:keep_from=min(keep_from,float(active))
         with db:
             db.execute('DELETE FROM rocket_bid_path WHERE rowid IN '
                        '(SELECT rowid FROM rocket_bid_path WHERE symbol=? AND timestamp<? LIMIT ?)',
-                       (symbol, cutoff, batch_size))
+                       (symbol, keep_from, batch_size))
 
 
 def entry_probe(market, signal, context, dynamics, started, probe_provider=None):
@@ -130,6 +135,9 @@ def window_result(points, entry, exit_at, exit_price, minutes, now, cost):
 
 
 def build_card(db, row, now):
+    if policy_for(row)['version']==ANOMALY_VERSION:
+        from bot.anomaly_path import build_anomaly_card
+        return build_anomaly_card(db,row,now)
     row = dict(row)
     entry, opened, closed = row['entry_price'], row['opened_at'], row['closed_at']
     card = dict(position_id=row['id'], symbol=row['symbol'], opened_at=opened,
@@ -206,6 +214,13 @@ def build_card(db, row, now):
 def format_card(card):
     lines=[f"📍 Ракета {card['symbol']} · сделка #{card['position_id']}",
            f"Вход: {utc_stamp(card['opened_at'])}, цена {card['entry_price']:g}."]
+    policy=card.get('exit_policy')
+    if policy:
+        lines.append(f"Условия этой позиции: стоп −{policy['stop_percent']:g}%, защита +{policy['protect_percent']:g}%, откат {policy['trail_pp']:g} п.п.")
+    path=card.get('path_summary',{})
+    if path.get('count'):
+        quality='наблюдаемый путь' if path['status']=='complete_observed' else 'НЕПОЛНЫЙ путь'
+        lines.append(f"От покупки ({quality}): минимум {path['low_from_entry_pct']:+.2f}%, максимум {path['high_from_entry_pct']:+.2f}%; котировок {path['count']}. Поминутный путь сохранён в данных отчёта.")
     if card['closed_at'] is None:
         return '\n'.join(lines+['Позиция ещё открыта.'])
     if 'exit_price' not in card:
@@ -226,7 +241,7 @@ def format_card(card):
                      f"через {result['minutes_to_low']:.1f} мин; максимум {result['high_from_entry']:+.2f}% от входа; "
                      f"отскок после дна {result['rebound_from_low']:+.2f}%; в конце {result['end_from_entry']:+.2f}%. "
                      f"Возврат к входу: {return_text}.")
-    for minutes in ('20','60'):
+    for minutes in (() if policy else ('20','60')):
         legs=card['comparisons'].get(minutes)
         if legs:
             lines.append(f"Стопы от момента покупки до выхода + {minutes} мин; по 50 USDT:")
@@ -247,7 +262,7 @@ def cards(db, now, limit=20):
     if not exists(db,'paper_positions'):
         return []
     result=[]
-    cursor=db.execute("SELECT * FROM paper_positions WHERE signal_kind LIKE '%лидер%' ORDER BY id DESC LIMIT ?",(limit,))
+    cursor=db.execute("SELECT * FROM paper_positions WHERE signal_kind LIKE '%лидер%' AND (status='OPEN' OR closed_at>=? OR id IN (SELECT id FROM paper_positions WHERE signal_kind LIKE '%лидер%' ORDER BY id DESC LIMIT ?)) ORDER BY id DESC",(now-3600,limit))
     names=[c[0] for c in cursor.description]
     for values in cursor.fetchall():
         row=dict(zip(names,values))

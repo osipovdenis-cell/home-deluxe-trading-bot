@@ -48,7 +48,7 @@ class PaperTraderTests(unittest.TestCase):
                 from bot.rocket_cards import schema
                 schema(trader.connection)
                 trader.open_on_signal(
-                    "STOPUSDT", 100, "аномальный лидер", 20, 0,
+                    "STOPUSDT", 100, "лидер", 20, 0,
                     bypass_min_score=True,
                 )
                 trader.update_positions({"STOPUSDT": 99.5}, 10)
@@ -98,7 +98,7 @@ class PaperTraderTests(unittest.TestCase):
             trader = make_trader(str(Path(directory) / "trades.db"))
             try:
                 opened = trader.open_on_signal(
-                    "ROCKETUSDT", 100, "аномальный лидер", 20, 0,
+                    "ROCKETUSDT", 100, "лидер", 20, 0,
                     bypass_min_score=True,
                 )
                 self.assertIsNotNone(opened)

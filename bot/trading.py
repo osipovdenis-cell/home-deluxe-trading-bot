@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
+import json
+from bot.exit_policy import new_policy, policy_for
 import sqlite3
 import threading
 
@@ -333,6 +335,8 @@ class PaperTrader:
         }
         position_columns = {str(row[1]) for row in self.connection.execute(
             'PRAGMA table_info(paper_positions)')}
+        if 'exit_policy_json' not in position_columns:
+            self.connection.execute('ALTER TABLE paper_positions ADD COLUMN exit_policy_json TEXT')
         if 'signal_timestamp' not in position_columns:
             self.connection.execute('ALTER TABLE paper_positions ADD COLUMN signal_timestamp REAL')
         if "report_started_at" not in account_columns:
@@ -427,8 +431,8 @@ class PaperTrader:
         cursor = self.connection.execute(
             "INSERT INTO paper_positions("
             "opened_at, symbol, entry_price, highest_price, initial_quantity, "
-            "remaining_quantity, position_usdt, ai_score, signal_kind"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "remaining_quantity, position_usdt, ai_score, signal_kind, exit_policy_json"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 now,
                 symbol,
@@ -439,6 +443,7 @@ class PaperTrader:
                 trade_usdt,
                 ai_score,
                 signal_kind,
+                json.dumps(new_policy(signal_kind, self.stop_loss_percent, self.round_trip_cost_percent)),
             ),
         )
         self.connection.execute(
@@ -606,7 +611,8 @@ class PaperTrader:
                 ).fetchone()
             change = (price / float(row["entry_price"]) - 1) * 100
             is_rocket = "лидер" in str(row["signal_kind"])
-            if change <= -self.stop_loss_percent:
+            policy = policy_for(row, self.stop_loss_percent)
+            if change <= -policy["stop_percent"] + 1e-9:
                 notices.append(
                     self._sell(
                         row,
@@ -621,7 +627,7 @@ class PaperTrader:
                 highest_change = (
                     float(row["highest_price"]) / float(row["entry_price"]) - 1
                 ) * 100
-                if not int(row["take_1_done"]) and highest_change >= 1.0:
+                if not int(row["take_1_done"]) and highest_change + 1e-9 >= policy["protect_percent"]:
                     self.connection.execute(
                         "UPDATE paper_positions SET take_1_done=1 WHERE id=?",
                         (row["id"],),
@@ -631,13 +637,14 @@ class PaperTrader:
                         "SELECT * FROM paper_positions WHERE id=?", (row["id"],)
                     ).fetchone()
                 if int(row["take_1_done"]):
-                    protection = max(1.0, highest_change - 1.0)
-                    if change + 1e-9 < highest_change and change <= protection:
+                    protection = max(policy["protect_percent"], highest_change - policy["trail_pp"])
+                    if change + 1e-9 < highest_change and change <= protection + 1e-9:
                         notices.append(
                             self._sell(
                                 row, float(row["remaining_quantity"]), price, now,
-                                f"ракета: откат 1 п.п. от максимума "
-                                f"{highest_change:+.2f}%",
+                                f"ракета: откат {policy['trail_pp']:g} п.п. от максимума "
+                                f"{highest_change:+.2f}%; защита +{policy['protect_percent']:g}%, "
+                                f"уровень выхода {protection:+.2f}%",
                             )
                         )
                 # A leader keeps 100% of the position; ordinary staged takes and
@@ -796,7 +803,7 @@ class PaperTrader:
             "Ниже — позиции, открытые в этом периоде. Итог по времени закрытия приведён в общем отчёте.\n"
             f"Входов: {len(rows)}; закрыто {len(closed)}, открыто {len(opened)}.\n"
             f"Резервных входов без ответа AI: {without_ai}.\n"
-            f"Защита +1% включалась: {protected}; выходов по откату: {trailing}; "
+            f"Защита прибыли включалась: {protected}; выходов по откату: {trailing}; "
             f"стопов: {stops}.\n"
             f"Реализованный результат: {realized:+.3f} USDT; "
             f"открытый: {unrealized:+.3f} USDT.\n"

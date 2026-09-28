@@ -181,7 +181,7 @@ class RocketStopTests(unittest.TestCase):
 
     def test_winning_trades_included_and_open_actual_positions_wait(self):
         trader=self.make_case();db=trader.connection
-        trader.open_on_signal('WIN',100,'аномальный лидер',80,0)
+        trader.open_on_signal('WIN',100,'лидер',80,0)
         trader.update_positions({'WIN':103},20)
         trader.update_positions({'WIN':102},30)
         db.executemany('INSERT INTO rocket_bid_path VALUES(?,?,?)',

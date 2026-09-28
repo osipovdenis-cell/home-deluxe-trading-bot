@@ -3,6 +3,7 @@ import json
 import math
 
 from bot.reporting import utc_stamp
+from bot.exit_policy import policy_for, ANOMALY_VERSION
 from bot.sqlite_safety import write_batches
 
 
@@ -133,6 +134,8 @@ class RocketStopAudit:
         updates = []
         version = f"{VERSION}:{minutes}m"
         for row in rows:
+            if policy_for(row)["version"] == ANOMALY_VERSION:
+                continue
             if row["closed_at"] is None or now < row["closed_at"] + minutes * 60:
                 pending += 1
                 continue
@@ -164,7 +167,8 @@ class RocketStopAudit:
         lines = ["🛑 Стопы ракет — сравнение на одинаковых входах",
                  f"Срез: {utc_stamp(now)}. Вся сохранённая история; {VERSION}.",
                  "Источник — полные bid-пути карточек сделок. "
-                 "Каждый вариант: 50 USDT, 100% позиции, защита от +1%, откат 1 п.п."]
+                 "Каждый вариант: 50 USDT, 100% позиции, защита от +1%, откат 1 п.п. "
+                 "Новые аномальные ракеты −7%/+8% показаны отдельно в карточках."]
         for minutes in WINDOWS:
             cases, pending, incomplete = self.collect(now, minutes)
             lines += [f"\nОт покупки до фактического выхода + {minutes} мин:",

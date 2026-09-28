@@ -84,7 +84,7 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
         bundle['positions'] = query_rows(trader.connection, '''
             SELECT id,opened_at,closed_at,signal_timestamp,symbol,entry_price,highest_price,
                    initial_quantity,remaining_quantity,position_usdt,
-                   realized_pnl_usdt,ai_score,signal_kind,status,close_reason
+                   realized_pnl_usdt,ai_score,signal_kind,status,close_reason,exit_policy_json
             FROM paper_positions ORDER BY id DESC LIMIT 100''')
         # Exact signal linkage; nearby confirmations are explicitly candidates,
         # not invented foreign keys. Export only numeric market features/decisions.
