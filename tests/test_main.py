@@ -15,6 +15,15 @@ from bot.market import PumpSignal, SignalMarketContext, EntryDynamics
 
 
 class ExceptionalEntryTests(unittest.TestCase):
+    def test_disabled_scalping_skips_all_analysis_and_audit(self):
+        market, audit, trader, ai, telegram = (Mock() for _ in range(5))
+        market.scalp_enabled = False
+        signal = PumpSignal('TEST', 100, 1, 300, 'ранний')
+        self.assertFalse(process_signal(signal, {}, 100, market, audit,
+            trader, ai, telegram, 'owner', SimpleNamespace()))
+        for resource in (market, audit, trader, ai, telegram):
+            self.assertEqual(resource.mock_calls, [])
+
     def test_pending_approved_entry_does_not_repeat_ai(self):
         market, audit, trader, ai = Mock(), Mock(), Mock(), Mock()
         market.rocket_entry_waiter=Mock()
