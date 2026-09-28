@@ -59,3 +59,12 @@ class ProbabilityWorkerTests(unittest.TestCase):
         worker.start();self.assertTrue(entered.wait(1))
         self.assertNotEqual(owner[0],threading.get_ident())
         release.set();worker.close();self.assertTrue(closed.wait(1))
+
+    def test_worker_refreshes_shared_model_without_scalp_training(self):
+        audit = Mock()
+        worker = ProbabilityTrainingWorker(lambda: audit)
+        audit.refresh_probability_model.side_effect = lambda now: worker._stop.set()
+        worker.run()
+        audit.refresh_probability_model.assert_called_once()
+        audit.scalp_shadow.refresh_probability_model.assert_not_called()
+        audit.close.assert_called_once()

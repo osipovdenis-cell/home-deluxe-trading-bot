@@ -200,6 +200,9 @@ def process_signal(
     signal, prices, now, market, audit, trader, ai, telegram, chat_id,
     settings, preloaded_context=None, processing_started=None, initial_stages=None,
 ):
+    # Ordinary scalping is disabled, including analysis of stale queued signals.
+    if getattr(market, 'scalp_enabled', True) is False and 'лидер' not in signal.kind:
+        return False
     opened = False
     diagnostics = {'stages': dict(initial_stages or {})}
     processing_started = time.time() if processing_started is None else processing_started
@@ -956,9 +959,9 @@ def main() -> None:
             "команды /status, /ai, /learning.\n"
             + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
                f"до {settings.paper_max_open_positions} позиций: обычный "
-               "скальпинг только собирает аналитику, все слоты отданы лидерам; вход от "
-               f"{settings.paper_min_ai_score}/100 и только решение BUY.\n"
-               "Обычный выход: 50% на +0,7%, остаток 50% на +1%; стоп −0,5%. "
+               "скальпинг полностью выключен, включая аналитику и обучение; "
+               "все слоты отданы лидерам.\n"
+               f"Стоп лидеров: −{settings.paper_stop_loss_percent:g}%. "
                "Лидер: держим 100%; после +1% защищаем минимум +1% и "
                "выходим при откате 1 п.п. от максимума.\n"
                if trader else "Тестовые сделки: выключены.\n")
