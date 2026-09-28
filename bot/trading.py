@@ -7,6 +7,7 @@ _ENTRY_LOCK = threading.RLock()
 import time
 from bot.reporting import period_label
 from bot.rocket_stops import RocketStopAudit
+from bot.sqlite_safety import retry_initialization
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,7 @@ class TradingIntelligenceSummary:
 
 
 class PaperTrader:
+    @retry_initialization
     def __init__(
         self,
         database_path: str,

@@ -136,7 +136,7 @@ class RocketQuoteTests(unittest.TestCase):
             return answer
         _,connect=self.run_socket(recv,clock,heartbeat_error=TimeoutError())
         self.assertIsNone(connect.call_args.kwargs['ping_interval'])
-        self.assertEqual(connect.call_args.kwargs['max_queue'],256)
+        self.assertEqual(connect.call_args.kwargs['max_queue'],32)
         self.assertEqual(self.stream.health()['last_error_phase'],'idle')
         self.assertEqual(len(self.stream.drain_quotes()[2]),1)
 

@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 import threading
+from contextlib import ExitStack
 from websockets.sync.server import serve
 from unittest.mock import patch
 from bot.async_market_socket import AsyncMarketSocket
@@ -22,6 +23,36 @@ class FakeSocket:
 
 
 class AsyncSocketTests(unittest.TestCase):
+    def test_many_sockets_share_io_and_closing_one_keeps_peers_alive(self):
+        async def opened(*args, **kwargs):
+            return FakeSocket()
+        with patch('bot.async_market_socket.async_connect', opened), ExitStack() as stack:
+            sockets = [stack.enter_context(AsyncMarketSocket('wss://example.invalid')) for _ in range(64)]
+            self.assertEqual(len({s.thread for s in sockets}), 1)
+            self.assertEqual(len({s.loop for s in sockets}), 1)
+            with self.assertRaises(TimeoutError):
+                sockets[0].recv(timeout=.001)
+            sockets[0].__exit__(None, None, None)
+            # Release is idempotent when ExitStack later closes this socket again.
+            self.assertTrue(sockets[-1].thread.is_alive())
+            for i, socket in enumerate(sockets[1:]):
+                socket.send(str(i))
+                self.assertEqual(socket.recv(timeout=1), str(i))
+        self.assertFalse(sockets[-1].thread.is_alive())
+
+    def test_failed_open_does_not_stop_existing_peer(self):
+        async def opened(url, **kwargs):
+            if url.endswith('bad'):
+                raise OSError('failure')
+            return FakeSocket()
+        with patch('bot.async_market_socket.async_connect', opened):
+            with AsyncMarketSocket('wss://ok') as socket:
+                with self.assertRaises(OSError):
+                    with AsyncMarketSocket('wss://bad'):
+                        pass
+                socket.send('alive')
+                self.assertEqual(socket.recv(timeout=1), 'alive')
+
     def test_timeout_preserves_pending_receive_and_message_order(self):
         ws = FakeSocket()
         async def open_socket(*args, **kwargs):

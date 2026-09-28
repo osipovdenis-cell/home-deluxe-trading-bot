@@ -21,7 +21,7 @@ class QuoteIngestQueue:
     Data and gap markers share one FIFO and retain the receive timestamp. A
     bounded overflow is an explicit unknown interval, never a silently lost tick.
     """
-    def __init__(self, stream, capacity=50000):
+    def __init__(self, stream, capacity=5000):
         self.stream, self.capacity = stream, capacity
         self.pending = deque()
         self.ready = threading.Condition()
@@ -431,7 +431,7 @@ class RocketQuoteStream:
                     self._stats['endpoint'] = base_url
                 url = base_url + '/stream?streams=' + quote('/'.join(self.streams(subscribed)), safe='/@')
                 with connect(url, open_timeout=10,
-                             close_timeout=2, ping_interval=None, max_queue=256,
+                             close_timeout=2, ping_interval=None, max_queue=32,
                              compression=None) as ws:
                     connected_at = last_received = time.monotonic()
                     self._last_data_received = None

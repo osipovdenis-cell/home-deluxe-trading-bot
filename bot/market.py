@@ -153,6 +153,7 @@ class MarketMonitor:
         max_signals_per_cycle: int = 5,
         entry_confirmation_seconds: int = 20,
         rescue_window_seconds: int = 90,
+        scalp_enabled: bool = True,
     ) -> None:
         self.symbols = set(symbols)
         self.scan_all_usdt = scan_all_usdt
@@ -168,6 +169,7 @@ class MarketMonitor:
         self.max_signals_per_cycle = max_signals_per_cycle
         self.entry_confirmation_seconds = entry_confirmation_seconds
         self.rescue_window_seconds = rescue_window_seconds
+        self.scalp_enabled = scalp_enabled
         self.history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
         self.anomaly_window_seconds = 600
         self.anomaly_history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
@@ -766,6 +768,10 @@ class MarketMonitor:
                             leader.peak_price = price
                 else:
                     leader.peak_price = max(leader.peak_price, price)
+            if not self.scalp_enabled and leader is None:
+                self.pending_candidates.pop(symbol, None)
+                self.rescue_candidates.pop(symbol, None)
+                continue
             signal_window = self.window_seconds
             if leader is not None and leader.mode == "аномальный лидер":
                 change = anomaly_change

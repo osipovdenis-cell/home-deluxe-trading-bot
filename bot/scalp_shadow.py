@@ -74,6 +74,16 @@ class ScalpShadow:
             (self.VERSION,),
         ))
 
+    def stop(self, now):
+        """Archive unfinished observations without inventing a trading outcome."""
+        with self.db:
+            for key, raw in self.db.execute(
+                "SELECT id,state FROM scalp_shadow WHERE status='ACTIVE'"
+            ).fetchall():
+                state = json.loads(raw)
+                state['reason'] = 'scalping disabled by user'
+                self._save(key, state, 'INCOMPLETE', now)
+
     def candidate(self, symbol, kind, now, features, accepted, cost):
         if not kind or "лидер" in kind:
             return
@@ -135,6 +145,16 @@ class ScalpShadow:
     def _save(self, key, state, status="ACTIVE", finished=None):
         self.db.execute("UPDATE scalp_shadow SET state=?,status=?,finished=? WHERE id=?",
                         (json.dumps(state), status, finished, key))
+
+    def process_quotes(self, rows, now, overflow=False, batch_size=100):
+        """Release the shared writer between bounded analytical quote batches."""
+        if not overflow:
+            for start in range(0, len(rows), batch_size):
+                with self.db:
+                    for at, symbol, bid, ask in rows[start:start + batch_size]:
+                        self.quote(at, symbol, bid, ask)
+        with self.db:
+            self.expire(now, overflow=overflow)
 
     def expire(self, now, overflow=False):
         for key, raw in self.db.execute(

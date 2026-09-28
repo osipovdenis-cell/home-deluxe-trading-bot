@@ -44,6 +44,19 @@ def exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
+def prune_bid_paths(db, cutoff, batch_size=1000):
+    """Use the existing (symbol,timestamp) index; never delete eight days in
+    one transaction or build a large new index during service startup.
+    Symbol discovery is read-only and finishes before acquiring the writer.
+    """
+    symbols = [r[0] for r in db.execute('SELECT DISTINCT symbol FROM rocket_bid_path')]
+    for symbol in symbols:
+        with db:
+            db.execute('DELETE FROM rocket_bid_path WHERE rowid IN '
+                       '(SELECT rowid FROM rocket_bid_path WHERE symbol=? AND timestamp<? LIMIT ?)',
+                       (symbol, cutoff, batch_size))
+
+
 def entry_probe(market, signal, context, dynamics, started, probe_provider=None):
     callback = probe_provider if probe_provider is not None else market.__dict__.get('rocket_probe')
     if callback is None:
@@ -400,8 +413,9 @@ class RocketPathWorker:
                                 if not delivered and key not in enqueued:
                                     self.notifications.put((key, f'Наблюдение после выхода: {minutes} минут\n'+format_card(card)))
                                     enqueued.add(key)
-                        db.execute('DELETE FROM rocket_bid_path WHERE timestamp<?',(now-8*86400,))
-                        db.commit(); last_cards=now
+                        db.commit()
+                        prune_bid_paths(db, now-8*86400)
+                        last_cards=now
                 except Exception as error:
                     db.rollback()
                     retry_errors += 1

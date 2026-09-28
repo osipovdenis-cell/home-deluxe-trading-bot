@@ -12,7 +12,7 @@ from bot.rocket_comparison import RocketComparison
 from bot.rocket_spread_shadow import SpreadShadow
 from bot.scalp_shadow import ScalpShadow
 from bot.reporting import ModelJournal, period_label
-from bot.sqlite_safety import write_batches
+from bot.sqlite_safety import write_batches, retry_initialization
 
 
 @dataclass(frozen=True)
@@ -319,6 +319,7 @@ def detect_pumps(
 
 
 class AuditLog:
+    @retry_initialization
     def __init__(self, path: str) -> None:
         database = Path(path)
         database.parent.mkdir(parents=True, exist_ok=True)

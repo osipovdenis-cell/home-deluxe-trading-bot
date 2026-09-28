@@ -1,7 +1,7 @@
 name: SQLite contention checks
 on:
   push:
-    branches: [fix/sqlite-contention-20260927]
+    branches: [fix/sqlite-contention-20260927, fix/restart-resource-bounds-20260928]
 permissions:
   contents: read
 jobs:

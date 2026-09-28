@@ -25,9 +25,8 @@ from bot.streams import (
 )
 from bot.telegram import TelegramClient
 from bot.trading import PaperTrader
-from bot.scalp_shadow import ScalpQuoteStream
 from bot.audit import SymbolBehavior
-from bot.reporting import rocket_totals, scalp_totals
+from bot.reporting import rocket_totals
 from bot.execution import PositionExitWorker, fresh_entry
 from bot.report_export import ReportExportWorker, collect_reports
 from bot.rocket_cards import RocketPathWorker, entry_probe, cards, format_card, shadow_summary
@@ -53,9 +52,8 @@ def send_overall_reports(now, prices, audit, trader, telegram, chat_id):
         telegram.send(chat_id, rocket_totals(trader, prices, now))
         for stop_text in trader.stop_audit.report_texts(now):
             telegram.send(chat_id, stop_text)
-    telegram.send(chat_id, scalp_totals(audit.scalp_shadow, now))
-    telegram.send(chat_id, audit.model_status_text(now) + '\n\n'
-                  + audit.scalp_shadow.learning_status(now))
+    telegram.send(chat_id, audit.model_status_text(now)
+                  + '\n\nСкальпинг и его теневое наблюдение отключены.')
 
 
 def build_report_snapshot(settings, prices, now, exit_healthy, flow_health=None):
@@ -243,8 +241,7 @@ def handle_ready_rocket(job, audit, trader, telegram, ai, chat_id, settings, flo
     if job.confirmation is not None:
         timed_entry_call({'stages': stages}, 'запись подтверждения',
             audit.record_confirmation_event, job.confirmation, context,
-            job.market.entry_dynamics(job.signal.symbol, job.at),
-            scalp_now=time.time(), scalp_cost=settings.estimated_round_trip_cost_percent)
+            job.market.entry_dynamics(job.signal.symbol, job.at))
     if job.market._entry_cancelled():
         return False
     return process_signal(job.signal, job.prices, job.at, job.market, audit, trader,
@@ -791,7 +788,6 @@ def handle_observer_commands(commands, now, prices, audit, trader, telegram, cha
             telegram.send(chat_id, audit.entry_latency_report_text(now))
             telegram.send(chat_id, daily_report(audit.connection, now))
             telegram.send(chat_id, volume_report_text(audit.connection, now))
-            telegram.send(chat_id, audit.scalp_shadow.report(now))
             if trader is not None:
                 telegram.send(chat_id, trader.rocket_report_text(prices, now))
                 telegram.send(chat_id, trader.post_stop_report_text(now))
@@ -832,6 +828,7 @@ def main() -> None:
         settings.alert_cooldown_seconds, settings.scan_all_usdt,
         settings.min_quote_volume_usdt, settings.early_threshold_percent,
         settings.max_signals_per_cycle, settings.entry_confirmation_seconds,
+        scalp_enabled=False,
     )
     audit = AuditLog(settings.audit_db_path)
     trader = make_paper_trader(settings) if settings.paper_trading_enabled else None
@@ -839,7 +836,6 @@ def main() -> None:
     market_stream = None
     position_stream = None
     order_flow_stream = None
-    scalp_stream = None
     position_worker = None
     report_worker = None
     rocket_path_worker = None
@@ -914,11 +910,7 @@ def main() -> None:
         signal_worker.start()
         probability_worker = ProbabilityTrainingWorker(lambda: AuditLog(settings.audit_db_path))
         probability_worker.start()
-        scalp_stream = ScalpQuoteStream()
-        audit.scalp_shadow.expire(time.time())
-        audit.connection.commit()
-        scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
-        scalp_stream.start()
+        audit.scalp_shadow.stop(time.time())
         report_worker = ReportExportWorker(
             lambda snapshot_prices, snapshot_now: build_report_snapshot(
                 settings, snapshot_prices, snapshot_now,
@@ -1031,15 +1023,6 @@ def main() -> None:
                         audit.record_error('Exit worker: '+error, now)
                     for text in exit_texts:
                         telegram.send(chat_id, text)
-                scalp_quotes, overflow = scalp_stream.drain_quotes()
-                if overflow:
-                    audit.scalp_shadow.expire(now, overflow=True)
-                else:
-                    for at, symbol, bid, ask in scalp_quotes:
-                        audit.scalp_shadow.quote(at, symbol, bid, ask)
-                audit.scalp_shadow.expire(now)
-                audit.connection.commit()
-                scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
                 # Commands must not wait behind market scans and AI requests.
                 if now - last_command_poll >= 2:
                     commands = telegram.poll_commands(chat_id)
@@ -1083,7 +1066,6 @@ def main() -> None:
                                 audit.record_entry_rejection(now, signal.symbol, reason, None, None)
                                 daily_worker.capture(signal.symbol, now, time.time(), reason, False,
                                     settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
-                    confirmation_contexts = {}
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
                     ):
@@ -1124,14 +1106,7 @@ def main() -> None:
                             confirmation_event,
                             confirmation_context,
                             market.entry_dynamics(confirmation_event.symbol, now),
-                            scalp_now=time.time(),
-                            scalp_cost=settings.estimated_round_trip_cost_percent,
                         )
-                        scalp_stream.set_symbols(audit.scalp_shadow.active_symbols())
-                        if confirmation_event.accepted:
-                            confirmation_contexts[confirmation_event.symbol] = (
-                                confirmation_context
-                            )
                     confirmation_symbols = (
                         market.active_confirmation_symbols()
                         | audit.active_confirmation_symbols(now)
@@ -1144,14 +1119,6 @@ def main() -> None:
                         },
                         now,
                     )
-                    for signal in signals:
-                        if 'лидер' in signal.kind:
-                            continue
-                        opened = process_signal(
-                            signal, prices, now, market, audit, trader, ai,
-                            telegram, chat_id, settings,
-                            confirmation_contexts.pop(signal.symbol, None),
-                        )
                     last_market = now
                 if now - last_audit >= settings.poll_interval_seconds:
                     audit.record_prices(prices, now)
@@ -1217,7 +1184,6 @@ def main() -> None:
                     telegram.send(chat_id, volume_report_text(audit.connection, now))
                     if trader is not None:
                         telegram.send(chat_id, shadow_summary(trader.connection))
-                    telegram.send(chat_id, audit.scalp_shadow.report(now))
                 time.sleep(0.1)
             except sqlite3.OperationalError as error:
                 recover_busy(error, audit.connection, trader.connection if trader else None)
@@ -1250,8 +1216,6 @@ def main() -> None:
             report_worker.close()
         if position_worker:
             position_worker.close()
-        if scalp_stream:
-            scalp_stream.close()
         if order_flow_stream:
             order_flow_stream.close()
         if position_stream:

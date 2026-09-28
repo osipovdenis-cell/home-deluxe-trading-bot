@@ -113,9 +113,9 @@ class ReportingTests(unittest.TestCase):
         telegram=Mock()
         try:
             send_overall_reports(100000,{},audit,None,telegram,'chat')
-            self.assertEqual(telegram.send.call_count,2)
-            self.assertIn('Общий итог теневого скальпинга',telegram.send.call_args_list[0].args[1])
-            self.assertIn('состояние обучения',telegram.send.call_args_list[1].args[1])
+            self.assertEqual(telegram.send.call_count,1)
+            self.assertIn('Скальпинг и его теневое наблюдение отключены',telegram.send.call_args.args[1])
+            self.assertIn('состояние обучения',telegram.send.call_args.args[1])
             self.assertEqual(audit.scalp_shadow.active_symbols(),())
         finally:
             audit.close()
