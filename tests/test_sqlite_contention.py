@@ -103,6 +103,8 @@ class ContentionTests(unittest.TestCase):
     def test_report_replay_does_not_lock_writer_during_next_case_calculation(self):
         for symbol in ('X', 'Y'):
             self.trader.open_on_signal(symbol, 100, 'лидер', 80, 1)
+            self.db.execute('UPDATE paper_positions SET exit_policy_json=NULL')
+            self.db.commit()
             self.trader.update_positions({symbol: 98}, 2)
         calls = []
         def evaluate(row, now, minutes):
@@ -194,6 +196,8 @@ class ContentionTests(unittest.TestCase):
     def test_report_failure_during_calculation_leaves_no_writer_lock(self):
         for symbol in ('X', 'Y'):
             self.trader.open_on_signal(symbol, 100, 'лидер', 80, 1)
+            self.db.execute('UPDATE paper_positions SET exit_policy_json=NULL')
+            self.db.commit()
             self.trader.update_positions({symbol: 98}, 2)
         with patch.object(self.trader.stop_audit, '_evaluate',
                           side_effect=[{'position_id': 1}, ValueError('calculation failed')]):

@@ -46,6 +46,9 @@ class RocketStopTests(unittest.TestCase):
                 trader=PaperTrader(':memory:',200,50,4,70,stop,.7,1,1.5,1,0,.2)
                 try:
                     trader.open_on_signal('R',100,'лидер',80,0)
+                    # This fixture exercises the legacy +1% exit contract.
+                    trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+                    trader.connection.commit()
                     for t,p in path[1:]:
                         trader.update_positions({'R':p},t)
                     row=trader.connection.execute('SELECT * FROM paper_positions').fetchone()
@@ -64,6 +67,9 @@ class RocketStopTests(unittest.TestCase):
         db.execute("INSERT INTO rocket_path_meta VALUES('started',0)")
         db.execute('CREATE TABLE samples(timestamp REAL,symbol TEXT,price REAL)')
         trader.open_on_signal('R',100,'лидер',80,0)
+        # This fixture exercises the legacy +1% exit contract.
+        trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+        trader.connection.commit()
         trader.update_positions({'R':99.4},10)
         values=[('R',t,99.4 if t<20 else 98.4 if t<30 else 103 if t<40 else 102)
                 for t in range(1,3611)]
@@ -182,11 +188,17 @@ class RocketStopTests(unittest.TestCase):
     def test_winning_trades_included_and_open_actual_positions_wait(self):
         trader=self.make_case();db=trader.connection
         trader.open_on_signal('WIN',100,'лидер',80,0)
+        # This fixture exercises the legacy +1% exit contract.
+        trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+        trader.connection.commit()
         trader.update_positions({'WIN':103},20)
         trader.update_positions({'WIN':102},30)
         db.executemany('INSERT INTO rocket_bid_path VALUES(?,?,?)',
             [('WIN',t,100 if t<20 else 103 if t<30 else 102) for t in range(1,3631)])
         trader.open_on_signal('OPEN',100,'лидер',80,0)
+        # This fixture exercises the legacy +1% exit contract.
+        trader.connection.execute("UPDATE paper_positions SET exit_policy_json=NULL")
+        trader.connection.commit()
         cases,pending,incomplete=trader.stop_audit.collect(4000)
         self.assertEqual((len(cases),pending,incomplete),(2,1,0))
         winner=next(c for c in cases if c['symbol']=='WIN')
