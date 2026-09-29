@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import json
-from bot.exit_policy import new_policy, policy_for, protective_floor
+from bot.exit_policy import new_policy, policy_for, protective_floor, upgrade_open_anomaly_policies
 import sqlite3
 import threading
 
@@ -368,6 +368,7 @@ class PaperTrader:
         )
         self.connection.commit()
 
+        upgrade_open_anomaly_policies(self.connection, time.time())
         self.stop_audit = RocketStopAudit(self.connection)
         self.exit_monitor_healthy = None
 
@@ -639,13 +640,19 @@ class PaperTrader:
                     ).fetchone()
                 if int(row["take_1_done"]):
                     floor = protective_floor(policy, highest_change)
-                    protection = max(floor, highest_change - policy["trail_pp"])
+                    protection = highest_change - policy["trail_pp"]
+                    if floor is not None:
+                        protection = max(floor, protection)
+                    activation_text = (
+                        f"трейлинг включён от +{policy['protect_percent']:g}%"
+                        if floor is None else f"защита +{floor:g}%"
+                    )
                     if change + 1e-9 < highest_change and change <= protection + 1e-9:
                         notices.append(
                             self._sell(
                                 row, float(row["remaining_quantity"]), price, now,
                                 f"ракета: откат {policy['trail_pp']:g} п.п. от максимума "
-                                f"{highest_change:+.2f}%; защита +{floor:g}%, "
+                                f"{highest_change:+.2f}%; {activation_text}, "
                                 f"уровень выхода {protection:+.2f}%",
                             )
                         )
