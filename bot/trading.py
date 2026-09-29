@@ -29,9 +29,10 @@ class TradeNotice:
     def telegram_text(self) -> str:
         if self.action == "BUY":
             if "лидер" in self.reason:
+                rocket_type = "аномальная ракета" if "аномаль" in self.reason else "ракета"
                 entry_type = (
-                    "ракета — повторный вход"
-                    if "повторный вход" in self.reason else "ракета — первый вход"
+                    f"{rocket_type} — повторный вход"
+                    if "повторный вход" in self.reason else f"{rocket_type} — первый вход"
                 )
             else:
                 entry_type = "обычный скальпинг"
