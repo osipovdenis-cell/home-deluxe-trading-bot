@@ -8,7 +8,7 @@ from pathlib import Path
 from queue import SimpleQueue, Empty
 from dataclasses import asdict, replace
 
-from bot.exit_policy import policy_for, ANOMALY_VERSION, LEADER_STEPS_VERSION
+from bot.exit_policy import policy_for, ANOMALY_VERSION, ANOMALY_VERSIONS, LEADER_STEPS_VERSION
 from bot.rocket_stops import replay, STOPS
 from bot.reporting import utc_stamp
 from bot.rocket_quote_stream import RocketQuoteStream
@@ -135,7 +135,7 @@ def window_result(points, entry, exit_at, exit_price, minutes, now, cost):
 
 
 def build_card(db, row, now):
-    if policy_for(row)['version'] in (ANOMALY_VERSION, LEADER_STEPS_VERSION):
+    if policy_for(row)['version'] in (*ANOMALY_VERSIONS, LEADER_STEPS_VERSION):
         from bot.anomaly_path import build_anomaly_card
         return build_anomaly_card(db,row,now)
     row = dict(row)
@@ -216,7 +216,10 @@ def format_card(card):
            f"Вход: {utc_stamp(card['opened_at'])}, цена {card['entry_price']:g}."]
     policy=card.get('exit_policy')
     if policy:
-        lines.append(f"Условия этой позиции: стоп −{policy['stop_percent']:g}%, защита +{policy['protect_percent']:g}%, откат {policy['trail_pp']:g} п.п.")
+        protection_label = 'включение трейлинга от' if policy['version'] == ANOMALY_VERSION else 'защита'
+        lines.append(f"Условия этой позиции: стоп −{policy['stop_percent']:g}%, {protection_label} +{policy['protect_percent']:g}%, откат {policy['trail_pp']:g} п.п.")
+        if policy.get('policy_changed_at') is not None:
+            lines.append(f"Правило выхода обновлено: {utc_stamp(policy['policy_changed_at'])}; прежние условия сохранены в данных отчёта.")
     if policy and policy.get('protect_steps'):
         lines.append('Ступени защиты: достигнут +1% → защищаем +1%; достигнут +2% → защищаем +2%.')
     path=card.get('path_summary',{})
