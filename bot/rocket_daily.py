@@ -108,6 +108,10 @@ class DailyModel:
                     leg.update(status='INCOMPLETE', reason='нет первой котировки в пределах 5с')
             advance(leg, [(at,bid) for at,bid,ask in rows], now if gap is None else gap,
                     s['at']+HORIZON, s['stop'], s['cost'])
+            if leg.get('entered') is not None:
+                # Only quotes through the last validated point, never past a gap/exit.
+                from bot.idea_path import append_quotes
+                append_quotes(s, rows, leg['entered'], leg['last_at'])
             if gap is not None and leg['status'] in ('WAIT', 'OPEN', 'INCOMPLETE'):
                 leg.update(status='INCOMPLETE', reason='разрыв соединения котировок')
             if leg['status']=='INCOMPLETE' and s.get('volume_execution',{}).get('state')=='PENDING':
@@ -128,10 +132,11 @@ class DailyWorker:
         self.thread=None
 
     def capture(self, symbol, signal_at, at, reason, opened, stop, cost, source='signal',
-                volume_experiment=None):
+                volume_experiment=None, idea_features=None):
         self.queue.put(dict(id=f'{source}:{symbol}:{signal_at!r}', symbol=symbol,
             signal_at=signal_at, at=at, reason=str(reason), opened=bool(opened),
-            stop=stop, cost=cost, source=source, volume_experiment=deepcopy(volume_experiment)))
+            stop=stop, cost=cost, source=source, volume_experiment=deepcopy(volume_experiment),
+            idea_features=deepcopy(idea_features)))
 
     def watch_symbols(self, symbols):
         self.watch=tuple(symbols)

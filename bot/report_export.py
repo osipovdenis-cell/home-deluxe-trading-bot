@@ -46,6 +46,16 @@ def collect_reports(audit, trader, prices, now, handler, exit_healthy=None):
                   reports=collector.messages, positions=[], fills=[], exit_diagnostics=[])
     bundle['rocket_daily'] = daily_report_data(audit.connection, now)
     bundle['ai_health'] = audit.ai_health()
+    try:
+        from bot.idea_worker import report as idea_report
+        from bot.rocket_daily import source_path
+        bundle['rocket_idea_analysis'] = idea_report(source_path(audit.connection))
+        ideas = bundle['rocket_idea_analysis']
+        collector.messages.append('🔎 Журнал идей ракет: разобрано ' + str(ideas.get('counts', {}).get('done', 0))
+            + '; идей ' + str(len(ideas.get('ideas', []))) + '. AI: '
+            + ideas.get('health', {}).get('ai_status', 'ожидание первого разбора') + '. Только анализ.')
+    except Exception as error:
+        bundle['rocket_idea_analysis'] = {'state':'unavailable','error':type(error).__name__}
     # A read-only lookup on the live history also verifies the hot query when no
     # candidates currently pass the gates. It never changes decisions or models.
     latest = audit.connection.execute('SELECT symbol FROM signal_events ORDER BY timestamp DESC LIMIT 1').fetchone()

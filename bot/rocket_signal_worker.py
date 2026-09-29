@@ -23,6 +23,9 @@ def freeze_market(market, symbol, at):
     view = copy(market)
     dynamics = market.entry_dynamics(symbol, at)
     view.entry_dynamics = lambda requested_symbol, requested_at: dynamics
+    # Analysis snapshots also need immutable price history, not shared deques.
+    view._idea_history = {s:tuple(market.__dict__.get('history', {}).get(s, ())) for s in (symbol, 'BTCUSDT')}
+    view._idea_anomaly_history = {symbol:tuple(market.__dict__.get('anomaly_history', {}).get(symbol, ()))}
     view.tick_sizes = dict(market.tick_sizes)
     view.change_12h_percent = dict(market.change_12h_percent)
     return view
@@ -60,6 +63,7 @@ class RocketSignalWorker:
                 return False  # Caller records an explicit duplicate/queue rejection.
             view = freeze_market(market, signal.symbol, at)
             view._entry_cancelled = self._stop.is_set
+            view._idea_confirmation = int(confirmation.accepted) if confirmation is not None else None
             try:
                 self.queue.put_nowait(SignalJob(signal, dict(prices), at, view, confirmation))
             except Full:
