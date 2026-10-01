@@ -227,7 +227,8 @@ def process_signal(
                 if daily is not None:
                     daily.capture(signal.symbol, now, time.time(), reason, opened,
                                   settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
-                                  volume_experiment=diagnostics.get('volume_experiment'))
+                                  volume_experiment=diagnostics.get('volume_experiment'),
+                                  idea_features=diagnostics.get('idea_features'))
                 audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа", reason)
                 if timing is not None:
                     timing.send('decision', token, time.time(), reason, opened)
@@ -285,6 +286,12 @@ def _process_signal(
         except (httpx.HTTPError, ValueError) as error:
             audit.record_error(f"Signal context {signal.symbol}: {error}", now)
             print(f"Ошибка данных объёма {signal.symbol}: {error}", flush=True)
+    if leader_paper_entry and diagnostics is not None:
+        try:
+            from bot.idea_data import snapshot as idea_snapshot
+            diagnostics['idea_features'] = idea_snapshot(signal, context, None, now, market)
+        except Exception:
+            pass
     if leader_paper_entry:
         volume = context.volume_ratio_5m if context is not None else None
         if (not isinstance(volume, (int, float)) or isinstance(volume, bool)
@@ -311,6 +318,13 @@ def _process_signal(
         max_spread_percent=0.25 if leader_paper_entry else 0.1,
     )
     dynamics = market.entry_dynamics(signal.symbol, now)
+    if leader_paper_entry and diagnostics is not None:
+        try:
+            from bot.idea_data import snapshot as idea_snapshot
+            diagnostics['idea_features'] = idea_snapshot(signal, context, dynamics, now, market)
+            diagnostics['idea_features']['tick_percent'] = tick_percent
+        except Exception:
+            pass  # Analysis must never alter an entry decision.
     shadow_prefilter_reason = None
     if not execution_safe:
         if signal.is_rescue:
@@ -650,6 +664,12 @@ def _process_signal(
     diagnostic_probe = timed_entry_call(diagnostics, "финальная проверка", entry_probe, market, signal, context, dynamics, now) if leader_paper_entry else None
     if trader is not None and leader_paper_entry:
         entry_allowed, entry_reason = fading_buy_guard(diagnostic_probe)
+        if diagnostics is not None and 'idea_features' in diagnostics:
+            diagnostics['idea_features'].update(filter_c_passed=int(entry_allowed),
+                ai_score=analysis.score if analysis else None,
+                ai_decision_code={'BUY':1,'WAIT':0,'SKIP':-1}.get(analysis.decision) if analysis else None)
+            if diagnostic_probe is not None:
+                diagnostic_probe['idea_features'] = dict(diagnostics['idea_features'])
         if not entry_allowed:
             if waiter is not None:
                 queued = waiter.submit(signal,context,dynamics,analysis.score if analysis else 0,now)
@@ -795,6 +815,7 @@ def main() -> None:
     position_worker = None
     report_worker = None
     rocket_path_worker = None
+    idea_worker = None
     entry_wait_worker = None
     timing_worker = None
     daily_worker = None
@@ -866,6 +887,20 @@ def main() -> None:
         signal_worker.start()
         probability_worker = ProbabilityTrainingWorker(lambda: AuditLog(settings.audit_db_path))
         probability_worker.start()
+        # Private clients and connections in a separate analysis thread.
+        try:
+            from bot.idea_worker import IdeaWorker
+            def send_idea_summary(text):
+                client = TelegramClient(settings.telegram_bot_token)
+                try:
+                    client.send(chat_id, text)
+                finally:
+                    client.close()
+            idea_worker = IdeaWorker(settings.audit_db_path, settings.openai_api_key,
+                                     settings.openai_model, send_idea_summary)
+            idea_worker.start()
+        except Exception as error:
+            print('Rocket ideas unavailable: ' + type(error).__name__, flush=True)
         audit.scalp_shadow.stop(time.time())
         def send_digest(caption, document):
             # A separate HTTP client belongs to the export thread.
@@ -1065,7 +1100,8 @@ def main() -> None:
                             daily_worker.capture(confirmation_event.symbol, confirmation_event.started_at,
                                 time.time(), confirmation_event.reason, False,
                                 settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
-                                source='confirmation')
+                                source='confirmation',
+                                idea_features={'confirmation_accepted':0})
                             audit.rocket_spread.record_gate(now, confirmation_event.symbol,
                                 "подтверждение", confirmation_event.reason)
                         confirmation_context = None
@@ -1141,6 +1177,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Мониторинг остановлен.")
     finally:
+        if idea_worker:
+            idea_worker.close()
         if probability_worker:
             probability_worker.close()
         if signal_worker:
