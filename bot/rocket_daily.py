@@ -14,9 +14,11 @@ from bot.rocket_recovery_shadow import new_leg, advance
 from bot import rocket_volume_shadow as volume_shadow
 from bot import rocket_structure as structure
 from bot.warm_symbols import WarmSymbols
+from bot.exit_policy import new_policy
 
 SUFFIX = '.rocket_daily.sqlite3'
 HORIZON = 3600
+POLICY_VERSION = 'rocket-daily-v3-frozen-exits'
 
 
 def schema(db):
@@ -54,6 +56,9 @@ class DailyModel:
         if not all(math.isfinite(event[k]) for k in ('at','stop','cost')) or event['stop']<=0 or event['cost']<0:
             raise ValueError('invalid decision')
         s = dict(deepcopy(event), quote_version=3, quote_sampling_ms=100, leg=dict(status='WAIT', net=None))
+        if s.get('signal_kind'):
+            s['exit_policy'] = new_policy(s['signal_kind'], s['stop'], s['cost'])
+            s['policy_version'] = POLICY_VERSION
         experiment = s.get('volume_experiment')
         if experiment:
             stamp = experiment.get('evaluated_at')
@@ -107,9 +112,9 @@ class DailyModel:
                 elif now-s['at']>5:
                     leg.update(status='INCOMPLETE', reason='нет первой котировки в пределах 5с')
             advance(leg, [(at,bid) for at,bid,ask in rows], now if gap is None else gap,
-                    s['at']+HORIZON, s['stop'], s['cost'])
+                    s['at']+HORIZON, s['stop'], s['cost'], s.get('exit_policy'))
             if gap is not None and leg['status'] in ('WAIT', 'OPEN', 'INCOMPLETE'):
-                leg.update(status='INCOMPLETE', reason='разрыв соединения котировок')
+                leg.update(status='INCOMPLETE', reason='зафиксирован пропуск или задержка котировок')
             if leg['status']=='INCOMPLETE' and s.get('volume_execution',{}).get('state')=='PENDING':
                 s['volume_execution'].update(state='UNKNOWN', reason=leg.get('reason'))
             self.save(ident,s)
@@ -128,10 +133,11 @@ class DailyWorker:
         self.thread=None
 
     def capture(self, symbol, signal_at, at, reason, opened, stop, cost, source='signal',
-                volume_experiment=None):
+                volume_experiment=None, signal_kind=None):
         self.queue.put(dict(id=f'{source}:{symbol}:{signal_at!r}', symbol=symbol,
             signal_at=signal_at, at=at, reason=str(reason), opened=bool(opened),
-            stop=stop, cost=cost, source=source, volume_experiment=deepcopy(volume_experiment)))
+            stop=stop, cost=cost, source=source, volume_experiment=deepcopy(volume_experiment),
+            signal_kind=signal_kind))
 
     def watch_symbols(self, symbols):
         self.watch=tuple(symbols)
@@ -197,7 +203,7 @@ def source_path(db):
 
 def report_data(main, now):
     path=source_path(main)
-    result=dict(version='rocket-daily-v2',since=now-86400,until=now,episodes=[],health={},actual={},
+    result=dict(version=POLICY_VERSION,since=now-86400,until=now,episodes=[],health={},actual={},
                 volume_test=volume_shadow.report_data([],now))
     exists=lambda name: main.execute('SELECT 1 FROM sqlite_master WHERE name=?',(name,)).fetchone()
     positions=list(main.execute('SELECT id,symbol,signal_timestamp,opened_at,closed_at,status,realized_pnl_usdt '
@@ -222,7 +228,7 @@ def report_data(main, now):
             s['leg'].update(status='INCOMPLETE',reason='регистратор не обновляется')
         if s['leg']['status']=='INCOMPLETE' and s.get('volume_execution',{}).get('state')=='PENDING':
             s['volume_execution'].update(state='UNKNOWN',reason=s['leg'].get('reason'))
-        if s.get('volume_experiment'):
+        if s.get('volume_experiment') and s.get('policy_version') == POLICY_VERSION:
             volume_rows.append(s)
         if s['at']<now-86400:
             continue
@@ -256,7 +262,10 @@ def outcome(items):
 def report_text(main, now):
     d=report_data(main,now)
     stamp=lambda t:datetime.fromtimestamp(t,timezone.utc).strftime('%d.%m %H:%M')
-    a=d['actual']; ep=d['episodes']
+    a=d['actual']
+    ep=[s for s in d['episodes'] if s.get('policy_version') == POLICY_VERSION]
+    legacy=[s for s in d['episodes'] if s.get('policy_version') != POLICY_VERSION
+            and s['classification']=='REJECTED']
     rejected=[s for s in ep if s['classification']=='REJECTED']
     o=outcome(rejected)
     lines=['📊 Ракеты за 24 часа — сделки и отказы',f"{stamp(d['since'])} — {stamp(now)} UTC.",
@@ -264,6 +273,12 @@ def report_text(main, now):
         f"Записано решений {len(ep)} по {len({s['symbol'] for s in ep})} монетам; отказов {len(rejected)}; ожидают решения {sum(s['classification']=='PENDING_DECISION' for s in ep)}.",
         f"Если купить отклонённые: прибыльных {o['profitable']}, убыточных {o['losing']}, нулевых {o['flat']}; закрытые {o['pnl']:+.3f} USDT.",
         f"На горизонте ещё открыты {o['marked']} (оценка {o['marked_pnl']:+.3f} USDT); наблюдаются {o['pending']}; неполных {o['incomplete']}."]
+    lines.insert(2, f'Теневые исходы версии {POLICY_VERSION}; фактические сделки — все за указанные 24ч.')
+    if legacy:
+        old = outcome(legacy)
+        lines.append(f"Архив прежних правил: отказов {len(legacy)}, полных закрытых "
+                     f"{old['profitable']+old['losing']+old['flat']}, неполных {old['incomplete']}; "
+                     "в новые итоги не включён, не пересчитан.")
     # Group by first recorded rejection stage; descriptive, not causal filter ablation.
     for source,label in [('confirmation','Отказ за 20с'),('signal','Отказ после подтверждения')]:
         group=[s for s in rejected if s['source']==source]
@@ -295,11 +310,18 @@ def report_text(main, now):
                      f"неполных {current_outcome['incomplete']}, ещё наблюдаются {current_outcome['pending']}.")
         lines.append(f"Тайм-аутов управления при живых котировках: {stream_health.get('control_timeouts',0)}; "
                      f"неподтверждённых запросов: {stream_health.get('pending_subscription_requests',0)}.")
+        lines.append(f"Маркеры пропусков цен: {stream_health.get('quote_gap_markers',0)}; "
+                     f"задержек цен: {stream_health.get('quote_delay_markers',0)}; "
+                     f"отдельных пропусков сделок/потока: {stream_health.get('flow_gap_markers',0)}.")
+        lines.append(f"Отброшено запоздалых сообщений: {stream_health.get('stale_data_messages',0)}; "
+                     f"максимальное отставание биржевого времени: {stream_health.get('max_event_lag_seconds',0):.3f}с; "
+                     f"переполнений очереди: {stream_health.get('ingest_overflows',0)}; "
+                     f"ошибок обработки котировок: {stream_health.get('ingest_errors',0)}.")
         if stream_health.get('last_error_type'):
             lines.append(f"Последний разрыв: {stream_health.get('last_error_phase')} / "
                          f"{stream_health['last_error_type']}; код {stream_health.get('last_close_code') or '—'}.")
     lines.extend(['Новые записи с установки; старые отказы не пересчитаны.',
-        'Каждый сигнал отдельно, без лимита одной монеты в час. Покупка — первая ask не позднее 5с после решения; выход — bid. По 50 USDT, стоп и комиссия фиксируются на сигнале; защита +1%, откат 1 п.п., горизонт 60 мин. Открытые на горизонте не считаются закрытыми прибыльными.',
+        'Каждый сигнал отдельно, без лимита одной монеты в час. Покупка — первая ask не позднее 5с после решения; выход — bid. По 50 USDT, правило выхода и комиссия фиксируются по типу сигнала: аномальные −7%/активация +8%/откат 1 п.п.; обычные лидеры — ступени +1%/+2%. Горизонт 60 мин; открытые на горизонте не считаются закрытыми прибыльными.',
         'Это независимые виртуальные опыты, не доходность банка. Глубина и проскальзывание не моделируются. Повторная покупка после ожидания связана с исходным сигналом. Закрытые фактические сделки — по времени выхода.'])
     v2=[s for s in rejected if s.get('quote_version')==2]
     if v2:

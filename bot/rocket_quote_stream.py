@@ -38,7 +38,7 @@ class QuoteIngestQueue:
                 with self.stream._lock:
                     affected = set(self.stream._symbols)
                 for previous_kind, previous_payload, _ in self.pending:
-                    if previous_kind in ('gap', 'delay'):
+                    if previous_kind == 'delay' or previous_kind.startswith('gap'):
                         affected.update(previous_payload)
                     elif isinstance(previous_payload, dict):
                         data = previous_payload.get('data', previous_payload)
@@ -64,18 +64,22 @@ class QuoteIngestQueue:
                     return
                 kind, payload, at = self.pending.popleft()
             try:
-                if kind == 'gap':
+                if kind.startswith('gap'):
+                    family = kind.partition(':')[2] or 'all'
                     for symbol in payload:
-                        self.gap_at[symbol] = max(at, self.gap_at.get(symbol, at))
-                    self.stream.interrupted(payload, at)
+                        key = (family, symbol)
+                        self.gap_at[key] = max(at, self.gap_at.get(key, at))
+                    self.stream.channel_interrupted(family, payload, at)
                 elif kind == 'delay':
                     self.stream.delayed(payload, at)
                 else:
                     item = payload if isinstance(payload, dict) else json.loads(payload)
                     data = item.get('data', item)
                     symbol = str(data.get('s') or item.get('stream', '').split('@')[0]).upper()
+                    family = {'aggTrade': 'trades', 'depthUpdate': 'depth'}.get(data.get('e'), 'quotes')
                     # A different channel may enqueue an older frame after a gap.
-                    if at < self.gap_at.get(symbol, -math.inf):
+                    if at < max(self.gap_at.get(('all', symbol), -math.inf),
+                                self.gap_at.get((family, symbol), -math.inf)):
                         continue
                     self.stream.ingest(item, at)
                 with self.ready:
@@ -121,7 +125,8 @@ class RocketQuoteStream:
         self._ingest_worker = None
         self._stats = dict(book_quotes=0, depth_quotes=0, reconnects=0,
                            connected=False, last_quote_at=0.0, invalid_messages=0,
-                           version='rocket-quotes-v14-idle-heartbeat', subscription_reconciliations=0,
+                           version='rocket-quotes-v15-channel-gaps', subscription_reconciliations=0,
+                           quote_gap_markers=0, quote_delay_markers=0, flow_gap_markers=0,
                            control_timeouts=0, unmatched_replies=0, wrapped_replies=0, idle_liveness_checks=0,
                            stale_data_messages=0, max_event_lag_seconds=0.,
                            subscription_replies=0, subscription_ack_max_seconds=0.,
@@ -320,10 +325,22 @@ class RocketQuoteStream:
         at = time.time() if at is None else at
         with self._lock:
             for symbol in symbols:
+                self._stats['quote_gap_markers'] += 1
                 if len(self._gaps) == self._gaps.maxlen:
                     self._overflow = True
                 self._gaps.append((at, symbol))
                 self._updates.pop(symbol, None)
+
+    def channel_interrupted(self, family, symbols, at=None):
+        # Subclasses that collect independent trade/depth channels can keep a
+        # continuous price-only path while invalidating their flow snapshots.
+        self.interrupted(symbols, at)
+
+    def queue_channel_interruption(self, family, symbols, at):
+        if self._ingest_worker is None:
+            self.channel_interrupted(family, symbols, at)
+        else:
+            self._ingest_worker.put('gap:' + family, set(symbols), at)
 
     def drain_quotes(self):
         with self._lock:
@@ -348,6 +365,7 @@ class RocketQuoteStream:
         at = time.time() if at is None else at
         with self._lock:
             for symbol in symbols:
+                self._stats['quote_delay_markers'] += 1
                 if len(self._gaps) == self._gaps.maxlen:
                     self._overflow = True
                 self._gaps.append((at, symbol))

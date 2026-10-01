@@ -222,10 +222,14 @@ def format_card(card):
             lines.append(f"Правило выхода обновлено: {utc_stamp(policy['policy_changed_at'])}; прежние условия сохранены в данных отчёта.")
     if policy and policy.get('protect_steps'):
         lines.append('Ступени защиты: достигнут +1% → защищаем +1%; достигнут +2% → защищаем +2%.')
+    if card.get('peak_before_exit_percent') is not None:
+        label = 'до выхода' if card['closed_at'] is not None else 'в открытой позиции'
+        lines.append(f"Максимум по журналу позиции {label}: {card['peak_before_exit_percent']:+.2f}%.")
     path=card.get('path_summary',{})
     if path.get('count'):
         quality='наблюдаемый путь' if path['status']=='complete_observed' else 'НЕПОЛНЫЙ путь'
-        lines.append(f"От покупки ({quality}): минимум {path['low_from_entry_pct']:+.2f}%, максимум {path['high_from_entry_pct']:+.2f}%; котировок {path['count']}. Поминутный путь сохранён в данных отчёта.")
+        scope = 'От покупки до конца наблюдения, включая время после выхода' if card['closed_at'] is not None else 'От покупки до текущего наблюдения'
+        lines.append(f"{scope} ({quality}): минимум {path['low_from_entry_pct']:+.2f}%, максимум {path['high_from_entry_pct']:+.2f}%; котировок {path['count']}. Поминутный путь сохранён в данных отчёта.")
     if card['closed_at'] is None:
         return '\n'.join(lines+['Позиция ещё открыта.'])
     if 'exit_price' not in card:
@@ -373,7 +377,6 @@ class RocketPathWorker:
         db.commit()
         last_refresh=last_cards=0
         batch=RetainedBidBatch()
-        enqueued=set()
         previous_drain=time.time()
         pending_probes=[]
         pending_acks=[]
@@ -425,14 +428,6 @@ class RocketPathWorker:
                     if now-last_cards>=60:
                         for card in cards(db,now,100):
                             db.execute('INSERT OR REPLACE INTO rocket_trade_cards VALUES(?,?,?)',(card['position_id'],now,json.dumps(card)))
-                            for minutes in (20,60):
-                                key=(card['position_id'],minutes)
-                                if card['opened_at'] < started or card['closed_at'] is None or now < card['closed_at']+minutes*60:
-                                    continue
-                                delivered=db.execute('SELECT 1 FROM rocket_card_deliveries WHERE position_id=? AND minutes=?',key).fetchone()
-                                if not delivered and key not in enqueued:
-                                    self.notifications.put((key, f'Наблюдение после выхода: {minutes} минут\n'+format_card(card)))
-                                    enqueued.add(key)
                         db.commit()
                         prune_bid_paths(db, now-8*86400)
                         last_cards=now

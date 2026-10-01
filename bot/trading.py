@@ -180,13 +180,6 @@ class TradingIntelligenceSummary:
         if not self.closed_positions:
             return "🧠 Разбор сделок: закрытые позиции пока не накоплены."
         factor = "нет убытков" if self.profit_factor is None else f"{self.profit_factor:.2f}"
-        variants = {
-            "наша 50/50": self.actual_pnl_usdt,
-            "всё на +0,7%": self.target_0_7_pnl_usdt,
-            "всё на +1%": self.target_1_pnl_usdt,
-            "всё на +1,5%": self.target_1_5_pnl_usdt,
-        }
-        winner = max(variants, key=variants.get)
         bucket_lines = []
         for bucket in self.entry_buckets:
             win_rate = (
@@ -195,7 +188,7 @@ class TradingIntelligenceSummary:
             bucket_lines.append(
                 f"• {bucket.label}: {bucket.trades} сделок, в плюсе "
                 f"{win_rate:.1f}%, PnL {bucket.pnl_usdt:+.3f}; "
-                f"цели 0,7/1%: {bucket.first_target_hits}/{bucket.second_target_hits}."
+                f"достигли +0,7/+1% до выхода: {bucket.first_target_hits}/{bucket.second_target_hits}."
             )
         return (
             "🧠 Расширенный разбор сделок\n"
@@ -207,12 +200,12 @@ class TradingIntelligenceSummary:
             f"Средняя максимальная просадка: {self.average_mae_percent:+.2f}%.\n"
             f"Средняя отданная часть движения: "
             f"{self.average_giveback_percent:.2f} п.п.\n"
-            "Параллельный пересчёт на тех же сигналах:\n"
-            f"• наша 50/50: {self.actual_pnl_usdt:+.3f} USDT;\n"
+            "Архивные упрощённые оценки по редким ценовым снимкам:\n"
+            f"• фактические сделки: {self.actual_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +0,7%: {self.target_0_7_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +1%: {self.target_1_pnl_usdt:+.3f} USDT;\n"
             f"• всё на +1,5%: {self.target_1_5_pnl_usdt:+.3f} USDT.\n"
-            f"Лучший вариант за период: {winner}.\n"
+            "Эти оценки используют прежний общий стоп, не учитывают полный bid-путь и не определяют лучший выход.\n"
             "\nВходы по росту за 5 минут:\n"
             + "\n".join(bucket_lines)
         )
@@ -942,8 +935,8 @@ class PaperTrader:
                     mfe,
                     actual_pnl,
                     actual_return,
-                    bool(row["take_1_done"]),
-                    bool(row["take_2_done"]),
+                    mfe + 1e-9 >= 0.7,
+                    mfe + 1e-9 >= 1.0,
                     str(row["close_reason"] or "закрыта"),
                 )
             )

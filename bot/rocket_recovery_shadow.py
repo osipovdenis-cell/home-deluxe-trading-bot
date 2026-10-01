@@ -2,8 +2,9 @@
 import json
 import math
 from bot.recording_gaps import read_gaps
+from bot.exit_policy import protective_floor
 
-VERSION = 'recovery-two-windows-v2-entry-C'
+VERSION = 'recovery-two-windows-v3-frozen-exits'
 WAIT, HORIZON, MAX_GAP = 90, 3600, 5
 
 
@@ -40,7 +41,7 @@ def new_leg(at,ask,bid):
                 last_at=at,last_bid=bid,net=None)
 
 
-def advance(leg,points,now,end,stop,cost):
+def advance(leg,points,now,end,stop,cost,policy=None):
     if leg['status']!='OPEN':
         return
     for at,bid in points:
@@ -52,8 +53,14 @@ def advance(leg,points,now,end,stop,cost):
         leg.update(last_at=at,last_bid=bid,peak=max(leg['peak'],bid),trough=min(leg['trough'],bid))
         change=(bid/leg['entry']-1)*100
         peak=(leg['peak']/leg['entry']-1)*100
-        reason=('STOP' if change<=-stop else
-                'TRAIL' if peak>=1 and change+1e-9<peak and change<=max(1,peak-1) else None)
+        activation = policy['protect_percent'] if policy else 1.
+        floor = protective_floor(policy, peak) if policy else 1.
+        level = peak - (policy['trail_pp'] if policy else 1.)
+        if floor is not None:
+            level = max(floor, level)
+        exit_stop = policy['stop_percent'] if policy else stop
+        reason=('STOP' if change<=-exit_stop+1e-9 else
+                'TRAIL' if peak+1e-9>=activation and change+1e-9<peak and change<=level+1e-9 else None)
         if reason:
             leg.update(status='CLOSED',reason=reason,exited=at,net=change-cost)
             return
@@ -80,6 +87,12 @@ class RecoveryShadow:
         if not row:
             return
         symbol,start,ask,cost=row
+        # Read the position's contract, never today's global stop for an anomaly.
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(paper_positions)')}
+        policy = None
+        if 'exit_policy_json' in columns:
+            saved = self.db.execute('SELECT exit_policy_json FROM paper_positions WHERE id=?', (ident,)).fetchone()[0]
+            policy = json.loads(saved) if saved else None
         bid=probe.get('entry_bid')
         if not all(finite(v) for v in (start,ask,bid,cost,self.stop)) or min(ask,bid,self.stop)<=0 or cost<0:
             return
@@ -87,7 +100,7 @@ class RecoveryShadow:
         dynamics=probe.get('before_dynamics') or {}
         immediate=(w.get('complete') is True and w.get('passed') is True
                    and probe.get('fresh') is True and probe.get('allowed') is True)
-        state=dict(symbol=symbol,start=start,stop=self.stop,cost=cost,
+        state=dict(symbol=symbol,start=start,stop=self.stop,cost=cost,exit_policy=policy,
                    signal_price=probe.get('signal_price') or ask,probe=probe,
                    market=dict(btc_60=dynamics.get('btc_change_60s_percent'),
                                btc_300=dynamics.get('btc_change_300s_percent'),
@@ -148,7 +161,7 @@ class RecoveryShadow:
                     points=self.db.execute("""SELECT timestamp,bid FROM rocket_bid_path
                         WHERE symbol=? AND timestamp>? AND timestamp<=? ORDER BY timestamp""",
                         (s['symbol'],leg['last_at'],min(now,end))).fetchall()
-                    advance(leg,points,now,end,s['stop'],s['cost'])
+                    advance(leg,points,now,end,s['stop'],s['cost'],s.get('exit_policy'))
             done=now>=end or all(s[k]['status'] in ('CLOSED','NO_ENTRY','INCOMPLETE') for k in ('A','B'))
             updates.append((now if done else None,json.dumps(s),ident))
         # All provider/network work above must finish before acquiring a writer.
@@ -194,7 +207,7 @@ def report_text(db):
     lines.append(f"Б пропустил прибыльных А: {d['missed_winners']} на +{d['missed_profit']:.3f}; убыточных: {d['avoided_losers']} на −{d['avoided_loss']:.3f} USDT.")
     weak=d['weak_market']
     lines.append(f"BTC за 5м <0 и ширина рынка <50%: пар {d['weak_market_pairs']}; закрытые А {weak['A']['realized']:+.3f}, Б {weak['B']['realized']:+.3f} USDT. Это разрез анализа, не торговый фильтр.")
-    lines.extend(['Только новые фактические входы ракет. По 50 USDT, общий горизонт 60 мин от А; одинаковые стоп и комиссии зафиксированы на старте. Защита +1%, откат 1 п.п., вся позиция.',
+    lines.extend(['Только новые фактические входы ракет. По 50 USDT, общий горизонт 60 мин от А; одинаковые стоп и комиссии зафиксированы на старте. Правило выхода сохранено при создании пары: аномальные −7%/активация +8%/откат 1 п.п.; обычные лидеры — ступени +1%/+2%. Вся позиция. Старые пары не пересчитаны.',
                   'Вход Б по доступному ask, выходы обеих веток по записанному bid. Открытые оценки не считаются закрытой прибылью. Нет моделирования глубины, проскальзывания и занятости банка.',
                   'Пробелы bid >5с или проверки ожидания >2с исключают затронутые пары. BTC/ширина рынка — снимок исходного анализа; нет данных не значит слабый рынок. Автовключения нет.'])
     return '\n'.join(lines)

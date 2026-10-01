@@ -38,6 +38,8 @@ class ShardedMarketStream:
                 owner.ingest(payload, received_at)
             def interrupted(self, symbols, at=None):
                 owner.interrupted(symbols, at)
+            def channel_interrupted(self, family, symbols, at=None):
+                owner.channel_interrupted(family, symbols, at)
             def delayed(self, symbols, at=None):
                 owner.delayed(symbols, at)
             def timely_message(self, message, received_at):
@@ -56,7 +58,7 @@ class ShardedMarketStream:
                 at = time.time() if at is None else at
                 uncovered = [s for s in symbols if kind != 'quotes' or not shards.quote_peer_ready(self, s, at)]
                 if uncovered:
-                    super().queue_interruption(uncovered, at)
+                    super().queue_channel_interruption(kind, uncovered, at)
         part = Partition()
         part.max_symbols = owner.max_symbols
         part.require_clock = kind == 'quotes'

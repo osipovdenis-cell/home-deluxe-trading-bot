@@ -50,14 +50,14 @@ class DiagnosticFlowStream(RocketQuoteStream):
                 if event=='aggTrade':
                     price,quantity=float(data['p']),float(data['q'])
                     if not all(math.isfinite(v) and v>0 for v in (price,quantity,price*quantity)):
-                        self.interrupted([symbol],now)
+                        self.channel_interrupted('trades',[symbol],now)
                         return
                     ident=int(data['a'])
                     if ident<=self._trade_ids.get(symbol,-1):
                         return
                     previous=self._trade_ids.get(symbol)
                     if previous is not None and ident != previous+1:
-                        self.interrupted([symbol],now)
+                        self.channel_interrupted('trades',[symbol],now)
                     self._trade_ids[symbol]=ident
                 self.flow.ingest(data,now)
             else:
@@ -72,6 +72,19 @@ class DiagnosticFlowStream(RocketQuoteStream):
             for symbol in symbols:
                 self._trade_ids.pop(symbol,None)
                 self._last_gaps[symbol]=at
+
+    def channel_interrupted(self, family, symbols, at=None):
+        if family not in ('trades', 'depth'):
+            return self.interrupted(symbols, at)
+        at = time.time() if at is None else at
+        symbols = tuple(symbols)
+        with self._ingest_lock:
+            self.flow.interrupted(symbols, at)
+            with self._lock:
+                self._stats['flow_gap_markers'] += len(symbols)
+            for symbol in symbols:
+                self._trade_ids.pop(symbol, None)
+                self._last_gaps[symbol] = at
 
     def entry_probe(self, symbol, now):
         symbol=symbol.upper()

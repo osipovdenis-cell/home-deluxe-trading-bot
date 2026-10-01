@@ -60,7 +60,7 @@ class DailyTests(unittest.TestCase):
         self.seed()
         self.m.tick(103,[(100,'TEST',100,100),(103,'TEST',102,102)],gaps=[(101,'TEST')])
         self.assertEqual(self.state()['leg']['status'],'INCOMPLETE')
-        self.assertEqual(self.state()['leg']['reason'],'разрыв соединения котировок')
+        self.assertEqual(self.state()['leg']['reason'],'зафиксирован пропуск или задержка котировок')
 
     def test_exit_before_disconnect_remains_known(self):
         self.seed()

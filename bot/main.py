@@ -1,7 +1,6 @@
 import time
 import math
 import sqlite3
-from queue import Empty
 from types import SimpleNamespace
 
 import httpx
@@ -227,7 +226,7 @@ def process_signal(
                 if daily is not None:
                     daily.capture(signal.symbol, now, time.time(), reason, opened,
                                   settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
-                                  volume_experiment=diagnostics.get('volume_experiment'))
+                                  volume_experiment=diagnostics.get('volume_experiment'), signal_kind=signal.kind)
                 audit.rocket_spread.record_gate(time.time(), signal.symbol, "решение входа", reason)
                 if timing is not None:
                     timing.send('decision', token, time.time(), reason, opened)
@@ -916,60 +915,7 @@ def main() -> None:
             f"{market.eligible_count} прошли фильтр)"
             if settings.scan_all_usdt else ", ".join(settings.watch_symbols)
         )
-        telegram.send(
-            chat_id,
-            "✅ Home Deluxe Trading Bot запущен.\n"
-            "Исполнение: Binance Spot Testnet.\n"
-            f"Тестовая торговля разрешена: {'да' if account.get('canTrade') else 'нет'}.\n"
-            "Реальные деньги не используются.\n"
-            f"Мониторинг: {monitoring}.\n"
-            "Поток рынка: примерно раз в 1 секунду.\n"
-            "Открытые позиции: лучшая цена продажи в реальном времени.\n"
-            f"Telegram-сигналы: "
-            f"{'включены' if settings.telegram_signal_alerts_enabled else 'скрыты; только сделки и отчёты'}.\n"
-            f"Ранний сигнал: рост от {settings.early_threshold_percent:g}% за "
-            f"{settings.pump_window_seconds // 60} мин.\n"
-            f"Сильный сигнал: от {settings.pump_threshold_percent:g}%.\n"
-            "Фильтр направления: только монеты с ростом за последние 12 ч "
-            "по скользящей статистике Binance "
-            f"({sum(value > 0 for value in market.change_12h_percent.values())} "
-            "сейчас в зелёной зоне).\n"
-            f"Подтверждение входа: {settings.entry_confirmation_seconds} сек; "
-            "объём, покупки, стакан, рынок и история монеты.\n"
-            "Обучение: включено; результат каждого импульса через 15 минут "
-            "влияет на следующие входы.\n"
-            f"Холодный старт: без истории тестовый BUY от "
-            f"{settings.paper_min_ai_score}/100 после всех фильтров; "
-            "при плохой истории — только исключительный BUY от 85/100.\n"
-            "Ожидание 20 секунд: ведётся теневой контроль пропущенной прибыли.\n"
-            "Второй шанс: после отказа ещё 90 секунд наблюдения; повторный "
-            "анализ только при новом ускорении.\n"
-            "Крупный поток: исполненные крупные покупки/продажи за 15/60 сек "
-            "и концентрация стенок стакана; пока теневой фактор.\n"
-            "Order flow лидеров: непрерывные сделки и стакан за 5/15/60 сек; "
-            "CVD, ускорение и эффективность покупок сохраняются в обучение.\n"
-            "Вероятностная модель: теневой прогноз по прошлым исходам; "
-            "тренд 15 мин/1 ч/4 ч; сделки сама не открывает.\n"
-            "Финальный фильтр ракет В: рост за 5/15/60с, покупки за 5с выше продаж, "
-            "спред не шире снимка анализа. При отказе — короткое ожидание без нового AI/20с.\n"
-            "Лидеры: топ-5 роста за 24 ч и одиночный импульс от 3%; "
-            "повторный вход ищется после отката и нового ускорения; AI оценивает, "
-            "но после рыночных фильтров не блокирует тестовый вход.\n"
-            "Единый отчёт: каждые 12 ч, одним файлом; "
-            "команды /status, /ai, /learning.\n"
-            + (f"Тестовые сделки: банк {settings.paper_starting_balance_usdt:g} USDT, "
-               f"до {settings.paper_max_open_positions} позиций: обычный "
-               "скальпинг полностью выключен, включая аналитику и обучение; "
-               "все слоты отданы лидерам.\n"
-               "Новые аномальные ракеты: стоп −7%, защита после +8%, откат 1 п.п.; "
-               "наблюдение всю позицию и 60 мин после выхода.\n"
-               f"Остальные лидеры: стоп −{settings.paper_stop_loss_percent:g}%. "
-               "Держим 100%; новые обычные лидеры: после +1% защищаем +1%, после +2% защищаем +2% и "
-               "выходим при откате 1 п.п. от максимума.\n"
-               if trader else "Тестовые сделки: выключены.\n")
-            + f"ИИ-аналитик: {ai_status}.\nСуточный аудит: включён.",
-        )
-        print(f"Потоки рынка запущены. TELEGRAM_CHAT_ID={chat_id}", flush=True)
+        print(f"Потоки рынка запущены. Мониторинг: {monitoring}. ИИ: {ai_status}.", flush=True)
         last_market = last_audit = last_fallback = 0.0
         last_12h_refresh = time.time()
         last_command_poll = time.time()
@@ -989,16 +935,6 @@ def main() -> None:
                         audit.record_error(entry_wait_worker.errors.get(),now)
                     while not entry_wait_worker.messages.empty():
                         telegram.send(chat_id,entry_wait_worker.messages.get())
-                if rocket_path_worker is not None:
-                    while True:
-                        try: key,card_text=rocket_path_worker.notifications.get_nowait()
-                        except Empty: break
-                        try:
-                            telegram.send(chat_id,card_text)
-                            rocket_path_worker.acknowledge(*key)
-                        except httpx.HTTPError:
-                            rocket_path_worker.notifications.put((key,card_text))
-                            break
                 if position_worker is not None:
                     exit_texts, exit_errors = position_worker.drain()
                     for error in exit_errors:
@@ -1047,7 +983,8 @@ def main() -> None:
                                 reason = 'очередь ракет занята или монета уже обрабатывается'
                                 audit.record_entry_rejection(now, signal.symbol, reason, None, None)
                                 daily_worker.capture(signal.symbol, now, time.time(), reason, False,
-                                    settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent)
+                                    settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
+                                    signal_kind=signal.kind)
                     for rejected_at, rejected_symbol, reason in (
                         market.drain_confirmation_rejections()
                     ):
@@ -1065,7 +1002,7 @@ def main() -> None:
                             daily_worker.capture(confirmation_event.symbol, confirmation_event.started_at,
                                 time.time(), confirmation_event.reason, False,
                                 settings.paper_stop_loss_percent, settings.estimated_round_trip_cost_percent,
-                                source='confirmation')
+                                source='confirmation', signal_kind=confirmation_event.signal_kind)
                             audit.rocket_spread.record_gate(now, confirmation_event.symbol,
                                 "подтверждение", confirmation_event.reason)
                         confirmation_context = None
