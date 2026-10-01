@@ -115,13 +115,14 @@ class StructureStream(RocketQuoteStream):
             if not all(math.isfinite(v) and v > 0 for v in (price, quantity, price*quantity)) or not isinstance(data['m'], bool):
                 raise ValueError('invalid trade')
         except (KeyError, TypeError, ValueError, OverflowError):
-            self.interrupted([symbol], at)
+            self.channel_interrupted('trades', [symbol], at)
             return
         with self._lock:
             if symbol not in self._symbols or ident <= self.trade_ids.get(symbol, -1):
                 return
             previous = self.trade_ids.get(symbol)
             if previous is not None and ident != previous+1:
+                self._stats['flow_gap_markers'] += 1
                 self.bars.pop(symbol, None)
                 self.first_trade.pop(symbol, None)
                 self.trades.pop(symbol, None)
@@ -140,6 +141,15 @@ class StructureStream(RocketQuoteStream):
         super().interrupted(symbols, at)
         with self._lock:
             for symbol in symbols:
+                for cache in (self.bars, self.first_trade, self.trade_ids, self.trades):
+                    cache.pop(symbol, None)
+
+    def channel_interrupted(self, family, symbols, at=None):
+        if family not in ('trades', 'depth'):
+            return self.interrupted(symbols, at)
+        with self._lock:
+            for symbol in symbols:
+                self._stats['flow_gap_markers'] += 1
                 for cache in (self.bars, self.first_trade, self.trade_ids, self.trades):
                     cache.pop(symbol, None)
 

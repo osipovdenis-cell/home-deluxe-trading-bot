@@ -86,7 +86,7 @@ class StructureTests(unittest.TestCase):
             for ident,net,opened,status in [('win',.8,False,'CLOSED'),('loss',-1.2,False,'CLOSED'),
                                            ('bought',99,True,'CLOSED'),('gap',None,False,'INCOMPLETE')]:
                 model.capture(dict(id=ident,symbol='TEST',signal_at=300,at=300,stop=1.,cost=.2,
-                                   source='signal',reason='volume',opened=opened,structure=snap))
+                                   source='signal',reason='volume',opened=opened,structure=snap,signal_kind='лидер'))
                 row=model.active[ident];row['leg']=dict(status=status,net=net)
                 model.save(ident,row)
             ledger.commit()

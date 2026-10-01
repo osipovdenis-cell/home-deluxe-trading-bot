@@ -24,7 +24,7 @@ class ReportCollector:
         self.messages = []
 
     def send(self, chat_id, text):
-        if not text.startswith('⏳'):
+        if not text.startswith('⏳') and text not in self.messages:
             self.messages.append(text)
 
 

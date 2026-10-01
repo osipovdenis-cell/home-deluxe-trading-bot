@@ -300,7 +300,7 @@ class PaperTraderTests(unittest.TestCase):
                 self.assertGreater(intelligence.target_0_7_pnl_usdt, 0)
                 self.assertGreater(intelligence.target_1_pnl_usdt, 0)
                 self.assertGreater(intelligence.target_1_5_pnl_usdt, 0)
-                self.assertIn("Параллельный пересчёт", intelligence.telegram_text())
+                self.assertIn("Архивные упрощённые оценки", intelligence.telegram_text())
                 self.assertIn("всё на +1,5%", intelligence.telegram_text())
                 self.assertIn("от 3%", intelligence.telegram_text())
                 details = "\n".join(intelligence.trade_breakdown_texts())

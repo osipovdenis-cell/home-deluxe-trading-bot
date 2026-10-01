@@ -15,8 +15,9 @@ from bot.rocket_diagnostic_flow import DiagnosticFlowStream
 from bot.rocket_entry_guard import fading_buy_guard
 from bot.rocket_entry_wait import RocketEntryWaitWorker
 from bot.rocket_recovery_shadow import new_leg, advance
+from bot.exit_policy import new_policy
 
-VERSION = 'rocket-timing-v4-entry-C'
+VERSION = 'rocket-timing-v5-frozen-exits'
 SUFFIX = '.rocket_timing.sqlite3'
 WAIT, HORIZON = 90, 3600
 
@@ -53,7 +54,7 @@ class TimingModel:
         self.db = db
         schema(db)
 
-    def begin(self, symbol, now, signal_at, signal_price, stop, cost):
+    def begin(self, symbol, now, signal_at, signal_price, stop, cost, signal_kind=None):
         if not all(math.isfinite(x) for x in (now, signal_at, signal_price, stop, cost)) or min(signal_price, stop) <= 0 or cost < 0:
             return None
         if self.db.execute("SELECT 1 FROM rocket_timing_pairs WHERE version=? AND symbol=? AND json_extract(payload,'$.signal_at')=?",
@@ -62,6 +63,8 @@ class TimingModel:
         s = dict(symbol=symbol, signal_at=signal_at, start=now, signal_price=signal_price,
                  stop=stop, cost=cost, approved=None, last_check=None, snapshots=[],
                  A=dict(status='PENDING',net=None), B=dict(status='PENDING',net=None))
+        if signal_kind:
+            s['exit_policy'] = new_policy(signal_kind, stop, cost)
         if len(self.states()) >= 20:
             for k in ('A','B'):
                 s[k].update(status='INCOMPLETE',reason='лимит 20 наблюдений')
@@ -120,9 +123,9 @@ class TimingModel:
             for k in ('A','B'):
                 if overflow and s[k]['status'] in ('WAIT','OPEN'):
                     s[k].update(status='INCOMPLETE',reason='переполнение буфера котировок')
-                advance(s[k],rows,now if gap is None else gap,end,s['stop'],s['cost'])
+                advance(s[k],rows,now if gap is None else gap,end,s['stop'],s['cost'],s.get('exit_policy'))
                 if gap is not None and s[k]['status'] in ('WAIT','OPEN','INCOMPLETE'):
-                    s[k].update(status='INCOMPLETE',reason='разрыв соединения котировок')
+                    s[k].update(status='INCOMPLETE',reason='зафиксирован пропуск или задержка котировок')
             waiting = [k for k in ('A','B') if s[k]['status']=='WAIT']
             if waiting:
                 p = probes.get(ident, probes.get(s['symbol'])) or {}
@@ -172,7 +175,7 @@ def apply_commands(model, jobs, pending):
         token=args[0]
         if action=='begin':
             _,signal,signal_at,received,stop,cost=args
-            ident=model.begin(signal.symbol,received,signal_at,signal.price,stop,cost)
+            ident=model.begin(signal.symbol,received,signal_at,signal.price,stop,cost,getattr(signal,'kind',None))
             updated[token]=(ident,signal,None,None)
         elif token in updated:
             ident,signal,context,dynamics=updated[token]
@@ -396,6 +399,6 @@ def report_text(db, now=None):
     lines.extend([f"Разница B−A с оценкой открытых: {totals['B']-totals['A']:+.3f} USDT.",
         f"B пропустил прибыльных A: {sum(s['A']['net']>0 for s in skipped)} на +{sum(max(0,s['A']['net'])*.5 for s in skipped):.3f}; убыточных: {sum(s['A']['net']<0 for s in skipped)} на −{-sum(min(0,s['A']['net'])*.5 for s in skipped):.3f} USDT.",
         'Отдельный поток сделок и bid/ask, проверка каждые 0,2с. Пропуск проверки >2с, bid >5с или неполные окна исключают пару.',
-        'По 50 USDT; фактические bid/ask, комиссии и стоп фиксируются на старте; защита +1%, откат 1 п.п.; горизонт 60 мин от допуска.',
+        'По 50 USDT; фактические bid/ask, комиссии и стоп фиксируются на старте; правило выхода сохранено по типу сигнала: аномальные −7%/активация +8%/откат 1 п.п., обычные ступени +1%/+2%; горизонт 60 мин от допуска, незакрытые позиции только оцениваются. Старые пары не пересчитаны.',
         'Только новые кандидаты, дошедшие до обработки сигнала; отдельная пара на каждый сигнал, повторы одного сигнала исключены. Не все лидеры Binance. Лимиты банка, глубина и проскальзывание не моделируются. A — модель правил, не фактическая сделка. На торговлю не влияет.'])
     return '\n'.join(lines)

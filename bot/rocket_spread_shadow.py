@@ -55,7 +55,7 @@ class SpreadShadow(RocketComparison):
 
     def report(self, now):
         lines = ['⚖️ Стабильный спред ракет — только тень',
-                 'A: спред сокращается. B: также допускается неизменный спред. Лимит 25 б.п. сохранён.']
+                 'A: спред сокращается. B: также допускается неизменный спред. Лимит 25 б.п. сохранён. Прежняя модель выхода с защитой +1%; не проверка новых правил аномальных ракет.']
         rows = self._execute('''SELECT e.id,e.phase,e.finished,l.variant,l.status,l.net
             FROM rocket_ab_episodes e JOIN rocket_ab_legs l ON l.episode=e.id
             WHERE e.version=?''', (self.VERSION,)).fetchall()

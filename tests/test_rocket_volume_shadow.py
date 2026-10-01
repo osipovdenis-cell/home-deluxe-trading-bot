@@ -155,7 +155,7 @@ class VolumePathTests(unittest.TestCase):
             ledger=sqlite3.connect(path+SUFFIX);m=DailyModel(ledger)
             for at in (100,90100):
                 m.capture(dict(id=str(at),symbol='X',signal_at=at-10,at=at,stop=1,cost=.2,
-                    source='signal',opened=False,volume_experiment=experiment(at)))
+                    source='signal',opened=False,volume_experiment=experiment(at),signal_kind='лидер'))
             ledger.commit();DailyModel(ledger);ledger.close()
             d=daily_data(main,90300)
             self.assertEqual(len(d['episodes']),1)

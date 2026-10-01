@@ -84,10 +84,12 @@ class FlowContinuityTests(unittest.TestCase):
         transport.interrupted(['X'], 162)
         self.assertFalse(s.entry_probe('X', 162.1)['fresh'])
 
-    def test_diagnostic_missing_trade_marks_path_and_resets_flow(self):
+    def test_diagnostic_missing_trade_preserves_price_path_and_resets_flow(self):
         s = DiagnosticFlowStream(); s.set_symbols(['X'])
         trade(s, 100, 1); trade(s, 101, 3)
-        self.assertEqual(s.drain()[2], [(101, 'X')])
+        self.assertEqual(s.drain()[2], [])
+        self.assertEqual(s.health()['flow_gap_markers'], 1)
+        self.assertFalse(s.entry_probe('X',101.1)['fresh'])
         self.assertEqual(len(s.flow._trades['X']), 1)
 
 

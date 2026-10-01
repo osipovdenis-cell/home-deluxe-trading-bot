@@ -12,6 +12,7 @@ def build_anomaly_card(db, row, now):
         actual_pnl_usdt=row['realized_pnl_usdt'],actual_net_percent=row['realized_pnl_usdt']/row['position_usdt']*100,
         exit_policy=policy_for(row),windows={},comparisons={},source='bid',
         status='open' if closed is None else ('observing' if now<closed+3600 else 'finished'))
+    card['peak_before_exit_percent'] = (row['highest_price']/entry-1)*100
     saved=db.execute('SELECT payload FROM rocket_trade_cards WHERE position_id=?',(row['id'],)).fetchone() if exists(db,'rocket_trade_cards') else None
     old=json.loads(saved[0]) if saved else {}
     buckets=old.get('lifetime_minute_path',[])
